@@ -20,6 +20,9 @@
     "format": "oxfmt",
     "check": "oxlint && oxfmt --check"
   },
+  "dependencies": {
+    "commander": "^15.0.0"
+  },
   "devDependencies": {
     "bun-types": "^1.3.14",
     "oxfmt": "^0.60.0",

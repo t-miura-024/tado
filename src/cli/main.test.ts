@@ -1,7 +1,6 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { parseCli } from "./main.ts";
 import type { InitResult } from "../types.ts";
 
 const TEST_BASE_DIR = path.join(path.dirname(__filename), "__test_cli_sessions__");
@@ -16,58 +15,6 @@ function cleanup(baseDir: string): void {
 
 afterEach(() => {
   cleanup(TEST_BASE_DIR);
-});
-
-describe("cli parsing", () => {
-  it("should parse init command", () => {
-    const r = parseCli(["init", "--workflow", "/path/to/workflow.ts"]);
-    expect(r.command).toBe("init");
-    expect(r.workflow).toBe("/path/to/workflow.ts");
-  });
-
-  it("should parse next command", () => {
-    const r = parseCli(["next", "--session", "abc123"]);
-    expect(r.command).toBe("next");
-    expect(r.session).toBe("abc123");
-  });
-
-  it("should parse report command", () => {
-    const r = parseCli(["report", "--session", "abc123"]);
-    expect(r.command).toBe("report");
-    expect(r.session).toBe("abc123");
-  });
-
-  it("should parse status command", () => {
-    const r = parseCli(["status", "--session", "abc123"]);
-    expect(r.command).toBe("status");
-    expect(r.session).toBe("abc123");
-  });
-
-  it("should parse --base-dir option", () => {
-    const r = parseCli(["init", "--workflow", "wf.ts", "--base-dir", "/custom/dir"]);
-    expect(r.command).toBe("init");
-    expect(r.baseDir).toBe("/custom/dir");
-  });
-
-  it("should parse --session for init", () => {
-    const r = parseCli(["init", "--workflow", "wf.ts", "--session", "my-id"]);
-    expect(r.session).toBe("my-id");
-  });
-
-  it("should show help with --help", () => {
-    const r = parseCli(["--help"]);
-    expect(r.help).toBe(true);
-  });
-
-  it("should show help with -h", () => {
-    const r = parseCli(["-h"]);
-    expect(r.help).toBe(true);
-  });
-
-  it("should show help when no command", () => {
-    const r = parseCli([]);
-    expect(r.command).toBe("");
-  });
 });
 
 describe("cli integration", () => {
@@ -190,7 +137,20 @@ describe("cli integration", () => {
     await proc.exited;
 
     expect(proc.exitCode).toBe(1);
-    expect(err).toContain("Error");
+    expect(err).toContain("error:");
+    expect(err).toContain("--workflow");
+  });
+
+  it("should error on unknown command", async () => {
+    const proc = Bun.spawn(["bun", "run", CLI_PATH, "bogus"], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const err = await new Response(proc.stderr).text();
+    await proc.exited;
+
+    expect(proc.exitCode).toBe(1);
+    expect(err).toContain("error:");
   });
 
   it("should show help", async () => {
