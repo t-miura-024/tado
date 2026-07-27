@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { copySkills, ensureBun } from "./install.ts";
+import { cleanInstallArtifacts, copySkills, ensureBun } from "./install.ts";
 
 const TEST_DIR = path.join(os.tmpdir(), `tado-install-test-${Date.now()}`);
 
@@ -65,5 +65,42 @@ describe("copySkills", () => {
     fs.mkdirSync(path.join(TEST_DIR, "node_modules", "tado"), { recursive: true });
 
     expect(() => copySkills(TEST_DIR)).toThrow("SKILL.md not found in package");
+  });
+});
+
+describe("cleanInstallArtifacts", () => {
+  it("node_modules/tado, package.json, bun.lock を削除する", () => {
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+    fakePackage(TEST_DIR);
+    fs.writeFileSync(path.join(TEST_DIR, "package.json"), "{}");
+    fs.writeFileSync(path.join(TEST_DIR, "bun.lock"), "");
+
+    cleanInstallArtifacts(TEST_DIR);
+
+    expect(fs.existsSync(path.join(TEST_DIR, "node_modules", "tado"))).toBe(false);
+    expect(fs.existsSync(path.join(TEST_DIR, "package.json"))).toBe(false);
+    expect(fs.existsSync(path.join(TEST_DIR, "bun.lock"))).toBe(false);
+  });
+
+  it("削除対象が存在しなくてもエラーにならない", () => {
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+
+    expect(() => cleanInstallArtifacts(TEST_DIR)).not.toThrow();
+  });
+
+  it("skills ディレクトリ内の他のファイルは削除しない", () => {
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+    fakePackage(TEST_DIR);
+    fs.writeFileSync(path.join(TEST_DIR, "package.json"), "{}");
+    // 他のスキルディレクトリを配置
+    const otherSkill = path.join(TEST_DIR, "other-skill", "SKILL.md");
+    fs.mkdirSync(path.join(TEST_DIR, "other-skill"), { recursive: true });
+    fs.writeFileSync(otherSkill, "# other\n");
+
+    cleanInstallArtifacts(TEST_DIR);
+
+    expect(fs.existsSync(otherSkill)).toBe(true);
+    // node_modules 自体は残る（tado サブディレクトリのみ削除）
+    expect(fs.existsSync(path.join(TEST_DIR, "node_modules"))).toBe(true);
   });
 });
