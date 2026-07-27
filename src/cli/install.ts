@@ -23,17 +23,21 @@ export function ensureBun(): void {
 }
 
 /**
- * Remove stale install artifacts (node_modules/tado, package.json, bun.lock)
+ * Remove stale install artifacts (node_modules/tado, bun.lock)
  * from a skills directory so that `bun add` starts from a clean state.
  */
 export function cleanInstallArtifacts(skillsDir: string): void {
-  const targets = [
-    path.join(skillsDir, "node_modules", "tado"),
-    path.join(skillsDir, "package.json"),
-    path.join(skillsDir, "bun.lock"),
-  ];
+  const targets = [path.join(skillsDir, "node_modules", "tado"), path.join(skillsDir, "bun.lock")];
   for (const target of targets) {
     fs.rmSync(target, { recursive: true, force: true });
+  }
+}
+
+/** Write a minimal package.json if one does not already exist. */
+export function ensurePackageJson(skillsDir: string): void {
+  const pkgPath = path.join(skillsDir, "package.json");
+  if (!fs.existsSync(pkgPath)) {
+    fs.writeFileSync(pkgPath, '{"private":true}\n');
   }
 }
 
@@ -45,6 +49,7 @@ export function cleanInstallArtifacts(skillsDir: string): void {
 export async function performInstall(skillsDir: string): Promise<void> {
   fs.mkdirSync(skillsDir, { recursive: true });
   cleanInstallArtifacts(skillsDir);
+  ensurePackageJson(skillsDir);
 
   const addProc = Bun.spawn(["bun", "add", PACKAGE_SPEC], {
     cwd: skillsDir,
