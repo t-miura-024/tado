@@ -3,7 +3,9 @@ import * as path from "node:path";
 import * as clack from "@clack/prompts";
 import {
   SCOPES,
+  TOOLS,
   resolveSkillsDir,
+  isInstalled,
   getAvailableTools,
   getAvailableScopes,
   type ToolDef,
@@ -95,7 +97,14 @@ export async function installCommand(cwd: string = process.cwd()): Promise<void>
 
   const toolChoice = await clack.select<ToolDef>({
     message: "Which tool do you want to install tado for?",
-    options: availableTools.map((t) => ({ value: t, label: t.label })),
+    options: TOOLS.map((t) => {
+      const installed = getAvailableScopes(t, cwd).length === 0;
+      return {
+        value: t,
+        label: installed ? `\x1b[9m${t.label} (Installed)\x1b[29m` : t.label,
+        disabled: installed,
+      };
+    }),
   });
   if (clack.isCancel(toolChoice)) {
     clack.cancel("Installation cancelled.");
@@ -103,17 +112,18 @@ export async function installCommand(cwd: string = process.cwd()): Promise<void>
   }
 
   const tool = toolChoice;
-  const availableScopes = getAvailableScopes(tool, cwd);
 
-  if (availableScopes.length === 0) {
-    clack.outro(`${tool.label} is already installed in all scopes.`);
-    return;
-  }
-
-  const scopeOptions = SCOPES.filter((s) => availableScopes.includes(s.id));
   const scopeChoice = await clack.select<Scope>({
     message: "Which scope?",
-    options: scopeOptions.map((s) => ({ value: s.id, label: s.label })),
+    options: SCOPES.map((s) => {
+      const dir = resolveSkillsDir(tool, s.id, cwd);
+      const installed = isInstalled(dir);
+      return {
+        value: s.id,
+        label: installed ? `\x1b[9m${s.label} (Installed)\x1b[29m` : s.label,
+        disabled: installed,
+      };
+    }),
   });
   if (clack.isCancel(scopeChoice)) {
     clack.cancel("Installation cancelled.");
