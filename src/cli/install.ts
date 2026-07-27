@@ -23,11 +23,28 @@ export function ensureBun(): void {
 }
 
 /**
+ * Remove stale install artifacts (node_modules/tado, package.json, bun.lock)
+ * from a skills directory so that `bun add` starts from a clean state.
+ */
+export function cleanInstallArtifacts(skillsDir: string): void {
+  const targets = [
+    path.join(skillsDir, "node_modules", "tado"),
+    path.join(skillsDir, "package.json"),
+    path.join(skillsDir, "bun.lock"),
+  ];
+  for (const target of targets) {
+    fs.rmSync(target, { recursive: true, force: true });
+  }
+}
+
+/**
  * Run `bun add` in the target skills directory and copy SKILL.md files.
  * Creates the directory if it does not exist.
+ * Cleans stale artifacts first to avoid cache / stale-package issues.
  */
 export async function performInstall(skillsDir: string): Promise<void> {
   fs.mkdirSync(skillsDir, { recursive: true });
+  cleanInstallArtifacts(skillsDir);
 
   const addProc = Bun.spawn(["bun", "add", PACKAGE_SPEC], {
     cwd: skillsDir,

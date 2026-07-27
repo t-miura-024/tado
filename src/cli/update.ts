@@ -1,25 +1,15 @@
 import * as clack from "@clack/prompts";
 import { findInstalledLocations, type InstallLocation } from "./paths.ts";
-import { ensureBun, copySkills } from "./install.ts";
-
-const PACKAGE_SPEC = "github:t-miura-024/tado";
+import { ensureBun, performInstall } from "./install.ts";
 
 /**
- * Run `bun update` in the target skills directory and re-copy SKILL.md files.
+ * Update a single installation by performing a clean reinstall.
+ *
+ * Uses delete → `bun add` instead of `bun update` to avoid stale cache /
+ * lockfile issues that can leave an outdated package in place.
  */
 export async function performUpdate(skillsDir: string): Promise<void> {
-  const updateProc = Bun.spawn(["bun", "update", PACKAGE_SPEC], {
-    cwd: skillsDir,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const exitCode = await updateProc.exited;
-  if (exitCode !== 0) {
-    const stderr = await new Response(updateProc.stderr).text();
-    throw new Error(`bun update failed (exit ${exitCode}): ${stderr.trim()}`);
-  }
-
-  copySkills(skillsDir);
+  await performInstall(skillsDir);
 }
 
 /** Scan all known locations and update every installed instance. */
