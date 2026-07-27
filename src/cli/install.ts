@@ -101,7 +101,7 @@ export async function installCommand(cwd: string = process.cwd()): Promise<void>
       const installed = getAvailableScopes(t, cwd).length === 0;
       return {
         value: t,
-        label: installed ? `\x1b[9m${t.label} (Installed)\x1b[29m` : t.label,
+        label: installed ? `\x1b[9m${t.label}\x1b[29m (Installed)` : t.label,
         disabled: installed,
       };
     }),
@@ -120,7 +120,7 @@ export async function installCommand(cwd: string = process.cwd()): Promise<void>
       const installed = isInstalled(dir);
       return {
         value: s.id,
-        label: installed ? `\x1b[9m${s.label} (Installed)\x1b[29m` : s.label,
+        label: installed ? `\x1b[9m${s.label}\x1b[29m (Installed)` : s.label,
         disabled: installed,
       };
     }),
