@@ -1,116 +1,21 @@
-export interface WorkflowDef {
-  id: string;
-  steps: StepDef[];
-  beforeInit?: (ctx: InitCtx) => Promise<void>;
-  afterInit?: (ctx: InitCtx) => Promise<AfterInitResult>;
-}
+/**
+ * ステップ実行の結果および CLI / API の返却値関連の型定義。
+ */
 
-export interface AfterInitResult {
-  artifactDbPath?: string;
-  artifacts?: ArtifactInput[];
-}
-
-export interface StepDef {
-  key: string;
-  phase: string;
-  type: "task" | "human_gate" | "parallel";
-  maxRetries: number;
-  onFail: OnFailStrategy;
-  check: (ctx: CheckCtx) => CheckResult;
-  condition?: (ctx: ConditionCtx) => boolean;
-  task?: TaskStepDef;
-  humanGate?: HumanGateStepDef;
-  parallel?: ParallelStepDef;
-}
-
-export interface ConditionCtx {
-  gateChoices: Record<string, string>;
-  artifacts: ArtifactRecord[];
-}
-
-export interface TaskStepDef {
-  action: "run_subagent" | "run_command" | "orchestrate";
-  subagentType?: string;
-  readonly?: boolean;
-  buildPrompt: (ctx: PromptCtx) => string;
-}
-
-export interface HumanGateStepDef {
-  presentArtifacts: string[];
-  choices: GateChoice[];
-  reviseTargetStep?: string;
-}
-
-export interface ParallelStepDef {
-  subtasks: SubtaskDef[];
-}
-
-export interface SubtaskDef {
-  key: string;
-  subagentType: string;
-  readonly?: boolean;
-  buildPrompt: (ctx: PromptCtx) => string;
-}
-
-export interface OnFailStrategy {
-  action: "retry" | "goto" | "abort" | "escalate";
-  target?: string;
-  requeueSource?: boolean;
-}
-
-export interface GateChoice {
-  value: string;
-  label: string;
-  desc?: string;
-}
-
-export interface InitCtx {
-  sessionDir: string;
-  sessionId: string;
-}
-
-export interface CheckCtx {
-  sessionDir: string;
-  artifactDbPath?: string;
-  attemptResult: AttemptResult;
-  artifacts: ArtifactRecord[];
-}
-
-export interface PromptCtx {
-  sessionDir: string;
-  artifactDbPath?: string;
-  attemptNumber: number;
-  retryCount: number;
-  maxRetries: number;
-  previousAttempts: AttemptSummary[];
-  artifacts: ArtifactRecord[];
-}
-
+/** ステップの完了チェック結果。 */
 export interface CheckResult {
   status: "pass" | "fail" | "error";
   reasons: string[];
 }
 
-export interface ArtifactInput {
-  key: string;
-  path: string;
-}
-
-export interface ArtifactRecord {
-  id: number;
-  sessionId: string;
-  stepKey: string;
-  artifactKey: string;
-  filePath: string;
-  createdAt: string;
-}
-
+/** 1 回の試行（アテンプト）の実行結果。 */
 export interface AttemptResult {
   status: "completed" | "failed";
   subagentOutput?: string;
   errors?: string;
 }
 
+/** 過去の試行の要約情報。リトライ時のプロンプト構築に利用される。 */
 export interface AttemptSummary {
   attemptNumber: number;
   startedAt: string;
@@ -119,6 +24,7 @@ export interface AttemptSummary {
   checkResults: string | null;
 }
 
+/** 並列ステップにおける個別サブタスクの実行結果。 */
 export interface SubtaskResult {
   subtaskKey: string;
   subagentOutput: string;
@@ -126,6 +32,7 @@ export interface SubtaskResult {
   error?: string;
 }
 
+/** ステップ完了時に報告する入力情報。 */
 export interface ReportInput {
   stepKey: string;
   status: "completed" | "failed";
@@ -135,12 +42,14 @@ export interface ReportInput {
   errors?: string;
 }
 
+/** `init` コマンドの返却値。 */
 export interface InitResult {
   sessionId: string;
   sessionDir: string;
   workflowId: string;
 }
 
+/** `next` コマンドの返却値。次に実行すべきステップの指示を含む。 */
 export interface NextResult {
   sessionId: string;
   stepKey: string;
@@ -164,6 +73,7 @@ export interface NextResult {
   };
 }
 
+/** 並列ステップで各サブタスクに渡す実行指示。 */
 export interface ParallelNextResult {
   subtasks: {
     key: string;
@@ -177,6 +87,7 @@ export interface ParallelNextResult {
   }[];
 }
 
+/** `report` コマンドの返却値。チェック結果と次のアクションを含む。 */
 export interface ReportResult {
   sessionId: string;
   stepKey: string;
@@ -186,6 +97,7 @@ export interface ReportResult {
   message: string;
 }
 
+/** `status` コマンドの返却値。セッションと各ステップの進捗を含む。 */
 export interface StatusResult {
   sessionId: string;
   workflowId: string;

@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { InitResult } from "../types.ts";
+import type { InitResult } from "../types/result.ts";
 
 const TEST_BASE_DIR = path.join(path.dirname(__filename), "__test_cli_sessions__");
 const FIXTURE_WORKFLOW = path.join(__dirname, "..", "engine", "__fixtures__", "simple-workflow.ts");

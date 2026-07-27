@@ -2,7 +2,7 @@
 import * as fs from "node:fs";
 import { Command } from "commander";
 import { init, next, report, status, EngineError, DEFAULT_BASE_DIR } from "../engine/index.ts";
-import type { ReportInput } from "../types.ts";
+import type { ReportInput } from "../types/result.ts";
 
 interface WorkflowOpts {
   workflow?: string;

@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { InitResult } from "../types.ts";
+import type { InitResult } from "../types/result.ts";
 import { importWorkflowDef, openDb, initDb } from "./store.ts";
 
 function generateSessionId(): string {

@@ -1,7 +1,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Database } from "bun:sqlite";
-import type { WorkflowDef, AttemptSummary, ArtifactRecord, ConditionCtx } from "../types.ts";
+import type { WorkflowDef } from "../types/workflow-def.ts";
+import type { ConditionCtx } from "../types/context.ts";
+import type { ArtifactRecord } from "../types/artifact.ts";
+import type { AttemptSummary } from "../types/result.ts";
 
 export class EngineError extends Error {
   constructor(message: string) {

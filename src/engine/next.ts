@@ -1,11 +1,8 @@
 import * as path from "node:path";
-import type {
-  StepDef,
-  NextResult,
-  PromptCtx,
-  ParallelNextResult,
-  ArtifactRecord,
-} from "../types.ts";
+import type { StepDef } from "../types/workflow-def.ts";
+import type { PromptCtx } from "../types/context.ts";
+import type { ArtifactRecord } from "../types/artifact.ts";
+import type { NextResult, ParallelNextResult } from "../types/result.ts";
 import {
   openDb,
   dbRowToSessionRow,
