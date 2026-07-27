@@ -21,6 +21,7 @@
     "check": "oxlint && oxfmt --check"
   },
   "dependencies": {
+    "@clack/prompts": "^1.7.0",
     "commander": "^15.0.0"
   },
   "devDependencies": {

@@ -3,6 +3,8 @@ import * as fs from "node:fs";
 import { Command } from "commander";
 import { init, next, report, status, EngineError, DEFAULT_BASE_DIR } from "../engine/index.ts";
 import type { ReportInput } from "../types/result.ts";
+import { installCommand } from "./install.ts";
+import { updateCommand } from "./update.ts";
 
 interface WorkflowOpts {
   workflow?: string;
@@ -91,6 +93,20 @@ function buildProgram(): Command {
     .action((opts: SessionOpts) => {
       const result = status(opts.session, opts.baseDir);
       output(result);
+    });
+
+  program
+    .command("install")
+    .description("Install tado Skills into an LLM tool (interactive)")
+    .action(async () => {
+      await installCommand();
+    });
+
+  program
+    .command("update")
+    .description("Update all installed tado Skills to the latest version")
+    .action(async () => {
+      await updateCommand();
     });
 
   return program;
