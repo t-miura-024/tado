@@ -1,13 +1,8 @@
 import * as path from "node:path";
 import { Database } from "bun:sqlite";
-import type {
-  ReportInput,
-  ReportResult,
-  StatusResult,
-  CheckCtx,
-  AttemptResult,
-  StepDef,
-} from "../types.ts";
+import type { StepDef } from "../types/workflow-def.ts";
+import type { CheckCtx } from "../types/context.ts";
+import type { ReportInput, ReportResult, StatusResult, AttemptResult } from "../types/result.ts";
 import {
   openDb,
   dbRowToSessionRow,

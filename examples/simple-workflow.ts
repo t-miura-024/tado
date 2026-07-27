@@ -8,7 +8,9 @@
  *   tado init --workflow examples/simple-workflow.ts
  *   tado next --session <id>
  */
-import type { CheckCtx, CheckResult, PromptCtx, WorkflowDef } from "../src/types.ts";
+import type { WorkflowDef } from "../src/types/workflow-def.ts";
+import type { CheckCtx, PromptCtx } from "../src/types/context.ts";
+import type { CheckResult } from "../src/types/result.ts";
 
 const def: WorkflowDef = {
   id: "simple-workflow",

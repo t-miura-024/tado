@@ -12,7 +12,7 @@
   },
   "type": "module",
   "exports": {
-    ".": "./src/types.ts"
+    "./types/*": "./src/types/*"
   },
   "scripts": {
     "test": "bun test",
