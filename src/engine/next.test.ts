@@ -18,7 +18,7 @@ afterEach(() => {
 });
 
 describe("next", () => {
-  it("should return task prompt for first step", async () => {
+  it("最初のステップのタスクプロンプトを返す", async () => {
     const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
     const result = await next(sessionId, TEST_BASE_DIR);
 
@@ -39,7 +39,7 @@ describe("next", () => {
     db.close();
   });
 
-  it("should return human_gate prompt", async () => {
+  it("human_gateのプロンプトを返す", async () => {
     const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
 
     await next(sessionId, TEST_BASE_DIR);
@@ -64,7 +64,7 @@ describe("next", () => {
     expect(result.prompt).toContain("abort");
   });
 
-  it("should return parallel subtask prompts", async () => {
+  it("並列サブタスクのプロンプトを返す", async () => {
     const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
 
     await next(sessionId, TEST_BASE_DIR);
@@ -101,11 +101,11 @@ describe("next", () => {
     expect(result.parallel!.subtasks[1].prompt).toContain("Subtask B");
   });
 
-  it("should throw EngineError for non-existent session", async () => {
+  it("存在しないセッションでEngineErrorをスローする", async () => {
     await expect(next("nonexistent-session", TEST_BASE_DIR)).rejects.toThrow(EngineError);
   });
 
-  it("should throw EngineError for done session", async () => {
+  it("完了済みセッションでEngineErrorをスローする", async () => {
     const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
     const db = new Database(path.join(TEST_BASE_DIR, sessionId, "workflow.db"));
     db.run("UPDATE sessions SET status = ? WHERE id = ?", ["done", sessionId]);
@@ -113,8 +113,8 @@ describe("next", () => {
     await expect(next(sessionId, TEST_BASE_DIR)).rejects.toThrow(EngineError);
   });
 
-  describe("workflow without workflow_path in DB", () => {
-    it("should accept --workflow flag on next and report", async () => {
+  describe("DBにworkflow_pathがないワークフロー", () => {
+    it("nextとreportで--workflowフラグを受け付ける", async () => {
       const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
 
       const result = await next(sessionId, TEST_BASE_DIR, FIXTURE_WORKFLOW);
@@ -135,8 +135,8 @@ describe("next", () => {
     });
   });
 
-  describe("condition-based step skipping", () => {
-    it("should skip step when condition returns false", async () => {
+  describe("条件付きステップスキップ", () => {
+    it("conditionがfalseを返すときにステップをスキップする", async () => {
       const tmpDir = path.join(TEST_BASE_DIR, "condition-skip-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "condition-skip-workflow.ts");
@@ -216,7 +216,7 @@ describe("next", () => {
       db.close();
     });
 
-    it("should execute step when condition returns true", async () => {
+    it("conditionがtrueを返すときにステップを実行する", async () => {
       const tmpDir = path.join(TEST_BASE_DIR, "condition-pass-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "condition-pass-workflow.ts");
@@ -252,13 +252,13 @@ describe("next", () => {
       expect(r1.prompt).toBe("step1 prompt");
     });
 
-    it("should execute step when condition is undefined (backward compat)", async () => {
+    it("conditionがundefinedのときにステップを実行する（後方互換）", async () => {
       const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
       const r1 = await next(sessionId, TEST_BASE_DIR);
       expect(r1.stepKey).toBe("step1_task");
     });
 
-    it("should skip multiple consecutive steps with false conditions", async () => {
+    it("false条件の連続ステップを複数スキップする", async () => {
       const tmpDir = path.join(TEST_BASE_DIR, "multi-skip-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "multi-skip-workflow.ts");
@@ -353,7 +353,7 @@ describe("next", () => {
       db.close();
     });
 
-    it("should mark session done when all remaining steps are skipped", async () => {
+    it("残りステップすべてがスキップされたときにセッションを完了にする", async () => {
       const tmpDir = path.join(TEST_BASE_DIR, "all-skip-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "all-skip-workflow.ts");
@@ -417,7 +417,7 @@ describe("next", () => {
       db.close();
     });
 
-    it("should provide gateChoices in condition context", async () => {
+    it("conditionコンテキストにgateChoicesを提供する", async () => {
       const tmpDir = path.join(TEST_BASE_DIR, "gate-choices-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "gate-choices-workflow.ts");
@@ -495,7 +495,7 @@ describe("next", () => {
       expect(r.stepKey).toBe("conditional_step");
     });
 
-    it("should execute step when gateChoices condition is met", async () => {
+    it("gateChoices条件が満たされたときにステップを実行する", async () => {
       const tmpDir = path.join(TEST_BASE_DIR, "gate-execute-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "gate-execute-workflow.ts");
@@ -567,7 +567,7 @@ describe("next", () => {
       expect(r.stepKey).toBe("conditional_step");
     });
 
-    it("should provide artifacts in condition context", async () => {
+    it("conditionコンテキストにartifactsを提供する", async () => {
       const tmpDir = path.join(TEST_BASE_DIR, "condition-artifacts-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "condition-artifacts-workflow.ts");
@@ -646,8 +646,8 @@ describe("next", () => {
     });
   });
 
-  describe("human gate artifact presentation instruction", () => {
-    it("should include artifact paths and presentation instruction when artifacts are registered", async () => {
+  describe("ヒューマンゲートのアーティファクト提示指示", () => {
+    it("アーティファクト登録時にパスと提示指示を含める", async () => {
       const tmpDir = path.join(TEST_BASE_DIR, "gate-present-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "gate-present-workflow.ts");
@@ -716,7 +716,7 @@ describe("next", () => {
       expect(result.prompt).toContain(ARTIFACT_PRESENT_INSTRUCTION);
     });
 
-    it("should not include presentation instruction when no artifacts are registered", async () => {
+    it("アーティファクト未登録時に提示指示を含めない", async () => {
       const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
 
       await next(sessionId, TEST_BASE_DIR);

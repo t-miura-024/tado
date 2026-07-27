@@ -17,8 +17,8 @@ afterEach(() => {
   cleanup(TEST_BASE_DIR);
 });
 
-describe("cli integration", () => {
-  it("should output JSON on init", async () => {
+describe("CLI統合", () => {
+  it("init時にJSONを出力する", async () => {
     const proc = Bun.spawn(
       ["bun", "run", CLI_PATH, "init", "--workflow", FIXTURE_WORKFLOW, "--base-dir", TEST_BASE_DIR],
       {
@@ -38,7 +38,7 @@ describe("cli integration", () => {
     expect(err).toBe("");
   });
 
-  it("should output JSON on next", async () => {
+  it("next時にJSONを出力する", async () => {
     const initProc = Bun.spawn(
       ["bun", "run", CLI_PATH, "init", "--workflow", FIXTURE_WORKFLOW, "--base-dir", TEST_BASE_DIR],
       { stdout: "pipe", stderr: "pipe" },
@@ -60,7 +60,7 @@ describe("cli integration", () => {
     expect(parsed.action).toBe("run_subagent");
   });
 
-  it("should output JSON on status", async () => {
+  it("status時にJSONを出力する", async () => {
     const initProc = Bun.spawn(
       ["bun", "run", CLI_PATH, "init", "--workflow", FIXTURE_WORKFLOW, "--base-dir", TEST_BASE_DIR],
       { stdout: "pipe", stderr: "pipe" },
@@ -82,7 +82,7 @@ describe("cli integration", () => {
     expect(parsed.steps).toHaveLength(3);
   });
 
-  it("should handle report via stdin", async () => {
+  it("stdin経由でreportを処理する", async () => {
     const initProc = Bun.spawn(
       ["bun", "run", CLI_PATH, "init", "--workflow", FIXTURE_WORKFLOW, "--base-dir", TEST_BASE_DIR],
       { stdout: "pipe", stderr: "pipe" },
@@ -128,7 +128,7 @@ describe("cli integration", () => {
     expect(err).toBe("");
   });
 
-  it("should error without required args", async () => {
+  it("必須引数なしでエラーになる", async () => {
     const proc = Bun.spawn(["bun", "run", CLI_PATH, "init"], {
       stdout: "pipe",
       stderr: "pipe",
@@ -141,7 +141,7 @@ describe("cli integration", () => {
     expect(err).toContain("--workflow");
   });
 
-  it("should error on unknown command", async () => {
+  it("不明なコマンドでエラーになる", async () => {
     const proc = Bun.spawn(["bun", "run", CLI_PATH, "bogus"], {
       stdout: "pipe",
       stderr: "pipe",
@@ -153,7 +153,7 @@ describe("cli integration", () => {
     expect(err).toContain("error:");
   });
 
-  it("should show help", async () => {
+  it("ヘルプを表示する", async () => {
     const proc = Bun.spawn(["bun", "run", CLI_PATH, "--help"], { stdout: "pipe" });
     const out = await new Response(proc.stdout).text();
     await proc.exited;

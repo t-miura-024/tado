@@ -17,8 +17,8 @@ afterEach(() => {
   cleanup(TEST_BASE_DIR);
 });
 
-describe("report", () => {
-  it("should mark step as passed and advance", async () => {
+describe("レポート", () => {
+  it("ステップを合格としてマークし次に進む", async () => {
     const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
     await next(sessionId, TEST_BASE_DIR);
 
@@ -43,7 +43,7 @@ describe("report", () => {
     db.close();
   });
 
-  it("should retry on failure within maxRetries", async () => {
+  it("maxRetries内で失敗時にリトライする", async () => {
     const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
     await next(sessionId, TEST_BASE_DIR);
 
@@ -69,7 +69,7 @@ describe("report", () => {
     db.close();
   });
 
-  it("should trigger onFail abort after maxRetries", async () => {
+  it("maxRetries超過後にonFail abortを発動する", async () => {
     const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
 
     for (let i = 0; i < 2; i++) {
@@ -107,7 +107,7 @@ describe("report", () => {
     db.close();
   });
 
-  it("should handle human_gate approve", async () => {
+  it("human_gateのapproveを処理する", async () => {
     const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
 
     await next(sessionId, TEST_BASE_DIR);
@@ -142,7 +142,7 @@ describe("report", () => {
     db.close();
   });
 
-  it("should handle human_gate revise", async () => {
+  it("human_gateのreviseを処理する", async () => {
     const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
 
     await next(sessionId, TEST_BASE_DIR);
@@ -171,7 +171,7 @@ describe("report", () => {
     expect(result.targetStep).toBe("step1_task");
   });
 
-  it("should handle human_gate abort", async () => {
+  it("human_gateのabortを処理する", async () => {
     const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
 
     await next(sessionId, TEST_BASE_DIR);
@@ -199,7 +199,7 @@ describe("report", () => {
     expect(result.nextAction).toBe("abort");
   });
 
-  it("should complete session when all steps done", async () => {
+  it("全ステップ完了時にセッションを完了する", async () => {
     const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
 
     await next(sessionId, TEST_BASE_DIR);
@@ -246,8 +246,8 @@ describe("report", () => {
     db.close();
   });
 
-  describe("retry with onFail strategies", () => {
-    it("should support onFail goto after maxRetries", async () => {
+  describe("onFail戦略付きリトライ", () => {
+    it("maxRetries超過後にonFail gotoをサポートする", async () => {
       const tmpDir = path.join(TEST_BASE_DIR, "goto-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "goto-workflow.ts");
@@ -319,7 +319,7 @@ describe("report", () => {
       expect(r2.targetStep).toBe("fallback_step");
     });
 
-    it("should support onFail escalate", async () => {
+    it("onFail escalateをサポートする", async () => {
       const tmpDir = path.join(TEST_BASE_DIR, "escalate-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "escalate-workflow.ts");
@@ -373,8 +373,8 @@ describe("report", () => {
     });
   });
 
-  describe("artifacts", () => {
-    it("should register artifacts from report input", async () => {
+  describe("アーティファクト", () => {
+    it("レポート入力からアーティファクトを登録する", async () => {
       const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
       await next(sessionId, TEST_BASE_DIR);
 
@@ -405,8 +405,8 @@ describe("report", () => {
     });
   });
 
-  describe("parallel report with subtaskResults", () => {
-    it("should store subtask results on report", async () => {
+  describe("subtaskResults付き並列レポート", () => {
+    it("レポート時にサブタスク結果を保存する", async () => {
       const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
 
       await next(sessionId, TEST_BASE_DIR);
@@ -463,7 +463,7 @@ describe("report", () => {
       db.close();
     });
 
-    it("should handle partial subtask failures", async () => {
+    it("サブタスクの部分失敗を処理する", async () => {
       const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
 
       await next(sessionId, TEST_BASE_DIR);
@@ -520,8 +520,8 @@ describe("report", () => {
     });
   });
 
-  describe("check exception handling", () => {
-    it("should catch check function exceptions and set status to error", async () => {
+  describe("check例外処理", () => {
+    it("check関数の例外をキャッチしステータスをerrorに設定する", async () => {
       const tmpDir = path.join(TEST_BASE_DIR, "check-exception-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "check-exception-workflow.ts");
@@ -568,8 +568,8 @@ describe("report", () => {
     });
   });
 
-  describe("revise resets subsequent steps", () => {
-    it("should reset target and all subsequent steps to pending on revise", async () => {
+  describe("reviseによる後続ステップのリセット", () => {
+    it("revise時に対象ステップと後続すべてをpendingにリセットする", async () => {
       const tmpDir = path.join(TEST_BASE_DIR, "revise-reset-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "revise-reset-workflow.ts");
@@ -698,7 +698,7 @@ describe("report", () => {
       expect(r.stepKey).toBe("grill");
     });
 
-    it("should allow full re-execution after revise", async () => {
+    it("revise後の完全な再実行を許可する", async () => {
       const tmpDir = path.join(TEST_BASE_DIR, "revise-full-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "revise-full-workflow.ts");
@@ -800,8 +800,8 @@ describe("report", () => {
     });
   });
 
-  describe("review loop with requeueSource", () => {
-    it("should requeue review step as pending after must>0 failure, and re-run it after fix", async () => {
+  describe("requeueSource付きレビューループ", () => {
+    it("must>0の失敗後にレビューステップをpendingで再キューし、修正後に再実行する", async () => {
       const tmpDir = path.join(TEST_BASE_DIR, "requeue-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "requeue-workflow.ts");
@@ -932,8 +932,8 @@ describe("report", () => {
     });
   });
 
-  describe("status", () => {
-    it("should return session info", async () => {
+  describe("ステータス", () => {
+    it("セッション情報を返す", async () => {
       const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
 
       const result = status(sessionId, TEST_BASE_DIR);
@@ -946,7 +946,7 @@ describe("report", () => {
       expect(result.steps[0].status).toBe("pending");
     });
 
-    it("should show step statuses after progression", async () => {
+    it("進行後のステップステータスを表示する", async () => {
       const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
 
       await next(sessionId, TEST_BASE_DIR);
@@ -967,7 +967,7 @@ describe("report", () => {
       expect(s2.steps[0].status).toBe("passed");
     });
 
-    it("should throw EngineError for non-existent session", () => {
+    it("存在しないセッションでEngineErrorをスローする", () => {
       expect(() => status("nonexistent-session", TEST_BASE_DIR)).toThrow(EngineError);
     });
   });
