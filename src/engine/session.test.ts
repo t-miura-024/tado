@@ -17,9 +17,9 @@ afterEach(() => {
   cleanup(TEST_BASE_DIR);
 });
 
-describe("session", () => {
+describe("セッション", () => {
   describe("init", () => {
-    it("should create session directory and workflow.db", async () => {
+    it("セッションディレクトリとworkflow.dbを作成する", async () => {
       const result = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
       expect(result.sessionId).toBeTruthy();
       expect(result.workflowId).toBe("test-simple");
@@ -44,12 +44,12 @@ describe("session", () => {
       db.close();
     });
 
-    it("should use provided sessionId", async () => {
+    it("指定されたsessionIdを使用する", async () => {
       const result = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR, "my-custom-id");
       expect(result.sessionId).toBe("my-custom-id");
     });
 
-    it("should store workflow_path in session row", async () => {
+    it("セッション行にworkflow_pathを保存する", async () => {
       const result = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
       const db = new Database(path.join(TEST_BASE_DIR, result.sessionId, "workflow.db"));
       const session = db
@@ -59,13 +59,13 @@ describe("session", () => {
       db.close();
     });
 
-    it("should throw EngineError for missing workflow file", async () => {
+    it("存在しないワークフローファイルでEngineErrorをスローする", async () => {
       await expect(init("/nonexistent/workflow.ts", TEST_BASE_DIR)).rejects.toThrow(EngineError);
     });
   });
 
-  describe("hooks", () => {
-    it("should run beforeInit and afterInit hooks", async () => {
+  describe("フック", () => {
+    it("beforeInitとafterInitフックを実行する", async () => {
       const tmpDir = path.join(TEST_BASE_DIR, "hook-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "hook-workflow.ts");
@@ -116,7 +116,7 @@ describe("session", () => {
       db.close();
     });
 
-    it("should work without hooks", async () => {
+    it("フックなしで動作する", async () => {
       const tmpDir = path.join(TEST_BASE_DIR, "no-hook-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "no-hook-workflow.ts");
@@ -150,8 +150,8 @@ describe("session", () => {
     });
   });
 
-  describe("init artifacts", () => {
-    it("should register artifacts from afterInit hook", async () => {
+  describe("initアーティファクト", () => {
+    it("afterInitフックからアーティファクトを登録する", async () => {
       const tmpDir = path.join(TEST_BASE_DIR, "artifact-hook-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "artifact-hook-workflow.ts");

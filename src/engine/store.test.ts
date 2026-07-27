@@ -35,28 +35,28 @@ function newSessionDir(name: string): string {
   return dir;
 }
 
-describe("store", () => {
+describe("ストア", () => {
   describe("DEFAULT_BASE_DIR", () => {
-    it("should resolve to tmp/tado", () => {
+    it("tmp/tadoに解決する", () => {
       expect(DEFAULT_BASE_DIR).toBe(path.resolve("tmp", "tado"));
       expect(DEFAULT_BASE_DIR.endsWith(path.join("tmp", "tado"))).toBe(true);
     });
   });
 
   describe("importWorkflowDef", () => {
-    it("should load a valid workflow definition", async () => {
+    it("有効なワークフロー定義を読み込む", async () => {
       const def = await importWorkflowDef(FIXTURE_WORKFLOW);
       expect(def.id).toBe("test-simple");
       expect(def.steps).toHaveLength(3);
     });
 
-    it("should throw EngineError for missing workflow file", async () => {
+    it("存在しないワークフローファイルでEngineErrorをスローする", async () => {
       await expect(importWorkflowDef("/nonexistent/workflow.ts")).rejects.toThrow(EngineError);
     });
   });
 
-  describe("schema initialization", () => {
-    it("should create sessions, steps, step_attempts and artifacts tables", () => {
+  describe("スキーマ初期化", () => {
+    it("sessions・steps・step_attempts・artifactsテーブルを作成する", () => {
       const dir = newSessionDir("schema");
       const db = openDb(dir);
       initDb(db);
@@ -74,8 +74,8 @@ describe("store", () => {
     });
   });
 
-  describe("row mappers", () => {
-    it("should map a session db row to SessionRow", () => {
+  describe("行マッパー", () => {
+    it("セッションのDB行をSessionRowにマッピングする", () => {
       const dir = newSessionDir("session-row");
       const db = openDb(dir);
       initDb(db);
@@ -99,7 +99,7 @@ describe("store", () => {
       db.close();
     });
 
-    it("should map a step db row to StepRow", () => {
+    it("ステップのDB行をStepRowにマッピングする", () => {
       const dir = newSessionDir("step-row");
       const db = openDb(dir);
       initDb(db);
@@ -130,7 +130,7 @@ describe("store", () => {
       db.close();
     });
 
-    it("should map a step_attempt db row to StepAttemptRow", () => {
+    it("ステップ試行のDB行をStepAttemptRowにマッピングする", () => {
       const dir = newSessionDir("attempt-row");
       const db = openDb(dir);
       initDb(db);
@@ -165,7 +165,7 @@ describe("store", () => {
       db.close();
     });
 
-    it("should map an artifact db row to ArtifactRow", () => {
+    it("アーティファクトのDB行をArtifactRowにマッピングする", () => {
       const dir = newSessionDir("artifact-row");
       const db = openDb(dir);
       initDb(db);
@@ -192,8 +192,8 @@ describe("store", () => {
     });
   });
 
-  describe("query helpers", () => {
-    it("getArtifacts should return artifact records for the session", () => {
+  describe("クエリヘルパー", () => {
+    it("getArtifactsはセッションのアーティファクトレコードを返す", () => {
       const dir = newSessionDir("get-artifacts");
       const db = openDb(dir);
       initDb(db);
@@ -218,7 +218,7 @@ describe("store", () => {
       db.close();
     });
 
-    it("getPreviousAttempts should return attempt summaries ordered by attempt number", () => {
+    it("getPreviousAttemptsは試行番号順に試行サマリーを返す", () => {
       const dir = newSessionDir("get-attempts");
       const db = openDb(dir);
       initDb(db);
@@ -257,7 +257,7 @@ describe("store", () => {
       db.close();
     });
 
-    it("buildConditionCtx should collect gate choices and artifacts", () => {
+    it("buildConditionCtxはゲートの選択とアーティファクトを収集する", () => {
       const dir = newSessionDir("condition-ctx");
       const db = openDb(dir);
       initDb(db);
