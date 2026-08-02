@@ -4,12 +4,13 @@ import * as path from "node:path";
 import type { InitResult } from "../types/result.ts";
 
 const TEST_BASE_DIR = path.join(path.dirname(__filename), "__test_cli_sessions__");
+process.env.TADO_HOME = TEST_BASE_DIR;
 const FIXTURE_WORKFLOW = path.join(__dirname, "..", "engine", "__fixtures__", "simple-workflow.ts");
 const CLI_PATH = path.join(__dirname, "main.ts");
 
-function cleanup(baseDir: string): void {
-  if (fs.existsSync(baseDir)) {
-    fs.rmSync(baseDir, { recursive: true, force: true });
+function cleanup(tadoHome: string): void {
+  if (fs.existsSync(tadoHome)) {
+    fs.rmSync(tadoHome, { recursive: true, force: true });
   }
 }
 
@@ -19,13 +20,10 @@ afterEach(() => {
 
 describe("CLI統合", () => {
   it("init時にJSONを出力する", async () => {
-    const proc = Bun.spawn(
-      ["bun", "run", CLI_PATH, "init", "--workflow", FIXTURE_WORKFLOW, "--base-dir", TEST_BASE_DIR],
-      {
-        stdout: "pipe",
-        stderr: "pipe",
-      },
-    );
+    const proc = Bun.spawn(["bun", "run", CLI_PATH, "init", "--workflow", FIXTURE_WORKFLOW], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
 
     const out = await new Response(proc.stdout).text();
     const err = await new Response(proc.stderr).text();
@@ -39,18 +37,18 @@ describe("CLI統合", () => {
   });
 
   it("next時にJSONを出力する", async () => {
-    const initProc = Bun.spawn(
-      ["bun", "run", CLI_PATH, "init", "--workflow", FIXTURE_WORKFLOW, "--base-dir", TEST_BASE_DIR],
-      { stdout: "pipe", stderr: "pipe" },
-    );
+    const initProc = Bun.spawn(["bun", "run", CLI_PATH, "init", "--workflow", FIXTURE_WORKFLOW], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
     const initOut = await new Response(initProc.stdout).text();
     await initProc.exited;
     const { sessionId } = JSON.parse(initOut) as InitResult;
 
-    const proc = Bun.spawn(
-      ["bun", "run", CLI_PATH, "next", "--session", sessionId, "--base-dir", TEST_BASE_DIR],
-      { stdout: "pipe", stderr: "pipe" },
-    );
+    const proc = Bun.spawn(["bun", "run", CLI_PATH, "next", "--session", sessionId], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
     const out = await new Response(proc.stdout).text();
     await proc.exited;
 
@@ -61,18 +59,18 @@ describe("CLI統合", () => {
   });
 
   it("status時にJSONを出力する", async () => {
-    const initProc = Bun.spawn(
-      ["bun", "run", CLI_PATH, "init", "--workflow", FIXTURE_WORKFLOW, "--base-dir", TEST_BASE_DIR],
-      { stdout: "pipe", stderr: "pipe" },
-    );
+    const initProc = Bun.spawn(["bun", "run", CLI_PATH, "init", "--workflow", FIXTURE_WORKFLOW], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
     const initOut = await new Response(initProc.stdout).text();
     await initProc.exited;
     const { sessionId } = JSON.parse(initOut) as InitResult;
 
-    const proc = Bun.spawn(
-      ["bun", "run", CLI_PATH, "status", "--session", sessionId, "--base-dir", TEST_BASE_DIR],
-      { stdout: "pipe", stderr: "pipe" },
-    );
+    const proc = Bun.spawn(["bun", "run", CLI_PATH, "status", "--session", sessionId], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
     const out = await new Response(proc.stdout).text();
     await proc.exited;
 
@@ -83,24 +81,15 @@ describe("CLI統合", () => {
   });
 
   it("stdin経由でreportを処理する", async () => {
-    const initProc = Bun.spawn(
-      ["bun", "run", CLI_PATH, "init", "--workflow", FIXTURE_WORKFLOW, "--base-dir", TEST_BASE_DIR],
-      { stdout: "pipe", stderr: "pipe" },
-    );
+    const initProc = Bun.spawn(["bun", "run", CLI_PATH, "init", "--workflow", FIXTURE_WORKFLOW], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
     const initOut = await new Response(initProc.stdout).text();
     await initProc.exited;
     const { sessionId } = JSON.parse(initOut) as InitResult;
 
-    await Bun.spawn([
-      "bun",
-      "run",
-      CLI_PATH,
-      "next",
-      "--session",
-      sessionId,
-      "--base-dir",
-      TEST_BASE_DIR,
-    ]).exited;
+    await Bun.spawn(["bun", "run", CLI_PATH, "next", "--session", sessionId]).exited;
 
     const input = JSON.stringify({
       stepKey: "step1_task",
@@ -109,7 +98,7 @@ describe("CLI統合", () => {
     });
 
     const proc = Bun.spawn({
-      cmd: ["bun", "run", CLI_PATH, "report", "--session", sessionId, "--base-dir", TEST_BASE_DIR],
+      cmd: ["bun", "run", CLI_PATH, "report", "--session", sessionId],
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
@@ -166,5 +155,15 @@ describe("CLI統合", () => {
     expect(out).toContain("status");
     expect(out).toContain("install");
     expect(out).toContain("update");
+  });
+
+  it("セッションコマンドのヘルプから--base-dirを削除している", async () => {
+    for (const command of ["init", "next", "report", "status"]) {
+      const proc = Bun.spawn(["bun", "run", CLI_PATH, command, "--help"], { stdout: "pipe" });
+      const out = await new Response(proc.stdout).text();
+      await proc.exited;
+
+      expect(out).not.toContain("--base-dir");
+    }
   });
 });

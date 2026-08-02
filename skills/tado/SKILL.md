@@ -25,12 +25,13 @@ tado (共有エンジン)        │
 ### init
 
 ```bash
-tado init --workflow <path-to-workflow.ts> [--base-dir <dir>] [--session <id>]
+tado init --workflow <path-to-workflow.ts> [--session <id>]
 ```
 
 ワークフロー定義を読み込み、セッションを初期化する。
 
-- `workflow.db` を `{baseDir}/{sessionId}/` に作成（`--base-dir` のデフォルトは `tmp/tado`）
+- 単一の `workflow.db` を `{TADO_HOME}/` に作成（デフォルトは `~/.tado/`、`TADO_HOME` で変更可能）
+- セッションディレクトリ `{TADO_HOME}/{sessionId}/` を成果物置き場として作成
 - sessions/steps テーブルを初期化
 - フック（beforeInit/afterInit）を実行
 - セッションIDを stdout に JSON で出力
@@ -38,7 +39,7 @@ tado init --workflow <path-to-workflow.ts> [--base-dir <dir>] [--session <id>]
 ### next
 
 ```bash
-tado next --session <id> [--base-dir <dir>]
+tado next --session <id>
 ```
 
 現在のステップのプロンプトを生成し、stdout に構造化 JSON で出力する。
@@ -204,11 +205,11 @@ export default def;
 tado next --session <id>
 ```
 
-中断したセッションIDを指定すれば、`workflow.db` から状態を復元して再開できる。
+中断したセッションIDを指定すれば、`{TADO_HOME}/workflow.db` から状態を復元して再開できる。
 
 ## 注意事項
 
 - 各スキルは `workflow.ts` でワークフロー定義を提供する
 - 既存の SubAgent やスクリプトは、workflow.ts の buildPrompt/check から参照する
-- `workflow.db`（状態DB）と成果物DB（research.db等）は完全分離
+- `workflow.db`（`{TADO_HOME}/workflow.db` の状態DB）と成果物DB（research.db等）は完全分離
 - `next` が返すプロンプトは完全で、LLM が再構築の余地を持たない

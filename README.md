@@ -3,7 +3,7 @@
 決定論的ワークフローエンジン。LLM セッションでステップ進行を機械的に管理します。
 
 LLM がオーケストレーションする多段ワークフローで、手順抜かし・簡略化を防ぐためのツールです。
-状態は SQLite（`workflow.db`）で機械的に管理され、LLM は `next` コマンドが返す完全なプロンプト（cue）に逐次応答するだけで、ワークフローを完走できます。
+状態は SQLite（`~/.tado/workflow.db`）で機械的に管理され、LLM は `next` コマンドが返す完全なプロンプト（cue）に逐次応答するだけで、ワークフローを完走できます。
 
 > 名前の由来: 辿（たどる）— 舞台の cue や prompter に導かれて道を順に辿るように、LLM は全体を暗記せず「次はこれ」の指示に従うだけでゴールに到達します。
 
@@ -32,11 +32,11 @@ bun add github:t-miura-024/tado
 ### CLI
 
 ```bash
-# セッション初期化
-tado init --workflow <path-to-workflow.ts> [--base-dir <dir>] [--session <id>]
+# セッション初期化（状態 DB: ~/.tado/workflow.db）
+tado init --workflow <path-to-workflow.ts> [--session <id>]
 
 # 次のステップのプロンプト取得
-tado next --session <id> [--base-dir <dir>]
+tado next --session <id>
 
 # ステップ実行結果の報告（stdin から JSON）
 echo '{"stepKey":"...","status":"completed","subagentOutput":"..."}' | tado report --session <id>
@@ -48,7 +48,10 @@ tado status --session <id>
 典型的な進行は `init` → `next`（プロンプト取得）→ ステップ実行 → `report`（結果報告）のサイクルです。
 `next` が返すプロンプトは完全で、LLM が手順を再構築する余地はありません。ワークフローが完了するまでサイクルを繰り返します。
 
-中断したセッションは、同じ `--session <id>` を指定すれば `workflow.db` から状態を復元して再開できます。
+状態 DB は全セッションで共有される `~/.tado/workflow.db` に、成果物は `~/.tado/<sessionId>/` に保存されます。
+`TADO_HOME` 環境変数を設定すると保存先を変更できます。中断したセッションは、同じ `--session <id>` を指定すれば再開できます。
+
+`next` が成功しコミットされた後、`report` を送信する前にプロセスが中断した場合も、同じ `--session <id>` で `next` を再実行してください。そのステップは実行中（running）状態のままですが、`next` は新しい試行（アテンプト）を割り当てずに同じプロンプトを再発行するため、そのまま作業を続けて `report` を送信できます。
 
 ### ライブラリ
 

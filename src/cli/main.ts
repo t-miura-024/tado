@@ -1,14 +1,13 @@
 #!/usr/bin/env bun
 import * as fs from "node:fs";
 import { Command } from "commander";
-import { init, next, report, status, EngineError, DEFAULT_BASE_DIR } from "../engine/index.ts";
+import { init, next, report, status, EngineError } from "../engine/index.ts";
 import type { ReportInput } from "../types/result.ts";
 import { installCommand } from "./install.ts";
 import { updateCommand } from "./update.ts";
 
 interface WorkflowOpts {
   workflow?: string;
-  baseDir: string;
 }
 
 interface InitOpts extends WorkflowOpts {
@@ -43,10 +42,9 @@ function buildProgram(): Command {
     .command("init")
     .description("Initialize a new workflow session from a workflow definition")
     .requiredOption("--workflow <path>", "Path to workflow.ts definition file")
-    .option("--base-dir <dir>", "Base directory for session storage", DEFAULT_BASE_DIR)
     .option("--session <id>", "Session ID")
     .action(async (opts: InitOpts) => {
-      const result = await init(opts.workflow, opts.baseDir, opts.session);
+      const result = await init(opts.workflow, opts.session);
       output(result);
     });
 
@@ -54,10 +52,9 @@ function buildProgram(): Command {
     .command("next")
     .description("Get the next step's prompt (advance the session)")
     .requiredOption("--session <id>", "Session ID")
-    .option("--base-dir <dir>", "Base directory for session storage", DEFAULT_BASE_DIR)
     .option("--workflow <path>", "Path to workflow.ts definition file")
     .action(async (opts: SessionOpts) => {
-      const result = await next(opts.session, opts.baseDir, opts.workflow);
+      const result = await next(opts.session, opts.workflow);
       output(result);
     });
 
@@ -65,23 +62,25 @@ function buildProgram(): Command {
     .command("report")
     .description("Submit step results via stdin JSON and advance the session")
     .requiredOption("--session <id>", "Session ID")
-    .option("--base-dir <dir>", "Base directory for session storage", DEFAULT_BASE_DIR)
     .option("--workflow <path>", "Path to workflow.ts definition file")
     .action(async (opts: SessionOpts) => {
       const stdin = readStdin();
       if (!stdin) {
         program.error("report requires JSON input on stdin");
+        return;
       }
       let input: ReportInput;
       try {
         input = JSON.parse(stdin) as ReportInput;
       } catch {
         program.error("invalid JSON on stdin");
+        return;
       }
       if (!input.stepKey) {
         program.error('report JSON must include "stepKey" field');
+        return;
       }
-      const result = await report(opts.session, input, opts.baseDir, opts.workflow);
+      const result = await report(opts.session, input, opts.workflow);
       output(result);
     });
 
@@ -89,9 +88,8 @@ function buildProgram(): Command {
     .command("status")
     .description("Show the current session state")
     .requiredOption("--session <id>", "Session ID")
-    .option("--base-dir <dir>", "Base directory for session storage", DEFAULT_BASE_DIR)
     .action((opts: SessionOpts) => {
-      const result = status(opts.session, opts.baseDir);
+      const result = status(opts.session);
       output(result);
     });
 

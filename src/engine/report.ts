@@ -1,10 +1,9 @@
-import * as path from "node:path";
 import { Database } from "bun:sqlite";
 import type { StepDef } from "../types/workflow-def.ts";
 import type { CheckCtx } from "../types/context.ts";
 import type { ReportInput, ReportResult, StatusResult, AttemptResult } from "../types/result.ts";
 import {
-  openDb,
+  openSessionDb,
   dbRowToSessionRow,
   dbRowToStepRow,
   dbRowToStepAttemptRow,
@@ -167,11 +166,9 @@ function handleStepFailure(
 export async function report(
   sessionId: string,
   input: ReportInput,
-  baseDir: string,
   workflowPath?: string,
 ): Promise<ReportResult> {
-  const sessionDir = path.resolve(baseDir, sessionId);
-  const db = openDb(sessionDir);
+  const db = openSessionDb(sessionId);
 
   const sessionRowRaw = db.query("SELECT * FROM sessions WHERE id = ?").get(sessionId) as
     | Record<string, unknown>
@@ -181,6 +178,7 @@ export async function report(
     throw new EngineError(`Session not found: ${sessionId}`);
   }
   const session = dbRowToSessionRow(sessionRowRaw);
+  const sessionDir = session.sessionDir;
 
   const resolvedWorkflowPath = workflowPath ?? (sessionRowRaw.workflow_path as string);
   if (!resolvedWorkflowPath) {
@@ -353,9 +351,8 @@ export async function report(
   }
 }
 
-export function status(sessionId: string, baseDir: string): StatusResult {
-  const sessionDir = path.resolve(baseDir, sessionId);
-  const db = openDb(sessionDir);
+export function status(sessionId: string): StatusResult {
+  const db = openSessionDb(sessionId);
 
   const sessionRowRaw = db.query("SELECT * FROM sessions WHERE id = ?").get(sessionId) as
     | Record<string, unknown>

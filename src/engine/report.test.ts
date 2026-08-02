@@ -2,40 +2,37 @@ import { describe, it, expect, afterEach } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Database } from "bun:sqlite";
-import { init, next, report, status, EngineError } from "./index.ts";
+import { init, next, report, status, EngineError, getWorkflowDbPath } from "./index.ts";
 
-const TEST_BASE_DIR = path.join(__dirname, "__test_sessions_report__");
+const TEST_TADO_HOME = path.join(__dirname, "__test_sessions_report__");
+process.env.TADO_HOME = TEST_TADO_HOME;
 const FIXTURE_WORKFLOW = path.join(__dirname, "__fixtures__", "simple-workflow.ts");
 
-function cleanup(baseDir: string): void {
-  if (fs.existsSync(baseDir)) {
-    fs.rmSync(baseDir, { recursive: true, force: true });
+function cleanup(tadoHome: string): void {
+  if (fs.existsSync(tadoHome)) {
+    fs.rmSync(tadoHome, { recursive: true, force: true });
   }
 }
 
 afterEach(() => {
-  cleanup(TEST_BASE_DIR);
+  cleanup(TEST_TADO_HOME);
 });
 
 describe("レポート", () => {
   it("ステップを合格としてマークし次に進む", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
-    await next(sessionId, TEST_BASE_DIR);
+    const { sessionId } = await init(FIXTURE_WORKFLOW);
+    await next(sessionId);
 
-    const result = await report(
-      sessionId,
-      {
-        stepKey: "step1_task",
-        status: "completed",
-        subagentOutput: "success task done",
-      },
-      TEST_BASE_DIR,
-    );
+    const result = await report(sessionId, {
+      stepKey: "step1_task",
+      status: "completed",
+      subagentOutput: "success task done",
+    });
 
     expect(result.checkResult.status).toBe("pass");
     expect(result.nextAction).toBe("continue");
 
-    const db = new Database(path.join(TEST_BASE_DIR, sessionId, "workflow.db"));
+    const db = new Database(getWorkflowDbPath());
     const step = db
       .query("SELECT status FROM steps WHERE session_id = ? AND step_key = ?")
       .get(sessionId, "step1_task") as Record<string, unknown>;
@@ -44,23 +41,19 @@ describe("レポート", () => {
   });
 
   it("maxRetries内で失敗時にリトライする", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
-    await next(sessionId, TEST_BASE_DIR);
+    const { sessionId } = await init(FIXTURE_WORKFLOW);
+    await next(sessionId);
 
-    const result = await report(
-      sessionId,
-      {
-        stepKey: "step1_task",
-        status: "completed",
-        subagentOutput: "failure output",
-      },
-      TEST_BASE_DIR,
-    );
+    const result = await report(sessionId, {
+      stepKey: "step1_task",
+      status: "completed",
+      subagentOutput: "failure output",
+    });
 
     expect(result.checkResult.status).toBe("fail");
     expect(result.nextAction).toBe("retry");
 
-    const db = new Database(path.join(TEST_BASE_DIR, sessionId, "workflow.db"));
+    const db = new Database(getWorkflowDbPath());
     const step = db
       .query("SELECT status, retry_count FROM steps WHERE session_id = ? AND step_key = ?")
       .get(sessionId, "step1_task") as Record<string, unknown>;
@@ -70,35 +63,27 @@ describe("レポート", () => {
   });
 
   it("maxRetries超過後にonFail abortを発動する", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
+    const { sessionId } = await init(FIXTURE_WORKFLOW);
 
     for (let i = 0; i < 2; i++) {
-      await next(sessionId, TEST_BASE_DIR);
-      await report(
-        sessionId,
-        {
-          stepKey: "step1_task",
-          status: "completed",
-          subagentOutput: "failure output",
-        },
-        TEST_BASE_DIR,
-      );
-    }
-
-    await next(sessionId, TEST_BASE_DIR);
-    const result = await report(
-      sessionId,
-      {
+      await next(sessionId);
+      await report(sessionId, {
         stepKey: "step1_task",
         status: "completed",
         subagentOutput: "failure output",
-      },
-      TEST_BASE_DIR,
-    );
+      });
+    }
+
+    await next(sessionId);
+    const result = await report(sessionId, {
+      stepKey: "step1_task",
+      status: "completed",
+      subagentOutput: "failure output",
+    });
 
     expect(result.nextAction).toBe("abort");
 
-    const db = new Database(path.join(TEST_BASE_DIR, sessionId, "workflow.db"));
+    const db = new Database(getWorkflowDbPath());
     const session = db.query("SELECT status FROM sessions WHERE id = ?").get(sessionId) as Record<
       string,
       unknown
@@ -108,33 +93,25 @@ describe("レポート", () => {
   });
 
   it("human_gateのapproveを処理する", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
+    const { sessionId } = await init(FIXTURE_WORKFLOW);
 
-    await next(sessionId, TEST_BASE_DIR);
-    await report(
-      sessionId,
-      {
-        stepKey: "step1_task",
-        status: "completed",
-        subagentOutput: "success task done",
-      },
-      TEST_BASE_DIR,
-    );
+    await next(sessionId);
+    await report(sessionId, {
+      stepKey: "step1_task",
+      status: "completed",
+      subagentOutput: "success task done",
+    });
 
-    await next(sessionId, TEST_BASE_DIR);
-    const result = await report(
-      sessionId,
-      {
-        stepKey: "step2_human_gate",
-        status: "completed",
-        subagentOutput: "approve",
-      },
-      TEST_BASE_DIR,
-    );
+    await next(sessionId);
+    const result = await report(sessionId, {
+      stepKey: "step2_human_gate",
+      status: "completed",
+      subagentOutput: "approve",
+    });
 
     expect(result.nextAction).toBe("continue");
 
-    const db = new Database(path.join(TEST_BASE_DIR, sessionId, "workflow.db"));
+    const db = new Database(getWorkflowDbPath());
     const step = db
       .query("SELECT status FROM steps WHERE session_id = ? AND step_key = ?")
       .get(sessionId, "step2_human_gate") as Record<string, unknown>;
@@ -143,101 +120,73 @@ describe("レポート", () => {
   });
 
   it("human_gateのreviseを処理する", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
+    const { sessionId } = await init(FIXTURE_WORKFLOW);
 
-    await next(sessionId, TEST_BASE_DIR);
-    await report(
-      sessionId,
-      {
-        stepKey: "step1_task",
-        status: "completed",
-        subagentOutput: "success task done",
-      },
-      TEST_BASE_DIR,
-    );
+    await next(sessionId);
+    await report(sessionId, {
+      stepKey: "step1_task",
+      status: "completed",
+      subagentOutput: "success task done",
+    });
 
-    await next(sessionId, TEST_BASE_DIR);
-    const result = await report(
-      sessionId,
-      {
-        stepKey: "step2_human_gate",
-        status: "completed",
-        subagentOutput: "revise",
-      },
-      TEST_BASE_DIR,
-    );
+    await next(sessionId);
+    const result = await report(sessionId, {
+      stepKey: "step2_human_gate",
+      status: "completed",
+      subagentOutput: "revise",
+    });
 
     expect(result.nextAction).toBe("goto");
     expect(result.targetStep).toBe("step1_task");
   });
 
   it("human_gateのabortを処理する", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
+    const { sessionId } = await init(FIXTURE_WORKFLOW);
 
-    await next(sessionId, TEST_BASE_DIR);
-    await report(
-      sessionId,
-      {
-        stepKey: "step1_task",
-        status: "completed",
-        subagentOutput: "success task done",
-      },
-      TEST_BASE_DIR,
-    );
+    await next(sessionId);
+    await report(sessionId, {
+      stepKey: "step1_task",
+      status: "completed",
+      subagentOutput: "success task done",
+    });
 
-    await next(sessionId, TEST_BASE_DIR);
-    const result = await report(
-      sessionId,
-      {
-        stepKey: "step2_human_gate",
-        status: "completed",
-        subagentOutput: "abort",
-      },
-      TEST_BASE_DIR,
-    );
+    await next(sessionId);
+    const result = await report(sessionId, {
+      stepKey: "step2_human_gate",
+      status: "completed",
+      subagentOutput: "abort",
+    });
 
     expect(result.nextAction).toBe("abort");
   });
 
   it("全ステップ完了時にセッションを完了する", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
+    const { sessionId } = await init(FIXTURE_WORKFLOW);
 
-    await next(sessionId, TEST_BASE_DIR);
-    await report(
-      sessionId,
-      {
-        stepKey: "step1_task",
-        status: "completed",
-        subagentOutput: "success task done",
-      },
-      TEST_BASE_DIR,
-    );
+    await next(sessionId);
+    await report(sessionId, {
+      stepKey: "step1_task",
+      status: "completed",
+      subagentOutput: "success task done",
+    });
 
-    await next(sessionId, TEST_BASE_DIR);
-    await report(
-      sessionId,
-      {
-        stepKey: "step2_human_gate",
-        status: "completed",
-        subagentOutput: "approve",
-      },
-      TEST_BASE_DIR,
-    );
+    await next(sessionId);
+    await report(sessionId, {
+      stepKey: "step2_human_gate",
+      status: "completed",
+      subagentOutput: "approve",
+    });
 
-    await next(sessionId, TEST_BASE_DIR);
-    const result = await report(
-      sessionId,
-      {
-        stepKey: "step3_parallel",
-        status: "completed",
-        subagentOutput: "done all subtasks",
-      },
-      TEST_BASE_DIR,
-    );
+    await next(sessionId);
+    const result = await report(sessionId, {
+      stepKey: "step3_parallel",
+      status: "completed",
+      subagentOutput: "done all subtasks",
+    });
 
     expect(result.nextAction).toBe("done");
 
-    const db = new Database(path.join(TEST_BASE_DIR, sessionId, "workflow.db"));
+    const db = new Database(getWorkflowDbPath());
     const session = db.query("SELECT status FROM sessions WHERE id = ?").get(sessionId) as Record<
       string,
       unknown
@@ -248,7 +197,7 @@ describe("レポート", () => {
 
   describe("onFail戦略付きリトライ", () => {
     it("maxRetries超過後にonFail gotoをサポートする", async () => {
-      const tmpDir = path.join(TEST_BASE_DIR, "goto-test");
+      const tmpDir = path.join(TEST_TADO_HOME, "goto-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "goto-workflow.ts");
       fs.writeFileSync(
@@ -289,38 +238,30 @@ describe("レポート", () => {
       `,
       );
 
-      const { sessionId } = await init(workflowPath, TEST_BASE_DIR);
+      const { sessionId } = await init(workflowPath);
 
-      await next(sessionId, TEST_BASE_DIR);
-      const r1 = await report(
-        sessionId,
-        {
-          stepKey: "failing_step",
-          status: "completed",
-          subagentOutput: "failed",
-        },
-        TEST_BASE_DIR,
-      );
+      await next(sessionId);
+      const r1 = await report(sessionId, {
+        stepKey: "failing_step",
+        status: "completed",
+        subagentOutput: "failed",
+      });
 
       expect(r1.nextAction).toBe("retry");
 
-      await next(sessionId, TEST_BASE_DIR);
-      const r2 = await report(
-        sessionId,
-        {
-          stepKey: "failing_step",
-          status: "completed",
-          subagentOutput: "failed again",
-        },
-        TEST_BASE_DIR,
-      );
+      await next(sessionId);
+      const r2 = await report(sessionId, {
+        stepKey: "failing_step",
+        status: "completed",
+        subagentOutput: "failed again",
+      });
 
       expect(r2.nextAction).toBe("goto");
       expect(r2.targetStep).toBe("fallback_step");
     });
 
     it("onFail escalateをサポートする", async () => {
-      const tmpDir = path.join(TEST_BASE_DIR, "escalate-test");
+      const tmpDir = path.join(TEST_TADO_HOME, "escalate-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "escalate-workflow.ts");
       fs.writeFileSync(
@@ -348,22 +289,18 @@ describe("レポート", () => {
       `,
       );
 
-      const { sessionId } = await init(workflowPath, TEST_BASE_DIR);
+      const { sessionId } = await init(workflowPath);
 
-      await next(sessionId, TEST_BASE_DIR);
-      const r1 = await report(
-        sessionId,
-        {
-          stepKey: "failing_step",
-          status: "completed",
-          subagentOutput: "help",
-        },
-        TEST_BASE_DIR,
-      );
+      await next(sessionId);
+      const r1 = await report(sessionId, {
+        stepKey: "failing_step",
+        status: "completed",
+        subagentOutput: "help",
+      });
 
       expect(r1.nextAction).toBe("escalate");
 
-      const db = new Database(path.join(TEST_BASE_DIR, sessionId, "workflow.db"));
+      const db = new Database(getWorkflowDbPath());
       const session = db.query("SELECT status FROM sessions WHERE id = ?").get(sessionId) as Record<
         string,
         unknown
@@ -375,24 +312,20 @@ describe("レポート", () => {
 
   describe("アーティファクト", () => {
     it("レポート入力からアーティファクトを登録する", async () => {
-      const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
-      await next(sessionId, TEST_BASE_DIR);
+      const { sessionId } = await init(FIXTURE_WORKFLOW);
+      await next(sessionId);
 
-      await report(
-        sessionId,
-        {
-          stepKey: "step1_task",
-          status: "completed",
-          subagentOutput: "success task done",
-          artifacts: [
-            { key: "output.md", path: "/tmp/output.md" },
-            { key: "log.txt", path: "/tmp/log.txt" },
-          ],
-        },
-        TEST_BASE_DIR,
-      );
+      await report(sessionId, {
+        stepKey: "step1_task",
+        status: "completed",
+        subagentOutput: "success task done",
+        artifacts: [
+          { key: "output.md", path: "/tmp/output.md" },
+          { key: "log.txt", path: "/tmp/log.txt" },
+        ],
+      });
 
-      const db = new Database(path.join(TEST_BASE_DIR, sessionId, "workflow.db"));
+      const db = new Database(getWorkflowDbPath());
       const rows = db
         .query("SELECT * FROM artifacts WHERE session_id = ? ORDER BY id")
         .all(sessionId) as Record<string, unknown>[];
@@ -407,48 +340,36 @@ describe("レポート", () => {
 
   describe("subtaskResults付き並列レポート", () => {
     it("レポート時にサブタスク結果を保存する", async () => {
-      const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
+      const { sessionId } = await init(FIXTURE_WORKFLOW);
 
-      await next(sessionId, TEST_BASE_DIR);
-      await report(
-        sessionId,
-        {
-          stepKey: "step1_task",
-          status: "completed",
-          subagentOutput: "success task done",
-        },
-        TEST_BASE_DIR,
-      );
+      await next(sessionId);
+      await report(sessionId, {
+        stepKey: "step1_task",
+        status: "completed",
+        subagentOutput: "success task done",
+      });
 
-      await next(sessionId, TEST_BASE_DIR);
-      await report(
-        sessionId,
-        {
-          stepKey: "step2_human_gate",
-          status: "completed",
-          subagentOutput: "approve",
-        },
-        TEST_BASE_DIR,
-      );
+      await next(sessionId);
+      await report(sessionId, {
+        stepKey: "step2_human_gate",
+        status: "completed",
+        subagentOutput: "approve",
+      });
 
-      const parResult = await next(sessionId, TEST_BASE_DIR);
+      const parResult = await next(sessionId);
       expect(parResult.stepType).toBe("parallel");
 
-      await report(
-        sessionId,
-        {
-          stepKey: "step3_parallel",
-          status: "completed",
-          subagentOutput: "done all subtasks",
-          subtaskResults: [
-            { subtaskKey: "sub_a", subagentOutput: "sub A finished", status: "completed" },
-            { subtaskKey: "sub_b", subagentOutput: "sub B finished", status: "completed" },
-          ],
-        },
-        TEST_BASE_DIR,
-      );
+      await report(sessionId, {
+        stepKey: "step3_parallel",
+        status: "completed",
+        subagentOutput: "done all subtasks",
+        subtaskResults: [
+          { subtaskKey: "sub_a", subagentOutput: "sub A finished", status: "completed" },
+          { subtaskKey: "sub_b", subagentOutput: "sub B finished", status: "completed" },
+        ],
+      });
 
-      const db = new Database(path.join(TEST_BASE_DIR, sessionId, "workflow.db"));
+      const db = new Database(getWorkflowDbPath());
       const attempts = db
         .query(
           "SELECT subtask_results_json FROM step_attempts WHERE step_id = (SELECT id FROM steps WHERE session_id = ? AND step_key = ?) ORDER BY attempt_number DESC LIMIT 1",
@@ -464,49 +385,37 @@ describe("レポート", () => {
     });
 
     it("サブタスクの部分失敗を処理する", async () => {
-      const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
+      const { sessionId } = await init(FIXTURE_WORKFLOW);
 
-      await next(sessionId, TEST_BASE_DIR);
-      await report(
-        sessionId,
-        {
-          stepKey: "step1_task",
-          status: "completed",
-          subagentOutput: "success task done",
-        },
-        TEST_BASE_DIR,
-      );
+      await next(sessionId);
+      await report(sessionId, {
+        stepKey: "step1_task",
+        status: "completed",
+        subagentOutput: "success task done",
+      });
 
-      await next(sessionId, TEST_BASE_DIR);
-      await report(
-        sessionId,
-        {
-          stepKey: "step2_human_gate",
-          status: "completed",
-          subagentOutput: "approve",
-        },
-        TEST_BASE_DIR,
-      );
+      await next(sessionId);
+      await report(sessionId, {
+        stepKey: "step2_human_gate",
+        status: "completed",
+        subagentOutput: "approve",
+      });
 
-      await next(sessionId, TEST_BASE_DIR);
+      await next(sessionId);
 
-      const r = await report(
-        sessionId,
-        {
-          stepKey: "step3_parallel",
-          status: "completed",
-          subagentOutput: "partial",
-          subtaskResults: [
-            { subtaskKey: "sub_a", subagentOutput: "ok", status: "completed" },
-            { subtaskKey: "sub_b", subagentOutput: "error", status: "failed", error: "timeout" },
-          ],
-        },
-        TEST_BASE_DIR,
-      );
+      const r = await report(sessionId, {
+        stepKey: "step3_parallel",
+        status: "completed",
+        subagentOutput: "partial",
+        subtaskResults: [
+          { subtaskKey: "sub_a", subagentOutput: "ok", status: "completed" },
+          { subtaskKey: "sub_b", subagentOutput: "error", status: "failed", error: "timeout" },
+        ],
+      });
 
       expect(r.stepKey).toBe("step3_parallel");
 
-      const db = new Database(path.join(TEST_BASE_DIR, sessionId, "workflow.db"));
+      const db = new Database(getWorkflowDbPath());
       const attempts = db
         .query(
           "SELECT subtask_results_json FROM step_attempts WHERE step_id = (SELECT id FROM steps WHERE session_id = ? AND step_key = ?) ORDER BY attempt_number DESC LIMIT 1",
@@ -522,7 +431,7 @@ describe("レポート", () => {
 
   describe("check例外処理", () => {
     it("check関数の例外をキャッチしステータスをerrorに設定する", async () => {
-      const tmpDir = path.join(TEST_BASE_DIR, "check-exception-test");
+      const tmpDir = path.join(TEST_TADO_HOME, "check-exception-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "check-exception-workflow.ts");
       fs.writeFileSync(
@@ -550,18 +459,14 @@ describe("レポート", () => {
       `,
       );
 
-      const { sessionId } = await init(workflowPath, TEST_BASE_DIR);
-      await next(sessionId, TEST_BASE_DIR);
+      const { sessionId } = await init(workflowPath);
+      await next(sessionId);
 
-      const r = await report(
-        sessionId,
-        {
-          stepKey: "broken_step",
-          status: "completed",
-          subagentOutput: "done",
-        },
-        TEST_BASE_DIR,
-      );
+      const r = await report(sessionId, {
+        stepKey: "broken_step",
+        status: "completed",
+        subagentOutput: "done",
+      });
 
       expect(r.checkResult.status).toBe("error");
       expect(r.checkResult.reasons).toContain("intentional check failure");
@@ -570,7 +475,7 @@ describe("レポート", () => {
 
   describe("reviseによる後続ステップのリセット", () => {
     it("revise時に対象ステップと後続すべてをpendingにリセットする", async () => {
-      const tmpDir = path.join(TEST_BASE_DIR, "revise-reset-test");
+      const tmpDir = path.join(TEST_TADO_HOME, "revise-reset-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "revise-reset-workflow.ts");
       fs.writeFileSync(
@@ -641,35 +546,27 @@ describe("レポート", () => {
       `,
       );
 
-      const { sessionId } = await init(workflowPath, TEST_BASE_DIR);
+      const { sessionId } = await init(workflowPath);
 
       // Execute grill → prepare → gate
-      await next(sessionId, TEST_BASE_DIR);
-      await report(
-        sessionId,
-        { stepKey: "grill", status: "completed", subagentOutput: "done" },
-        TEST_BASE_DIR,
-      );
+      await next(sessionId);
+      await report(sessionId, { stepKey: "grill", status: "completed", subagentOutput: "done" });
 
-      await next(sessionId, TEST_BASE_DIR);
-      await report(
-        sessionId,
-        { stepKey: "prepare", status: "completed", subagentOutput: "done" },
-        TEST_BASE_DIR,
-      );
+      await next(sessionId);
+      await report(sessionId, { stepKey: "prepare", status: "completed", subagentOutput: "done" });
 
-      await next(sessionId, TEST_BASE_DIR);
-      const gateResult = await report(
-        sessionId,
-        { stepKey: "refined_gate", status: "completed", subagentOutput: "revise" },
-        TEST_BASE_DIR,
-      );
+      await next(sessionId);
+      const gateResult = await report(sessionId, {
+        stepKey: "refined_gate",
+        status: "completed",
+        subagentOutput: "revise",
+      });
 
       expect(gateResult.nextAction).toBe("goto");
       expect(gateResult.targetStep).toBe("grill");
 
       // Verify all steps from grill onwards are reset to pending
-      const db = new Database(path.join(TEST_BASE_DIR, sessionId, "workflow.db"));
+      const db = new Database(getWorkflowDbPath());
       const steps = db
         .query(
           "SELECT step_key, status, retry_count FROM steps WHERE session_id = ? ORDER BY step_index",
@@ -694,12 +591,12 @@ describe("レポート", () => {
       db.close();
 
       // Verify we can re-execute from grill
-      const r = await next(sessionId, TEST_BASE_DIR);
+      const r = await next(sessionId);
       expect(r.stepKey).toBe("grill");
     });
 
     it("revise後の完全な再実行を許可する", async () => {
-      const tmpDir = path.join(TEST_BASE_DIR, "revise-full-test");
+      const tmpDir = path.join(TEST_TADO_HOME, "revise-full-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "revise-full-workflow.ts");
       fs.writeFileSync(
@@ -756,53 +653,41 @@ describe("レポート", () => {
       `,
       );
 
-      const { sessionId } = await init(workflowPath, TEST_BASE_DIR);
+      const { sessionId } = await init(workflowPath);
 
       // First pass: work → gate (revise)
-      await next(sessionId, TEST_BASE_DIR);
-      await report(
-        sessionId,
-        { stepKey: "work", status: "completed", subagentOutput: "done" },
-        TEST_BASE_DIR,
-      );
-      await next(sessionId, TEST_BASE_DIR);
-      await report(
-        sessionId,
-        { stepKey: "gate", status: "completed", subagentOutput: "revise" },
-        TEST_BASE_DIR,
-      );
+      await next(sessionId);
+      await report(sessionId, { stepKey: "work", status: "completed", subagentOutput: "done" });
+      await next(sessionId);
+      await report(sessionId, { stepKey: "gate", status: "completed", subagentOutput: "revise" });
 
       // Second pass: work → gate (approve) → done_step
-      await next(sessionId, TEST_BASE_DIR);
-      await report(
-        sessionId,
-        { stepKey: "work", status: "completed", subagentOutput: "done again" },
-        TEST_BASE_DIR,
-      );
-      await next(sessionId, TEST_BASE_DIR);
-      await report(
-        sessionId,
-        { stepKey: "gate", status: "completed", subagentOutput: "approve" },
-        TEST_BASE_DIR,
-      );
+      await next(sessionId);
+      await report(sessionId, {
+        stepKey: "work",
+        status: "completed",
+        subagentOutput: "done again",
+      });
+      await next(sessionId);
+      await report(sessionId, { stepKey: "gate", status: "completed", subagentOutput: "approve" });
 
-      const r = await next(sessionId, TEST_BASE_DIR);
+      const r = await next(sessionId);
       expect(r.stepKey).toBe("done_step");
 
-      await report(
-        sessionId,
-        { stepKey: "done_step", status: "completed", subagentOutput: "finished" },
-        TEST_BASE_DIR,
-      );
+      await report(sessionId, {
+        stepKey: "done_step",
+        status: "completed",
+        subagentOutput: "finished",
+      });
 
-      const s = status(sessionId, TEST_BASE_DIR);
+      const s = status(sessionId);
       expect(s.sessionStatus).toBe("done");
     });
   });
 
   describe("requeueSource付きレビューループ", () => {
     it("must>0の失敗後にレビューステップをpendingで再キューし、修正後に再実行する", async () => {
-      const tmpDir = path.join(TEST_BASE_DIR, "requeue-test");
+      const tmpDir = path.join(TEST_TADO_HOME, "requeue-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "requeue-workflow.ts");
       fs.writeFileSync(
@@ -865,68 +750,51 @@ describe("レポート", () => {
       `,
       );
 
-      const { sessionId } = await init(workflowPath, TEST_BASE_DIR);
+      const { sessionId } = await init(workflowPath);
 
       // execute → pass
-      await next(sessionId, TEST_BASE_DIR);
-      const r1 = await report(
-        sessionId,
-        {
-          stepKey: "execute",
-          status: "completed",
-          subagentOutput: "work done",
-        },
-        TEST_BASE_DIR,
-      );
+      await next(sessionId);
+      const r1 = await report(sessionId, {
+        stepKey: "execute",
+        status: "completed",
+        subagentOutput: "work done",
+      });
       expect(r1.nextAction).toBe("continue");
 
       // review → fail (must>0), goto execute with requeue
-      await next(sessionId, TEST_BASE_DIR);
-      const r2 = await report(
-        sessionId,
-        {
-          stepKey: "review",
-          status: "completed",
-          subagentOutput: "review result with must",
-        },
-        TEST_BASE_DIR,
-      );
+      await next(sessionId);
+      const r2 = await report(sessionId, {
+        stepKey: "review",
+        status: "completed",
+        subagentOutput: "review result with must",
+      });
       expect(r2.nextAction).toBe("goto");
       expect(r2.targetStep).toBe("execute");
       expect(r2.message).toContain("review will re-run after fix");
 
       // verify review is pending (not failed)
-      const s1 = status(sessionId, TEST_BASE_DIR);
+      const s1 = status(sessionId);
       const reviewStep = s1.steps.find((s) => s.key === "review");
       expect(reviewStep?.status).toBe("pending");
 
       // execute → pass again
-      await next(sessionId, TEST_BASE_DIR);
-      const r3 = await report(
-        sessionId,
-        {
-          stepKey: "execute",
-          status: "completed",
-          subagentOutput: "fixes applied",
-        },
-        TEST_BASE_DIR,
-      );
+      await next(sessionId);
+      const r3 = await report(sessionId, {
+        stepKey: "execute",
+        status: "completed",
+        subagentOutput: "fixes applied",
+      });
       expect(r3.nextAction).toBe("continue");
 
       // review → pass (must=0, fixPass=true)
-      await next(sessionId, TEST_BASE_DIR);
-      const lookAhead = await next(sessionId, TEST_BASE_DIR);
+      const lookAhead = await next(sessionId);
       expect(lookAhead.stepKey).toBe("review");
 
-      const r4 = await report(
-        sessionId,
-        {
-          stepKey: "review",
-          status: "completed",
-          subagentOutput: "must: 0",
-        },
-        TEST_BASE_DIR,
-      );
+      const r4 = await report(sessionId, {
+        stepKey: "review",
+        status: "completed",
+        subagentOutput: "must: 0",
+      });
       expect(r4.nextAction).toBe("continue");
       expect(r4.message).toContain("followup");
     });
@@ -934,9 +802,9 @@ describe("レポート", () => {
 
   describe("ステータス", () => {
     it("セッション情報を返す", async () => {
-      const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
+      const { sessionId } = await init(FIXTURE_WORKFLOW);
 
-      const result = status(sessionId, TEST_BASE_DIR);
+      const result = status(sessionId);
 
       expect(result.sessionId).toBe(sessionId);
       expect(result.workflowId).toBe("test-simple");
@@ -947,28 +815,24 @@ describe("レポート", () => {
     });
 
     it("進行後のステップステータスを表示する", async () => {
-      const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
+      const { sessionId } = await init(FIXTURE_WORKFLOW);
 
-      await next(sessionId, TEST_BASE_DIR);
-      const s1 = status(sessionId, TEST_BASE_DIR);
+      await next(sessionId);
+      const s1 = status(sessionId);
       expect(s1.steps[0].status).toBe("running");
 
-      await report(
-        sessionId,
-        {
-          stepKey: "step1_task",
-          status: "completed",
-          subagentOutput: "success task done",
-        },
-        TEST_BASE_DIR,
-      );
+      await report(sessionId, {
+        stepKey: "step1_task",
+        status: "completed",
+        subagentOutput: "success task done",
+      });
 
-      const s2 = status(sessionId, TEST_BASE_DIR);
+      const s2 = status(sessionId);
       expect(s2.steps[0].status).toBe("passed");
     });
 
     it("存在しないセッションでEngineErrorをスローする", () => {
-      expect(() => status("nonexistent-session", TEST_BASE_DIR)).toThrow(EngineError);
+      expect(() => status("nonexistent-session")).toThrow(EngineError);
     });
   });
 });

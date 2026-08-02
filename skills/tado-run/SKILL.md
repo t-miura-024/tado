@@ -22,7 +22,7 @@ tado init --workflow <workflow.ts パス>
 ```
 
 - stdout にセッション情報（`sessionId` を含む JSON）が出力される。`sessionId` を控え、以降のコマンドの `<id>` に使う。
-- 状態は `workflow.db`（SQLite）で機械的に管理される。
+- 状態は `{TADO_HOME}/workflow.db`（SQLite、デフォルトは `~/.tado/workflow.db`）で機械的に管理される。セッションの成果物は `{TADO_HOME}/{sessionId}/` に保存される。
 
 ### 2. next / report サイクル
 

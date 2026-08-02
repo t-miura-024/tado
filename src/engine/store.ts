@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { Database } from "bun:sqlite";
 import type { WorkflowDef } from "../types/workflow-def.ts";
@@ -13,11 +14,18 @@ export class EngineError extends Error {
   }
 }
 
-/**
- * Default base directory for session storage.
- * Each session lives in `{DEFAULT_BASE_DIR}/{sessionId}/` with its `workflow.db`.
- */
-export const DEFAULT_BASE_DIR = path.resolve("tmp", "tado");
+const BUSY_TIMEOUT_MS = 5000;
+
+/** Resolve the root directory used for all tado state and session artifacts. */
+export function getTadoHome(): string {
+  const configuredHome = process.env.TADO_HOME?.trim();
+  return path.resolve(configuredHome || path.join(os.homedir(), ".tado"));
+}
+
+/** Resolve the single SQLite database used by all sessions. */
+export function getWorkflowDbPath(): string {
+  return path.join(getTadoHome(), "workflow.db");
+}
 
 export interface SessionRow {
   id: string;
@@ -77,12 +85,55 @@ export async function importWorkflowDef(workflowPath: string): Promise<WorkflowD
   return def;
 }
 
-export function openDb(sessionDir: string): Database {
-  const dbPath = path.join(sessionDir, "workflow.db");
+export function openDb(): Database {
+  const dbPath = getWorkflowDbPath();
   try {
-    return new Database(dbPath);
-  } catch {
-    throw new EngineError(`Session database not found: ${sessionDir}`);
+    const db = new Database(dbPath);
+    db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS};`);
+    const journalMode = db.query("PRAGMA journal_mode").get() as Record<string, unknown>;
+    if (journalMode.journal_mode !== "wal") {
+      db.exec("PRAGMA journal_mode = WAL;");
+    }
+    return db;
+  } catch (error) {
+    const reason = error instanceof Error ? `: ${error.message}` : `: ${String(error)}`;
+    throw new EngineError(`Unable to open session database: ${dbPath}${reason}`);
+  }
+}
+
+/**
+ * Open the shared database.
+ *
+ * A missing database means that no session has been initialized yet. Once the
+ * file exists, however, opening or reading it can fail for operational
+ * reasons (permissions, corruption, or a lock timeout), which must not be
+ * reported as a missing session.
+ */
+export function openSessionDb(sessionId: string): Database {
+  const dbPath = getWorkflowDbPath();
+  try {
+    fs.statSync(dbPath);
+  } catch (error) {
+    const code = (error as { code?: string }).code;
+    if (code === "ENOENT") {
+      throw new EngineError(`Session not found: ${sessionId}`);
+    }
+    const reason = error instanceof Error ? `: ${error.message}` : `: ${String(error)}`;
+    throw new EngineError(`Unable to access session database: ${dbPath}${reason}`);
+  }
+
+  let db: Database | undefined;
+  try {
+    db = openDb();
+    db.query("SELECT id FROM sessions LIMIT 1").all();
+    return db;
+  } catch (error) {
+    db?.close();
+    if (error instanceof EngineError) {
+      throw error;
+    }
+    const reason = error instanceof Error ? `: ${error.message}` : `: ${String(error)}`;
+    throw new EngineError(`Unable to read session database: ${dbPath}${reason}`);
   }
 }
 
@@ -153,8 +204,8 @@ export function getPreviousAttempts(db: Database, stepId: number): AttemptSummar
   return rows.map((r) => ({
     attemptNumber: r.attempt_number as number,
     startedAt: r.started_at as string,
-    endedAt: r.ended_at as string | null,
-    checkStatus: r.check_status as string | null,
+    endedAt: (r.ended_at as string | null) ?? undefined,
+    checkStatus: (r.check_status as string | null) ?? undefined,
     checkResults: r.check_results_json as string | null,
   }));
 }
