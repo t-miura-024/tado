@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { InitResult } from "../types/result.ts";
-import { importWorkflowDef, openDb, initDb } from "./store.ts";
+import { importWorkflowDef, openDb, initDb, getTadoHome } from "./store.ts";
 
 function generateSessionId(): string {
   const now = new Date();
@@ -15,19 +15,17 @@ function generateSessionId(): string {
   return `${YYYY}${MM}${DD}-${HH}${mm}${ss}-${rand}`;
 }
 
-export async function init(
-  workflowPath: string,
-  baseDir: string,
-  sessionId?: string,
-): Promise<InitResult> {
+export async function init(workflowPath: string, sessionId?: string): Promise<InitResult> {
   const def = await importWorkflowDef(workflowPath);
   const resolvedPath = path.resolve(workflowPath);
 
   const sid = sessionId ?? generateSessionId();
-  const sessionDir = path.resolve(baseDir, sid);
+  const tadoHome = getTadoHome();
+  fs.mkdirSync(tadoHome, { recursive: true });
+  const sessionDir = path.join(tadoHome, sid);
   fs.mkdirSync(sessionDir, { recursive: true });
 
-  const db = openDb(sessionDir);
+  const db = openDb();
   initDb(db);
 
   db.run(

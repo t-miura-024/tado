@@ -2,7 +2,6 @@ import { describe, it, expect, afterEach } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
-  DEFAULT_BASE_DIR,
   EngineError,
   importWorkflowDef,
   openDb,
@@ -14,14 +13,18 @@ import {
   getPreviousAttempts,
   getArtifacts,
   buildConditionCtx,
+  getTadoHome,
+  getWorkflowDbPath,
+  openSessionDb,
 } from "./store.ts";
 
 const TEST_BASE_DIR = path.join(__dirname, "__test_sessions_store__");
+process.env.TADO_HOME = TEST_BASE_DIR;
 const FIXTURE_WORKFLOW = path.join(__dirname, "__fixtures__", "simple-workflow.ts");
 
-function cleanup(baseDir: string): void {
-  if (fs.existsSync(baseDir)) {
-    fs.rmSync(baseDir, { recursive: true, force: true });
+function cleanup(tadoHome: string): void {
+  if (fs.existsSync(tadoHome)) {
+    fs.rmSync(tadoHome, { recursive: true, force: true });
   }
 }
 
@@ -36,10 +39,35 @@ function newSessionDir(name: string): string {
 }
 
 describe("ストア", () => {
-  describe("DEFAULT_BASE_DIR", () => {
-    it("tmp/tadoに解決する", () => {
-      expect(DEFAULT_BASE_DIR).toBe(path.resolve("tmp", "tado"));
-      expect(DEFAULT_BASE_DIR.endsWith(path.join("tmp", "tado"))).toBe(true);
+  describe("TADO_HOME", () => {
+    it("TADO_HOMEを絶対パスとして解決する", () => {
+      const previous = process.env.TADO_HOME;
+      process.env.TADO_HOME = "relative-tado-home";
+      expect(getTadoHome()).toBe(path.resolve("relative-tado-home"));
+      expect(getWorkflowDbPath()).toBe(
+        path.join(path.resolve("relative-tado-home"), "workflow.db"),
+      );
+      process.env.TADO_HOME = previous;
+    });
+
+    it("DBオープン時にWALとbusy_timeoutを設定する", () => {
+      fs.mkdirSync(TEST_BASE_DIR, { recursive: true });
+      const db = openDb();
+      const journalMode = db.query("PRAGMA journal_mode").get() as Record<string, unknown>;
+      const busyTimeout = db.query("PRAGMA busy_timeout").get() as Record<string, unknown>;
+
+      expect(journalMode.journal_mode).toBe("wal");
+      expect(busyTimeout.timeout).toBe(5000);
+      db.close();
+    });
+
+    it("既存DBのオープンエラーをSession not foundに変換しない", () => {
+      fs.mkdirSync(TEST_BASE_DIR, { recursive: true });
+      fs.writeFileSync(getWorkflowDbPath(), "not a sqlite database");
+
+      expect(() => openSessionDb("missing-session")).toThrow(
+        `Unable to open session database: ${getWorkflowDbPath()}`,
+      );
     });
   });
 
@@ -57,8 +85,8 @@ describe("ストア", () => {
 
   describe("スキーマ初期化", () => {
     it("sessions・steps・step_attempts・artifactsテーブルを作成する", () => {
-      const dir = newSessionDir("schema");
-      const db = openDb(dir);
+      newSessionDir("schema");
+      const db = openDb();
       initDb(db);
 
       const tables = db
@@ -77,7 +105,7 @@ describe("ストア", () => {
   describe("行マッパー", () => {
     it("セッションのDB行をSessionRowにマッピングする", () => {
       const dir = newSessionDir("session-row");
-      const db = openDb(dir);
+      const db = openDb();
       initDb(db);
       db.run(
         `INSERT INTO sessions (id, workflow_id, workflow_path, session_dir, status)
@@ -101,7 +129,7 @@ describe("ストア", () => {
 
     it("ステップのDB行をStepRowにマッピングする", () => {
       const dir = newSessionDir("step-row");
-      const db = openDb(dir);
+      const db = openDb();
       initDb(db);
       db.run(
         `INSERT INTO sessions (id, workflow_id, workflow_path, session_dir, status)
@@ -132,7 +160,7 @@ describe("ストア", () => {
 
     it("ステップ試行のDB行をStepAttemptRowにマッピングする", () => {
       const dir = newSessionDir("attempt-row");
-      const db = openDb(dir);
+      const db = openDb();
       initDb(db);
       db.run(
         `INSERT INTO sessions (id, workflow_id, workflow_path, session_dir, status)
@@ -167,7 +195,7 @@ describe("ストア", () => {
 
     it("アーティファクトのDB行をArtifactRowにマッピングする", () => {
       const dir = newSessionDir("artifact-row");
-      const db = openDb(dir);
+      const db = openDb();
       initDb(db);
       db.run(
         `INSERT INTO sessions (id, workflow_id, workflow_path, session_dir, status)
@@ -195,7 +223,7 @@ describe("ストア", () => {
   describe("クエリヘルパー", () => {
     it("getArtifactsはセッションのアーティファクトレコードを返す", () => {
       const dir = newSessionDir("get-artifacts");
-      const db = openDb(dir);
+      const db = openDb();
       initDb(db);
       db.run(
         `INSERT INTO sessions (id, workflow_id, workflow_path, session_dir, status)
@@ -220,7 +248,7 @@ describe("ストア", () => {
 
     it("getPreviousAttemptsは試行番号順に試行サマリーを返す", () => {
       const dir = newSessionDir("get-attempts");
-      const db = openDb(dir);
+      const db = openDb();
       initDb(db);
       db.run(
         `INSERT INTO sessions (id, workflow_id, workflow_path, session_dir, status)
@@ -259,7 +287,7 @@ describe("ストア", () => {
 
     it("buildConditionCtxはゲートの選択とアーティファクトを収集する", () => {
       const dir = newSessionDir("condition-ctx");
-      const db = openDb(dir);
+      const db = openDb();
       initDb(db);
       db.run(
         `INSERT INTO sessions (id, workflow_id, workflow_path, session_dir, status)

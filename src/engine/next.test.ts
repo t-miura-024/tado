@@ -2,25 +2,34 @@ import { describe, it, expect, afterEach } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Database } from "bun:sqlite";
-import { init, next, report, EngineError, ARTIFACT_PRESENT_INSTRUCTION } from "./index.ts";
+import type { NextResult } from "../types/result.ts";
+import {
+  init,
+  next,
+  report,
+  EngineError,
+  ARTIFACT_PRESENT_INSTRUCTION,
+  getWorkflowDbPath,
+} from "./index.ts";
 
-const TEST_BASE_DIR = path.join(__dirname, "__test_sessions_next__");
+const TEST_TADO_HOME = path.join(__dirname, "__test_sessions_next__");
+process.env.TADO_HOME = TEST_TADO_HOME;
 const FIXTURE_WORKFLOW = path.join(__dirname, "__fixtures__", "simple-workflow.ts");
 
-function cleanup(baseDir: string): void {
-  if (fs.existsSync(baseDir)) {
-    fs.rmSync(baseDir, { recursive: true, force: true });
+function cleanup(tadoHome: string): void {
+  if (fs.existsSync(tadoHome)) {
+    fs.rmSync(tadoHome, { recursive: true, force: true });
   }
 }
 
 afterEach(() => {
-  cleanup(TEST_BASE_DIR);
+  cleanup(TEST_TADO_HOME);
 });
 
 describe("next", () => {
   it("最初のステップのタスクプロンプトを返す", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
-    const result = await next(sessionId, TEST_BASE_DIR);
+    const { sessionId } = await init(FIXTURE_WORKFLOW);
+    const result = await next(sessionId);
 
     expect(result.stepKey).toBe("step1_task");
     expect(result.stepType).toBe("task");
@@ -31,7 +40,7 @@ describe("next", () => {
     expect(result.context.retryCount).toBe(0);
     expect(result.context.maxRetries).toBe(2);
 
-    const db = new Database(path.join(result.context.sessionDir, "workflow.db"));
+    const db = new Database(getWorkflowDbPath());
     const step = db
       .query("SELECT status FROM steps WHERE session_id = ? AND step_key = ?")
       .get(sessionId, "step1_task") as Record<string, unknown>;
@@ -39,22 +48,108 @@ describe("next", () => {
     db.close();
   });
 
+  it("同一セッションへの同時実行で試行を二重に割り当てない", async () => {
+    const { sessionId } = await init(FIXTURE_WORKFLOW);
+    const results = await Promise.allSettled([next(sessionId), next(sessionId)]);
+
+    // A concurrent second call idempotently reissues the same prompt instead of
+    // allocating a second attempt. The invariant to protect is that the attempt
+    // is never duplicated (the step_attempts row count must stay at 1).
+    const fulfilled = results.filter((result) => result.status === "fulfilled");
+    expect(fulfilled.length).toBeGreaterThan(0);
+    for (const result of fulfilled) {
+      const nextResult = (result as PromiseFulfilledResult<NextResult>).value;
+      expect(nextResult.stepKey).toBe("step1_task");
+      expect(nextResult.context.attemptNumber).toBe(1);
+    }
+
+    const db = new Database(getWorkflowDbPath());
+    const attempts = db
+      .query(
+        "SELECT COUNT(*) AS count FROM step_attempts WHERE step_id = (SELECT id FROM steps WHERE session_id = ? AND step_key = ?)",
+      )
+      .get(sessionId, "step1_task") as Record<string, unknown>;
+    expect(attempts.count).toBe(1);
+    db.close();
+  });
+
+  it("runningステップを新規アテンプトなしで冪等に再開する", async () => {
+    const { sessionId } = await init(FIXTURE_WORKFLOW);
+    const first = await next(sessionId);
+    expect(first.stepKey).toBe("step1_task");
+    expect(first.context.attemptNumber).toBe(1);
+
+    // Simulate an interrupted session: `next` committed but `report` never arrived.
+    // Re-running `next` must reissue the same prompt without a new attempt.
+    const resumed = await next(sessionId);
+    expect(resumed.stepKey).toBe("step1_task");
+    expect(resumed.context.attemptNumber).toBe(1);
+    expect(resumed.prompt).toBe(first.prompt);
+
+    const db = new Database(getWorkflowDbPath());
+    const attempts = db
+      .query(
+        "SELECT COUNT(*) AS count FROM step_attempts WHERE step_id = (SELECT id FROM steps WHERE session_id = ? AND step_key = ?)",
+      )
+      .get(sessionId, "step1_task") as Record<string, unknown>;
+    expect(attempts.count).toBe(1);
+    const step = db
+      .query("SELECT status FROM steps WHERE session_id = ? AND step_key = ?")
+      .get(sessionId, "step1_task") as Record<string, unknown>;
+    expect(step.status).toBe("running");
+    db.close();
+
+    // The reissued prompt is still reported against the running attempt.
+    const r = await report(sessionId, {
+      stepKey: "step1_task",
+      status: "completed",
+      subagentOutput: "success task done",
+    });
+    expect(r.nextAction).toBe("continue");
+  });
+
+  it("リトライ後のrunningステップも冪等に再開する", async () => {
+    const { sessionId } = await init(FIXTURE_WORKFLOW);
+    await next(sessionId);
+    await report(sessionId, {
+      stepKey: "step1_task",
+      status: "completed",
+      subagentOutput: "failure output",
+    });
+
+    // Retry allocates attempt 2.
+    const first = await next(sessionId);
+    expect(first.context.attemptNumber).toBe(2);
+    expect(first.context.retryCount).toBe(1);
+
+    // Resuming attempt 2 reissues the same prompt without allocating attempt 3.
+    const resumed = await next(sessionId);
+    expect(resumed.context.attemptNumber).toBe(2);
+    expect(resumed.context.retryCount).toBe(1);
+    expect(resumed.prompt).toBe(first.prompt);
+
+    const db = new Database(getWorkflowDbPath());
+    const attempts = db
+      .query(
+        "SELECT COUNT(*) AS count FROM step_attempts WHERE step_id = (SELECT id FROM steps WHERE session_id = ? AND step_key = ?)",
+      )
+      .get(sessionId, "step1_task") as Record<string, unknown>;
+    expect(attempts.count).toBe(2);
+    db.close();
+  });
+
   it("human_gateのプロンプトを返す", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
+    const { sessionId } = await init(FIXTURE_WORKFLOW);
 
-    await next(sessionId, TEST_BASE_DIR);
+    await next(sessionId);
 
-    await report(
-      sessionId,
-      {
-        stepKey: "step1_task",
-        status: "completed",
-        subagentOutput: "success task done",
-      },
-      TEST_BASE_DIR,
-    );
+    await report(sessionId, {
+      stepKey: "step1_task",
+      status: "completed",
+      subagentOutput: "success task done",
+    });
 
-    const result = await next(sessionId, TEST_BASE_DIR);
+    const result = await next(sessionId);
 
     expect(result.stepKey).toBe("step2_human_gate");
     expect(result.stepType).toBe("human_gate");
@@ -65,31 +160,23 @@ describe("next", () => {
   });
 
   it("並列サブタスクのプロンプトを返す", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
+    const { sessionId } = await init(FIXTURE_WORKFLOW);
 
-    await next(sessionId, TEST_BASE_DIR);
-    await report(
-      sessionId,
-      {
-        stepKey: "step1_task",
-        status: "completed",
-        subagentOutput: "success task done",
-      },
-      TEST_BASE_DIR,
-    );
+    await next(sessionId);
+    await report(sessionId, {
+      stepKey: "step1_task",
+      status: "completed",
+      subagentOutput: "success task done",
+    });
 
-    await next(sessionId, TEST_BASE_DIR);
-    await report(
-      sessionId,
-      {
-        stepKey: "step2_human_gate",
-        status: "completed",
-        subagentOutput: "approve",
-      },
-      TEST_BASE_DIR,
-    );
+    await next(sessionId);
+    await report(sessionId, {
+      stepKey: "step2_human_gate",
+      status: "completed",
+      subagentOutput: "approve",
+    });
 
-    const result = await next(sessionId, TEST_BASE_DIR);
+    const result = await next(sessionId);
 
     expect(result.stepKey).toBe("step3_parallel");
     expect(result.stepType).toBe("parallel");
@@ -102,22 +189,40 @@ describe("next", () => {
   });
 
   it("存在しないセッションでEngineErrorをスローする", async () => {
-    await expect(next("nonexistent-session", TEST_BASE_DIR)).rejects.toThrow(EngineError);
+    await expect(next("nonexistent-session")).rejects.toThrow(EngineError);
+  });
+
+  it("旧レイアウトのセッションDBを自動読み込みしない", async () => {
+    const oldSessionDir = path.join(
+      TEST_TADO_HOME,
+      "old-repository",
+      "tmp",
+      "tado",
+      "legacy-session",
+    );
+    fs.mkdirSync(oldSessionDir, { recursive: true });
+    const oldDb = new Database(path.join(oldSessionDir, "workflow.db"));
+    oldDb.exec("CREATE TABLE sessions (id TEXT PRIMARY KEY)");
+    oldDb.run("INSERT INTO sessions (id) VALUES (?)", ["legacy-session"]);
+    oldDb.close();
+
+    await expect(next("legacy-session")).rejects.toThrow("Session not found: legacy-session");
+    expect(fs.existsSync(getWorkflowDbPath())).toBe(false);
   });
 
   it("完了済みセッションでEngineErrorをスローする", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
-    const db = new Database(path.join(TEST_BASE_DIR, sessionId, "workflow.db"));
+    const { sessionId } = await init(FIXTURE_WORKFLOW);
+    const db = new Database(getWorkflowDbPath());
     db.run("UPDATE sessions SET status = ? WHERE id = ?", ["done", sessionId]);
     db.close();
-    await expect(next(sessionId, TEST_BASE_DIR)).rejects.toThrow(EngineError);
+    await expect(next(sessionId)).rejects.toThrow(EngineError);
   });
 
   describe("DBにworkflow_pathがないワークフロー", () => {
     it("nextとreportで--workflowフラグを受け付ける", async () => {
-      const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
+      const { sessionId } = await init(FIXTURE_WORKFLOW);
 
-      const result = await next(sessionId, TEST_BASE_DIR, FIXTURE_WORKFLOW);
+      const result = await next(sessionId, FIXTURE_WORKFLOW);
       expect(result.stepKey).toBe("step1_task");
 
       const r = await report(
@@ -127,7 +232,6 @@ describe("next", () => {
           status: "completed",
           subagentOutput: "success task done",
         },
-        TEST_BASE_DIR,
         FIXTURE_WORKFLOW,
       );
 
@@ -137,7 +241,7 @@ describe("next", () => {
 
   describe("条件付きステップスキップ", () => {
     it("conditionがfalseを返すときにステップをスキップする", async () => {
-      const tmpDir = path.join(TEST_BASE_DIR, "condition-skip-test");
+      const tmpDir = path.join(TEST_TADO_HOME, "condition-skip-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "condition-skip-workflow.ts");
       fs.writeFileSync(
@@ -192,23 +296,19 @@ describe("next", () => {
       `,
       );
 
-      const { sessionId } = await init(workflowPath, TEST_BASE_DIR);
+      const { sessionId } = await init(workflowPath);
 
       // step1 executes normally
-      const r1 = await next(sessionId, TEST_BASE_DIR);
+      const r1 = await next(sessionId);
       expect(r1.stepKey).toBe("step1");
-      await report(
-        sessionId,
-        { stepKey: "step1", status: "completed", subagentOutput: "done" },
-        TEST_BASE_DIR,
-      );
+      await report(sessionId, { stepKey: "step1", status: "completed", subagentOutput: "done" });
 
       // next should skip step2 (condition=false) and return step3
-      const r2 = await next(sessionId, TEST_BASE_DIR);
+      const r2 = await next(sessionId);
       expect(r2.stepKey).toBe("step3");
 
       // verify step2 is marked as skipped in DB
-      const db = new Database(path.join(TEST_BASE_DIR, sessionId, "workflow.db"));
+      const db = new Database(getWorkflowDbPath());
       const step2 = db
         .query("SELECT status FROM steps WHERE session_id = ? AND step_key = ?")
         .get(sessionId, "step2_conditional") as Record<string, unknown>;
@@ -217,7 +317,7 @@ describe("next", () => {
     });
 
     it("conditionがtrueを返すときにステップを実行する", async () => {
-      const tmpDir = path.join(TEST_BASE_DIR, "condition-pass-test");
+      const tmpDir = path.join(TEST_TADO_HOME, "condition-pass-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "condition-pass-workflow.ts");
       fs.writeFileSync(
@@ -246,20 +346,20 @@ describe("next", () => {
       `,
       );
 
-      const { sessionId } = await init(workflowPath, TEST_BASE_DIR);
-      const r1 = await next(sessionId, TEST_BASE_DIR);
+      const { sessionId } = await init(workflowPath);
+      const r1 = await next(sessionId);
       expect(r1.stepKey).toBe("step1");
       expect(r1.prompt).toBe("step1 prompt");
     });
 
     it("conditionがundefinedのときにステップを実行する（後方互換）", async () => {
-      const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
-      const r1 = await next(sessionId, TEST_BASE_DIR);
+      const { sessionId } = await init(FIXTURE_WORKFLOW);
+      const r1 = await next(sessionId);
       expect(r1.stepKey).toBe("step1_task");
     });
 
     it("false条件の連続ステップを複数スキップする", async () => {
-      const tmpDir = path.join(TEST_BASE_DIR, "multi-skip-test");
+      const tmpDir = path.join(TEST_TADO_HOME, "multi-skip-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "multi-skip-workflow.ts");
       fs.writeFileSync(
@@ -328,20 +428,16 @@ describe("next", () => {
       `,
       );
 
-      const { sessionId } = await init(workflowPath, TEST_BASE_DIR);
+      const { sessionId } = await init(workflowPath);
 
-      await next(sessionId, TEST_BASE_DIR);
-      await report(
-        sessionId,
-        { stepKey: "step1", status: "completed", subagentOutput: "done" },
-        TEST_BASE_DIR,
-      );
+      await next(sessionId);
+      await report(sessionId, { stepKey: "step1", status: "completed", subagentOutput: "done" });
 
       // Should skip step2 and step3, land on step4
-      const r = await next(sessionId, TEST_BASE_DIR);
+      const r = await next(sessionId);
       expect(r.stepKey).toBe("step4");
 
-      const db = new Database(path.join(TEST_BASE_DIR, sessionId, "workflow.db"));
+      const db = new Database(getWorkflowDbPath());
       const s2 = db
         .query("SELECT status FROM steps WHERE session_id = ? AND step_key = ?")
         .get(sessionId, "step2_skip") as Record<string, unknown>;
@@ -354,7 +450,7 @@ describe("next", () => {
     });
 
     it("残りステップすべてがスキップされたときにセッションを完了にする", async () => {
-      const tmpDir = path.join(TEST_BASE_DIR, "all-skip-test");
+      const tmpDir = path.join(TEST_TADO_HOME, "all-skip-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "all-skip-workflow.ts");
       fs.writeFileSync(
@@ -396,19 +492,15 @@ describe("next", () => {
       `,
       );
 
-      const { sessionId } = await init(workflowPath, TEST_BASE_DIR);
+      const { sessionId } = await init(workflowPath);
 
-      await next(sessionId, TEST_BASE_DIR);
-      await report(
-        sessionId,
-        { stepKey: "step1", status: "completed", subagentOutput: "done" },
-        TEST_BASE_DIR,
-      );
+      await next(sessionId);
+      await report(sessionId, { stepKey: "step1", status: "completed", subagentOutput: "done" });
 
       // All remaining steps skipped → session done
-      await expect(next(sessionId, TEST_BASE_DIR)).rejects.toThrow("All steps completed");
+      await expect(next(sessionId)).rejects.toThrow("All steps completed");
 
-      const db = new Database(path.join(TEST_BASE_DIR, sessionId, "workflow.db"));
+      const db = new Database(getWorkflowDbPath());
       const session = db.query("SELECT status FROM sessions WHERE id = ?").get(sessionId) as Record<
         string,
         unknown
@@ -418,7 +510,7 @@ describe("next", () => {
     });
 
     it("conditionコンテキストにgateChoicesを提供する", async () => {
-      const tmpDir = path.join(TEST_BASE_DIR, "gate-choices-test");
+      const tmpDir = path.join(TEST_TADO_HOME, "gate-choices-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "gate-choices-workflow.ts");
       fs.writeFileSync(
@@ -480,23 +572,23 @@ describe("next", () => {
       `,
       );
 
-      const { sessionId } = await init(workflowPath, TEST_BASE_DIR);
+      const { sessionId } = await init(workflowPath);
 
       // Pass the gate with 'approve'
-      await next(sessionId, TEST_BASE_DIR);
-      await report(
-        sessionId,
-        { stepKey: "gate_step", status: "completed", subagentOutput: "approve" },
-        TEST_BASE_DIR,
-      );
+      await next(sessionId);
+      await report(sessionId, {
+        stepKey: "gate_step",
+        status: "completed",
+        subagentOutput: "approve",
+      });
 
       // conditional_step should execute because gateChoices['gate_step'] === 'approve'
-      const r = await next(sessionId, TEST_BASE_DIR);
+      const r = await next(sessionId);
       expect(r.stepKey).toBe("conditional_step");
     });
 
     it("gateChoices条件が満たされたときにステップを実行する", async () => {
-      const tmpDir = path.join(TEST_BASE_DIR, "gate-execute-test");
+      const tmpDir = path.join(TEST_TADO_HOME, "gate-execute-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "gate-execute-workflow.ts");
       fs.writeFileSync(
@@ -553,22 +645,22 @@ describe("next", () => {
       `,
       );
 
-      const { sessionId } = await init(workflowPath, TEST_BASE_DIR);
+      const { sessionId } = await init(workflowPath);
 
       // Gate approves → condition gateChoices['gate_step'] === 'approve' is true → step executes
-      await next(sessionId, TEST_BASE_DIR);
-      await report(
-        sessionId,
-        { stepKey: "gate_step", status: "completed", subagentOutput: "approve" },
-        TEST_BASE_DIR,
-      );
+      await next(sessionId);
+      await report(sessionId, {
+        stepKey: "gate_step",
+        status: "completed",
+        subagentOutput: "approve",
+      });
 
-      const r = await next(sessionId, TEST_BASE_DIR);
+      const r = await next(sessionId);
       expect(r.stepKey).toBe("conditional_step");
     });
 
     it("conditionコンテキストにartifactsを提供する", async () => {
-      const tmpDir = path.join(TEST_BASE_DIR, "condition-artifacts-test");
+      const tmpDir = path.join(TEST_TADO_HOME, "condition-artifacts-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "condition-artifacts-workflow.ts");
       fs.writeFileSync(
@@ -623,21 +715,17 @@ describe("next", () => {
       `,
       );
 
-      const { sessionId } = await init(workflowPath, TEST_BASE_DIR);
+      const { sessionId } = await init(workflowPath);
 
       // step1 completes WITHOUT producing the needed artifact
-      await next(sessionId, TEST_BASE_DIR);
-      await report(
-        sessionId,
-        { stepKey: "step1", status: "completed", subagentOutput: "done" },
-        TEST_BASE_DIR,
-      );
+      await next(sessionId);
+      await report(sessionId, { stepKey: "step1", status: "completed", subagentOutput: "done" });
 
       // step2 should be skipped because artifact 'needed.txt' doesn't exist
-      const r = await next(sessionId, TEST_BASE_DIR);
+      const r = await next(sessionId);
       expect(r.stepKey).toBe("step3");
 
-      const db = new Database(path.join(TEST_BASE_DIR, sessionId, "workflow.db"));
+      const db = new Database(getWorkflowDbPath());
       const s2 = db
         .query("SELECT status FROM steps WHERE session_id = ? AND step_key = ?")
         .get(sessionId, "step2_conditional") as Record<string, unknown>;
@@ -648,7 +736,7 @@ describe("next", () => {
 
   describe("ヒューマンゲートのアーティファクト提示指示", () => {
     it("アーティファクト登録時にパスと提示指示を含める", async () => {
-      const tmpDir = path.join(TEST_BASE_DIR, "gate-present-test");
+      const tmpDir = path.join(TEST_TADO_HOME, "gate-present-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "gate-present-workflow.ts");
       fs.writeFileSync(
@@ -693,23 +781,19 @@ describe("next", () => {
       `,
       );
 
-      const { sessionId } = await init(workflowPath, TEST_BASE_DIR);
+      const { sessionId } = await init(workflowPath);
 
       // prepare step registers the issue-body.md artifact
-      await next(sessionId, TEST_BASE_DIR);
-      await report(
-        sessionId,
-        {
-          stepKey: "prepare",
-          status: "completed",
-          subagentOutput: "done",
-          artifacts: [{ key: "issue-body.md", path: "/tmp/plan/issue-body.md" }],
-        },
-        TEST_BASE_DIR,
-      );
+      await next(sessionId);
+      await report(sessionId, {
+        stepKey: "prepare",
+        status: "completed",
+        subagentOutput: "done",
+        artifacts: [{ key: "issue-body.md", path: "/tmp/plan/issue-body.md" }],
+      });
 
       // human gate prompt should present the artifact path AND the instruction
-      const result = await next(sessionId, TEST_BASE_DIR);
+      const result = await next(sessionId);
       expect(result.stepKey).toBe("decompose_gate");
       expect(result.stepType).toBe("human_gate");
       expect(result.prompt).toContain("- issue-body.md: /tmp/plan/issue-body.md");
@@ -717,21 +801,17 @@ describe("next", () => {
     });
 
     it("アーティファクト未登録時に提示指示を含めない", async () => {
-      const { sessionId } = await init(FIXTURE_WORKFLOW, TEST_BASE_DIR);
+      const { sessionId } = await init(FIXTURE_WORKFLOW);
 
-      await next(sessionId, TEST_BASE_DIR);
-      await report(
-        sessionId,
-        {
-          stepKey: "step1_task",
-          status: "completed",
-          subagentOutput: "success task done",
-        },
-        TEST_BASE_DIR,
-      );
+      await next(sessionId);
+      await report(sessionId, {
+        stepKey: "step1_task",
+        status: "completed",
+        subagentOutput: "success task done",
+      });
 
       // step2_human_gate has presentArtifacts: [] → no artifacts presented
-      const result = await next(sessionId, TEST_BASE_DIR);
+      const result = await next(sessionId);
       expect(result.stepKey).toBe("step2_human_gate");
       expect(result.stepType).toBe("human_gate");
       expect(result.prompt).toContain("(成果物なし)");
