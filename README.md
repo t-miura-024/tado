@@ -91,18 +91,20 @@ tado init --workflow ./workflow.ts
 
 ### StepDef の構造
 
-| フィールド   | 型                                     | 説明                                                  |
-| ------------ | -------------------------------------- | ----------------------------------------------------- |
-| `key`        | `string`                               | ステップ識別子（ワークフロー内で一意）                |
-| `phase`      | `string`                               | フェーズ名（表示用）                                  |
-| `type`       | `"task" \| "human_gate" \| "parallel"` | ステップの種類                                        |
-| `maxRetries` | `number`                               | 最大リトライ回数                                      |
-| `onFail`     | `OnFailStrategy`                       | 失敗時戦略（`retry` / `goto` / `abort` / `escalate`） |
-| `check`      | `(ctx: CheckCtx) => CheckResult`       | 完了検証関数（`pass` / `fail` / `error` を返す）      |
-| `condition?` | `(ctx: ConditionCtx) => boolean`       | ステップ実行条件（`false` ならスキップ）              |
-| `task?`      | `TaskStepDef`                          | `type: "task"` のときの定義                           |
-| `humanGate?` | `HumanGateStepDef`                     | `type: "human_gate"` のときの定義                     |
-| `parallel?`  | `ParallelStepDef`                      | `type: "parallel"` のときの定義                       |
+| フィールド    | 型                                           | 説明                                                  |
+| ------------- | -------------------------------------------- | ----------------------------------------------------- |
+| `key`         | `string`                                     | ステップ識別子（ワークフロー内で一意）                |
+| `phase`       | `string`                                     | フェーズ名（表示用）                                  |
+| `type`        | `"task" \| "human_gate" \| "parallel"`       | ステップの種類                                        |
+| `maxRetries`  | `number`                                     | 最大リトライ回数                                      |
+| `onFail`      | `OnFailStrategy`                             | 失敗時戦略（`retry` / `goto` / `abort` / `escalate`） |
+| `check`       | `(ctx: CheckCtx) => CheckResult`             | 完了検証関数（`pass` / `fail` / `error` を返す）      |
+| `condition?`  | `(ctx: ConditionCtx) => boolean`             | ステップ実行条件（`false` ならスキップ）              |
+| `beforeStep?` | `(ctx: StepCtx) => Promise<ArtifactInput[]>` | プロンプト生成前に実行されるフック                    |
+| `afterStep?`  | `(ctx: StepCtx) => Promise<ArtifactInput[]>` | `check` の前に実行されるフック                        |
+| `task?`       | `TaskStepDef`                                | `type: "task"` のときの定義                           |
+| `humanGate?`  | `HumanGateStepDef`                           | `type: "human_gate"` のときの定義                     |
+| `parallel?`   | `ParallelStepDef`                            | `type: "parallel"` のときの定義                       |
 
 ### ステップタイプ
 
@@ -172,6 +174,36 @@ echo '{"stepKey":"approve_spec","status":"completed","subagentOutput":"approve"}
 #### parallel
 
 複数の SubTask を並列に実行するステップです。`parallel.subtasks` に `SubtaskDef`（`key` / `subagentType` / `buildPrompt`）の配列を定義します。`report` 時は `subtaskResults` に各 SubTask の結果をまとめて渡します。
+
+### ステップフック（beforeStep / afterStep）
+
+ステップのプロンプト生成前 / チェック前に非同期処理を挟み、成果物を注入・変換できる汎用インターセプターです。
+
+- `beforeStep(ctx: StepCtx)` — `buildPrompt` の前に実行されます。返却した成果物は DB に登録され、`PromptCtx.artifacts` にマージされます（既存と同じ `key` はフックの返却値で上書き）。失敗時は `maxRetries` までリトライし、枯渇するとステップは `failed` となりワークフローが停止します。フックは DB トランザクションの外で実行されるため、時間のかかる非同期 I/O（ネットワーク等）を実行しても他セッションの `next()` をブロックしません。
+- `afterStep(ctx: StepCtx)` — `check` の前に実行されます。返却した成果物は DB に登録され、`CheckCtx.artifacts` にマージされます（上書き戦略は `beforeStep` と同じ）。同名キーの上書きが発生した場合はログ出力のみ行い、変換履歴を DB に残しません。
+
+```typescript
+{
+  key: "write_spec",
+  phase: "仕様策定",
+  type: "task",
+  maxRetries: 3,
+  onFail: { action: "escalate" },
+  beforeStep: async (ctx) => {
+    const plan = await loadPlan(ctx.sessionDir);
+    return [{ key: "plan.md", path: plan }];
+  },
+  afterStep: async (ctx) => {
+    await exportArtifacts(ctx.sessionDir);
+    return [];
+  },
+  task: { /* ... */ },
+  check: (ctx) => { /* ... */ },
+}
+```
+
+`StepCtx` は `sessionDir` / `artifacts` / `stepKey` / `attemptNumber` を提供します。
+`parallel` ステップでは、フックはステップ全体に 1 回だけ適用されます（各サブタスクには適用されません）。
 
 ## examples/
 

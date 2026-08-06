@@ -338,6 +338,207 @@ describe("レポート", () => {
     });
   });
 
+  describe("afterStepフック", () => {
+    it("返却artifactsをDBに登録する", async () => {
+      const tmpDir = path.join(TEST_TADO_HOME, "after-step-register-test");
+      fs.mkdirSync(tmpDir, { recursive: true });
+      const workflowPath = path.join(tmpDir, "after-step-workflow.ts");
+      fs.writeFileSync(
+        workflowPath,
+        `
+        const def = {
+          id: 'after-step-test',
+          steps: [
+            {
+              key: 'step1',
+              phase: 'first',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'abort' },
+              afterStep: async (ctx) => [
+                { key: 'post.txt', path: '/tmp/post.txt' },
+              ],
+              task: {
+                action: 'run_subagent',
+                subagentType: 'test',
+                buildPrompt: (ctx) => 'prompt',
+              },
+              check: (ctx) => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+      `,
+      );
+
+      const { sessionId } = await init(workflowPath);
+      await next(sessionId);
+      const r = await report(sessionId, {
+        stepKey: "step1",
+        status: "completed",
+        subagentOutput: "done",
+      });
+      expect(r.checkResult.status).toBe("pass");
+
+      const db = new Database(getWorkflowDbPath());
+      const rows = db
+        .query("SELECT * FROM artifacts WHERE session_id = ?")
+        .all(sessionId) as Record<string, unknown>[];
+      expect(rows).toHaveLength(1);
+      expect(rows[0].artifact_key).toBe("post.txt");
+      expect(rows[0].file_path).toBe("/tmp/post.txt");
+      expect(rows[0].step_key).toBe("step1");
+      db.close();
+    });
+
+    it("StepCtxにstepKeyとattemptNumberを提供する", async () => {
+      const tmpDir = path.join(TEST_TADO_HOME, "after-step-ctx-test");
+      fs.mkdirSync(tmpDir, { recursive: true });
+      const workflowPath = path.join(tmpDir, "after-step-ctx-workflow.ts");
+      fs.writeFileSync(
+        workflowPath,
+        `
+        const def = {
+          id: 'after-step-ctx-test',
+          steps: [
+            {
+              key: 'render',
+              phase: 'render',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'abort' },
+              afterStep: async (ctx) => [
+                { key: 'ctx-' + ctx.stepKey + '-' + ctx.attemptNumber, path: ctx.sessionDir },
+              ],
+              task: {
+                action: 'run_subagent',
+                subagentType: 'test',
+                buildPrompt: (ctx) => 'prompt',
+              },
+              check: (ctx) => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+      `,
+      );
+
+      const { sessionId } = await init(workflowPath);
+      await next(sessionId);
+      await report(sessionId, { stepKey: "render", status: "completed", subagentOutput: "done" });
+
+      const db = new Database(getWorkflowDbPath());
+      const rows = db
+        .query("SELECT * FROM artifacts WHERE session_id = ?")
+        .all(sessionId) as Record<string, unknown>[];
+      expect(rows).toHaveLength(1);
+      expect(rows[0].artifact_key).toBe("ctx-render-1");
+      db.close();
+    });
+
+    it("返却artifactsをcheckのCheckCtx.artifactsにマージし同名キーを上書きする", async () => {
+      const tmpDir = path.join(TEST_TADO_HOME, "after-step-merge-test");
+      fs.mkdirSync(tmpDir, { recursive: true });
+      const workflowPath = path.join(tmpDir, "after-step-merge-workflow.ts");
+      fs.writeFileSync(
+        workflowPath,
+        `
+        const def = {
+          id: 'after-step-merge-test',
+          steps: [
+            {
+              key: 'step1',
+              phase: 'first',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'abort' },
+              afterStep: async (ctx) => [
+                { key: 'out.md', path: '/tmp/new.md' },
+              ],
+              task: {
+                action: 'run_subagent',
+                subagentType: 'test',
+                buildPrompt: (ctx) => 'prompt',
+              },
+              check: (ctx) => {
+                const out = ctx.artifacts.find((a) => a.artifactKey === 'out.md');
+                return out && out.filePath === '/tmp/new.md'
+                  ? { status: 'pass', reasons: ['merged'] }
+                  : { status: 'fail', reasons: ['out.md not overwritten: ' + JSON.stringify(ctx.artifacts)] };
+              },
+            },
+          ],
+        };
+        export default def;
+      `,
+      );
+
+      const { sessionId } = await init(workflowPath);
+      await next(sessionId);
+
+      // Report input registers out.md with the OLD path
+      const r = await report(sessionId, {
+        stepKey: "step1",
+        status: "completed",
+        subagentOutput: "done",
+        artifacts: [{ key: "out.md", path: "/tmp/old.md" }],
+      });
+
+      // afterStep overwrote out.md → check sees the merged value and passes
+      expect(r.checkResult.status).toBe("pass");
+
+      const db = new Database(getWorkflowDbPath());
+      const rows = db
+        .query("SELECT * FROM artifacts WHERE session_id = ?")
+        .all(sessionId) as Record<string, unknown>[];
+      expect(rows).toHaveLength(1);
+      expect(rows[0].artifact_key).toBe("out.md");
+      expect(rows[0].file_path).toBe("/tmp/new.md");
+      db.close();
+    });
+
+    it("afterStepの例外をreport()から伝播させる", async () => {
+      const tmpDir = path.join(TEST_TADO_HOME, "after-step-failure-test");
+      fs.mkdirSync(tmpDir, { recursive: true });
+      const workflowPath = path.join(tmpDir, "after-step-failure-workflow.ts");
+      fs.writeFileSync(
+        workflowPath,
+        `
+        const def = {
+          id: 'after-step-failure-test',
+          steps: [
+            {
+              key: 'step1',
+              phase: 'first',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'abort' },
+              afterStep: async (ctx) => {
+                throw new Error('intentional afterStep failure');
+              },
+              task: {
+                action: 'run_subagent',
+                subagentType: 'test',
+                buildPrompt: (ctx) => 'prompt',
+              },
+              check: (ctx) => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+      `,
+      );
+
+      const { sessionId } = await init(workflowPath);
+      await next(sessionId);
+
+      // afterStep の失敗は check には至らず、例外が report() から伝播する。
+      await expect(
+        report(sessionId, { stepKey: "step1", status: "completed", subagentOutput: "done" }),
+      ).rejects.toThrow("intentional afterStep failure");
+    });
+  });
+
   describe("subtaskResults付き並列レポート", () => {
     it("レポート時にサブタスク結果を保存する", async () => {
       const { sessionId } = await init(FIXTURE_WORKFLOW);

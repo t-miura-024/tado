@@ -2,7 +2,7 @@
  * ワークフローとそのステップを定義するための型定義。
  */
 import type { ArtifactInput } from "./artifact.ts";
-import type { CheckCtx, ConditionCtx, InitCtx, PromptCtx } from "./context.ts";
+import type { CheckCtx, ConditionCtx, InitCtx, PromptCtx, StepCtx } from "./context.ts";
 import type { CheckResult } from "./result.ts";
 
 /** ワークフロー全体の定義。ステップの列と初期化フックで構成される。 */
@@ -30,6 +30,10 @@ export interface StepDef {
   check: (ctx: CheckCtx) => CheckResult;
   /** 指定した場合、この条件が true のときのみステップを実行する。 */
   condition?: (ctx: ConditionCtx) => boolean;
+  /** プロンプト生成前に実行されるフック。返却 artifacts は既存成果物と同名キーを上書きして DB へ登録・マージする。 */
+  beforeStep?: (ctx: StepCtx) => Promise<ArtifactInput[]>;
+  /** `check` 前に実行されるフック。返却 artifacts は既存成果物と同名キーを上書きして DB へ登録・マージする。 */
+  afterStep?: (ctx: StepCtx) => Promise<ArtifactInput[]>;
   task?: TaskStepDef;
   humanGate?: HumanGateStepDef;
   parallel?: ParallelStepDef;

@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import type { StepDef } from "../types/workflow-def.ts";
-import type { CheckCtx } from "../types/context.ts";
+import type { CheckCtx, StepCtx } from "../types/context.ts";
 import type { ReportInput, ReportResult, StatusResult, AttemptResult } from "../types/result.ts";
 import {
   openSessionDb,
@@ -9,6 +9,7 @@ import {
   dbRowToStepAttemptRow,
   importWorkflowDef,
   getArtifacts,
+  registerHookArtifacts,
   EngineError,
 } from "./store.ts";
 import type { StepRow } from "./store.ts";
@@ -231,6 +232,19 @@ export async function report(
   let checkReasons: string[] = [];
 
   if (stepDef) {
+    if (stepDef.afterStep) {
+      const stepCtx: StepCtx = {
+        sessionDir,
+        artifacts: getArtifacts(db, sessionId),
+        stepKey: step.stepKey,
+        attemptNumber: attempt.attemptNumber,
+      };
+      const hookArtifacts = await stepDef.afterStep(stepCtx);
+      if (hookArtifacts.length > 0) {
+        registerHookArtifacts(db, sessionId, step.stepKey, hookArtifacts, "afterStep");
+      }
+    }
+
     const artifacts = getArtifacts(db, sessionId);
     const attemptResult: AttemptResult = {
       status: input.status,
