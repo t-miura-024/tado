@@ -12,6 +12,7 @@
   },
   "type": "module",
   "exports": {
+    "./prompt": "./src/prompt.ts",
     "./types/*": "./src/types/*"
   },
   "scripts": {

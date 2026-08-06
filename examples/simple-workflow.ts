@@ -8,6 +8,7 @@
  *   tado init --workflow examples/simple-workflow.ts
  *   tado next --session <id>
  */
+import { buildStepPrompt } from "../src/prompt.ts";
 import type { WorkflowDef } from "../src/types/workflow-def.ts";
 import type { CheckCtx, PromptCtx } from "../src/types/context.ts";
 import type { CheckResult } from "../src/types/result.ts";
@@ -25,7 +26,16 @@ const def: WorkflowDef = {
         action: "run_subagent",
         subagentType: "general-purpose",
         buildPrompt: (ctx: PromptCtx): string =>
-          `## 目的\nテンプレートタスクを実行してください。\n\n### コンテキスト\n- セッション: ${ctx.sessionDir}\n- 試行回数: ${ctx.attemptNumber}/${ctx.maxRetries}`,
+          buildStepPrompt({
+            purpose: ["テンプレートタスクを実行してください。"],
+            criteria: ["出力に `done` が含まれていること。"],
+            approach: ["セッションディレクトリを確認してから作業を進めること。"],
+            output: [
+              `セッションディレクトリ: ${ctx.sessionDir}`,
+              "実行結果の要約（`done` を含める）",
+            ],
+            policy: ["作業ディレクトリ外のファイルを変更しないこと。"],
+          }),
       },
       check: (ctx: CheckCtx): CheckResult => {
         const output = ctx.attemptResult.subagentOutput ?? "";
