@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { Database } from "bun:sqlite";
 import type { WorkflowDef } from "../types/workflow-def.ts";
 import type { ConditionCtx } from "../types/context.ts";
-import type { ArtifactRecord } from "../types/artifact.ts";
+import type { ArtifactInput, ArtifactRecord } from "../types/artifact.ts";
 import type { AttemptSummary } from "../types/result.ts";
 
 export class EngineError extends Error {
@@ -216,6 +216,43 @@ export function getArtifacts(db: Database, sessionId: string): ArtifactRecord[] 
     unknown
   >[];
   return rows.map((r) => dbRowToArtifactRow(r));
+}
+
+/**
+ * beforeStep / afterStep フックが返した成果物を DB へ登録する。
+ * 既存の同名キーの成果物はフック返却値で上書きする（削除してから挿入）。
+ *
+ * 変換履歴（上書きの記録）は DB には残さない。同名キー衝突が発生したときに
+ * ログ出力のみ行う（README「ステップフック」節参照）。
+ */
+export function registerHookArtifacts(
+  db: Database,
+  sessionId: string,
+  stepKey: string,
+  artifacts: ArtifactInput[],
+  source: "beforeStep" | "afterStep",
+): void {
+  if (artifacts.length === 0) {
+    return;
+  }
+  const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+  const selectStmt = db.prepare(
+    "SELECT file_path FROM artifacts WHERE session_id = ? AND artifact_key = ?",
+  );
+  const deleteStmt = db.prepare("DELETE FROM artifacts WHERE session_id = ? AND artifact_key = ?");
+  const insertStmt = db.prepare(
+    "INSERT INTO artifacts (session_id, step_key, artifact_key, file_path, created_at) VALUES (?, ?, ?, ?, ?)",
+  );
+  for (const a of artifacts) {
+    const existing = selectStmt.get(sessionId, a.key) as { file_path: string } | undefined;
+    if (existing) {
+      console.warn(
+        `[tado] ${source} artifact overwritten: session=${sessionId} step=${stepKey} key=${a.key} (${existing.file_path} -> ${a.path})`,
+      );
+    }
+    deleteStmt.run(sessionId, a.key);
+    insertStmt.run(sessionId, stepKey, a.key, a.path, now);
+  }
 }
 
 export function buildConditionCtx(db: Database, sessionId: string): ConditionCtx {

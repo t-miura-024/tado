@@ -818,4 +818,347 @@ describe("next", () => {
       expect(result.prompt).not.toContain(ARTIFACT_PRESENT_INSTRUCTION);
     });
   });
+
+  describe("beforeStepフック", () => {
+    it("返却artifactsがPromptCtx.artifactsに反映されDBに登録される", async () => {
+      const tmpDir = path.join(TEST_TADO_HOME, "before-step-inject-test");
+      fs.mkdirSync(tmpDir, { recursive: true });
+      const workflowPath = path.join(tmpDir, "before-step-workflow.ts");
+      fs.writeFileSync(
+        workflowPath,
+        `
+        const def = {
+          id: 'before-step-test',
+          steps: [
+            {
+              key: 'step1',
+              phase: 'first',
+              type: 'task',
+              maxRetries: 2,
+              onFail: { action: 'abort' },
+              beforeStep: async (ctx) => [
+                { key: 'prep.md', path: '/tmp/prep.md' },
+              ],
+              task: {
+                action: 'run_subagent',
+                subagentType: 'test',
+                buildPrompt: (ctx) => 'artifacts: ' + JSON.stringify(ctx.artifacts.map((a) => a.artifactKey + '=' + a.filePath)),
+              },
+              check: (ctx) => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+      `,
+      );
+
+      const { sessionId } = await init(workflowPath);
+      const result = await next(sessionId);
+
+      expect(result.prompt).toContain("prep.md=/tmp/prep.md");
+
+      const db = new Database(getWorkflowDbPath());
+      const rows = db
+        .query("SELECT * FROM artifacts WHERE session_id = ?")
+        .all(sessionId) as Record<string, unknown>[];
+      expect(rows).toHaveLength(1);
+      expect(rows[0].artifact_key).toBe("prep.md");
+      expect(rows[0].file_path).toBe("/tmp/prep.md");
+      expect(rows[0].step_key).toBe("step1");
+      db.close();
+    });
+
+    it("既存の同名キーをbeforeStepの返却値で上書きする", async () => {
+      const tmpDir = path.join(TEST_TADO_HOME, "before-step-overwrite-test");
+      fs.mkdirSync(tmpDir, { recursive: true });
+      const workflowPath = path.join(tmpDir, "before-step-overwrite-workflow.ts");
+      fs.writeFileSync(
+        workflowPath,
+        `
+        const def = {
+          id: 'before-step-overwrite-test',
+          steps: [
+            {
+              key: 'step1',
+              phase: 'first',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'abort' },
+              task: {
+                action: 'run_subagent',
+                subagentType: 'test',
+                buildPrompt: (ctx) => 'step1',
+              },
+              check: (ctx) => ({ status: 'pass', reasons: [] }),
+            },
+            {
+              key: 'step2',
+              phase: 'second',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'abort' },
+              beforeStep: async (ctx) => [
+                { key: 'shared.md', path: '/tmp/new.md' },
+              ],
+              task: {
+                action: 'run_subagent',
+                subagentType: 'test',
+                buildPrompt: (ctx) => 'artifacts: ' + JSON.stringify(ctx.artifacts.map((a) => a.artifactKey + '=' + a.filePath)),
+              },
+              check: (ctx) => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+      `,
+      );
+
+      const { sessionId } = await init(workflowPath);
+
+      // step1 registers shared.md with the OLD path
+      await next(sessionId);
+      await report(sessionId, {
+        stepKey: "step1",
+        status: "completed",
+        subagentOutput: "done",
+        artifacts: [{ key: "shared.md", path: "/tmp/old.md" }],
+      });
+
+      // beforeStep of step2 overwrites shared.md with the NEW path
+      const result = await next(sessionId);
+      expect(result.stepKey).toBe("step2");
+      expect(result.prompt).toContain("shared.md=/tmp/new.md");
+      expect(result.prompt).not.toContain("/tmp/old.md");
+
+      const db = new Database(getWorkflowDbPath());
+      const rows = db
+        .query("SELECT * FROM artifacts WHERE session_id = ?")
+        .all(sessionId) as Record<string, unknown>[];
+      expect(rows).toHaveLength(1);
+      expect(rows[0].artifact_key).toBe("shared.md");
+      expect(rows[0].file_path).toBe("/tmp/new.md");
+      db.close();
+    });
+
+    it("失敗時にmaxRetriesまでリトライし成功時に続行する", async () => {
+      const tmpDir = path.join(TEST_TADO_HOME, "before-step-retry-test");
+      fs.mkdirSync(tmpDir, { recursive: true });
+      const workflowPath = path.join(tmpDir, "before-step-retry-workflow.ts");
+      fs.writeFileSync(
+        workflowPath,
+        `
+        let callCount = 0;
+        const def = {
+          id: 'before-step-retry-test',
+          steps: [
+            {
+              key: 'step1',
+              phase: 'first',
+              type: 'task',
+              maxRetries: 2,
+              onFail: { action: 'abort' },
+              beforeStep: async (ctx) => {
+                callCount++;
+                if (callCount < 2) {
+                  throw new Error('temporary failure');
+                }
+                return [{ key: 'retry.md', path: '/tmp/retry.md' }];
+              },
+              task: {
+                action: 'run_subagent',
+                subagentType: 'test',
+                buildPrompt: (ctx) => 'prompt',
+              },
+              check: (ctx) => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+      `,
+      );
+
+      const { sessionId } = await init(workflowPath);
+      const result = await next(sessionId);
+      expect(result.stepKey).toBe("step1");
+
+      const db = new Database(getWorkflowDbPath());
+      const rows = db
+        .query("SELECT * FROM artifacts WHERE session_id = ?")
+        .all(sessionId) as Record<string, unknown>[];
+      expect(rows).toHaveLength(1);
+      expect(rows[0].artifact_key).toBe("retry.md");
+      db.close();
+    });
+
+    it("リトライ枯渇時にステップをfailedにしてワークフローを停止する", async () => {
+      const tmpDir = path.join(TEST_TADO_HOME, "before-step-exhaust-test");
+      fs.mkdirSync(tmpDir, { recursive: true });
+      const workflowPath = path.join(tmpDir, "before-step-exhaust-workflow.ts");
+      fs.writeFileSync(
+        workflowPath,
+        `
+        const def = {
+          id: 'before-step-exhaust-test',
+          steps: [
+            {
+              key: 'step1',
+              phase: 'first',
+              type: 'task',
+              maxRetries: 2,
+              onFail: { action: 'abort' },
+              beforeStep: async (ctx) => {
+                throw new Error('always boom');
+              },
+              task: {
+                action: 'run_subagent',
+                subagentType: 'test',
+                buildPrompt: (ctx) => 'prompt',
+              },
+              check: (ctx) => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+      `,
+      );
+
+      const { sessionId } = await init(workflowPath);
+      await expect(next(sessionId)).rejects.toThrow(EngineError);
+      await expect(next(sessionId)).rejects.toThrow("Session is aborted");
+
+      const db = new Database(getWorkflowDbPath());
+      const step = db
+        .query("SELECT status FROM steps WHERE session_id = ? AND step_key = ?")
+        .get(sessionId, "step1") as Record<string, unknown>;
+      expect(step.status).toBe("failed");
+      const session = db.query("SELECT status FROM sessions WHERE id = ?").get(sessionId) as Record<
+        string,
+        unknown
+      >;
+      expect(session.status).toBe("aborted");
+      db.close();
+    });
+
+    it("runningステップの冪等な再開時にbeforeStepを再実行しない", async () => {
+      const tmpDir = path.join(TEST_TADO_HOME, "before-step-resume-test");
+      fs.mkdirSync(tmpDir, { recursive: true });
+      const workflowPath = path.join(tmpDir, "before-step-resume-workflow.ts");
+      fs.writeFileSync(
+        workflowPath,
+        `
+        import * as fs from 'node:fs';
+        import * as path from 'node:path';
+        const def = {
+          id: 'before-step-resume-test',
+          steps: [
+            {
+              key: 'step1',
+              phase: 'first',
+              type: 'task',
+              maxRetries: 2,
+              onFail: { action: 'abort' },
+              beforeStep: async (ctx) => {
+                fs.appendFileSync(path.join(ctx.sessionDir, 'hook-count.log'), 'x');
+                return [{ key: 'resume.md', path: '/tmp/resume.md' }];
+              },
+              task: {
+                action: 'run_subagent',
+                subagentType: 'test',
+                buildPrompt: (ctx) => 'artifacts: ' + JSON.stringify(ctx.artifacts.map((a) => a.artifactKey + '=' + a.filePath)),
+              },
+              check: (ctx) => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+      `,
+      );
+
+      const { sessionId, sessionDir } = await init(workflowPath);
+
+      // First next: hook runs once and registers its artifacts
+      const first = await next(sessionId);
+      expect(first.context.attemptNumber).toBe(1);
+      expect(first.prompt).toContain("resume.md=/tmp/resume.md");
+
+      // Idempotent resume: reissues the same prompt WITHOUT re-running the hook
+      const resumed = await next(sessionId);
+      expect(resumed.prompt).toBe(first.prompt);
+
+      const hookLog = path.join(sessionDir, "hook-count.log");
+      expect(fs.readFileSync(hookLog, "utf-8")).toBe("x");
+
+      // Reported against the running attempt, the artifacts survive
+      const db = new Database(getWorkflowDbPath());
+      const rows = db
+        .query("SELECT * FROM artifacts WHERE session_id = ?")
+        .all(sessionId) as Record<string, unknown>[];
+      expect(rows).toHaveLength(1);
+      expect(rows[0].artifact_key).toBe("resume.md");
+      db.close();
+    });
+
+    it("beforeStep付きステップの同時実行でも試行を二重に割り当てず同一プロンプトを返す", async () => {
+      // beforeStep はトランザクション外で実行されるため、フックの非同期待機中に
+      // 別の next() が割り込める。再検証（resume パス）でアテンプト重複を防ぎ、
+      // DB 上の artifacts から同一プロンプトを再発行することを確認する。
+      const tmpDir = path.join(TEST_TADO_HOME, "before-step-concurrent-test");
+      fs.mkdirSync(tmpDir, { recursive: true });
+      const workflowPath = path.join(tmpDir, "before-step-concurrent-workflow.ts");
+      fs.writeFileSync(
+        workflowPath,
+        `
+        const def = {
+          id: 'before-step-concurrent-test',
+          steps: [
+            {
+              key: 'step1',
+              phase: 'first',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'abort' },
+              beforeStep: async (ctx) => {
+                await new Promise((resolve) => setTimeout(resolve, 100));
+                return [{ key: 'slow.md', path: '/tmp/slow.md' }];
+              },
+              task: {
+                action: 'run_subagent',
+                subagentType: 'test',
+                buildPrompt: (ctx) => 'artifacts: ' + JSON.stringify(ctx.artifacts.map((a) => a.artifactKey + '=' + a.filePath)),
+              },
+              check: (ctx) => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+      `,
+      );
+
+      const { sessionId } = await init(workflowPath);
+      const results = await Promise.allSettled([next(sessionId), next(sessionId)]);
+
+      const fulfilled = results.filter((result) => result.status === "fulfilled");
+      expect(fulfilled.length).toBe(2);
+      const prompts = new Set(
+        fulfilled.map(
+          (result) => (result as PromiseFulfilledResult<NextResult>).value.prompt,
+        ),
+      );
+      expect(prompts.size).toBe(1);
+      for (const result of fulfilled) {
+        const nextResult = (result as PromiseFulfilledResult<NextResult>).value;
+        expect(nextResult.context.attemptNumber).toBe(1);
+        expect(nextResult.prompt).toContain("slow.md=/tmp/slow.md");
+      }
+
+      const db = new Database(getWorkflowDbPath());
+      const attempts = db
+        .query(
+          "SELECT COUNT(*) AS count FROM step_attempts WHERE step_id = (SELECT id FROM steps WHERE session_id = ? AND step_key = ?)",
+        )
+        .get(sessionId, "step1") as Record<string, unknown>;
+      expect(attempts.count).toBe(1);
+      db.close();
+    });
+  });
 });

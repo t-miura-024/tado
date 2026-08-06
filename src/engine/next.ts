@@ -1,7 +1,8 @@
 import type { StepDef } from "../types/workflow-def.ts";
-import type { PromptCtx } from "../types/context.ts";
-import type { ArtifactRecord } from "../types/artifact.ts";
+import type { PromptCtx, StepCtx } from "../types/context.ts";
+import type { ArtifactInput, ArtifactRecord } from "../types/artifact.ts";
 import type { NextResult, ParallelNextResult } from "../types/result.ts";
+import type { Database } from "bun:sqlite";
 import {
   openSessionDb,
   dbRowToSessionRow,
@@ -9,6 +10,7 @@ import {
   importWorkflowDef,
   getPreviousAttempts,
   getArtifacts,
+  registerHookArtifacts,
   buildConditionCtx,
   EngineError,
 } from "./store.ts";
@@ -136,6 +138,89 @@ function buildNextResult(
   };
 }
 
+/**
+ * Run the `beforeStep` hook with retries OUTSIDE any transaction.
+ *
+ * The hook is user code that may perform slow async I/O (network calls, etc.).
+ * Awaiting it inside BEGIN IMMEDIATE would block every other `next()` in this
+ * process: the busy_timeout wait spins the same event loop that must run the
+ * hook to release the lock, so a slow hook would starve other sessions and
+ * eventually fail them with SQLITE_BUSY. The caller therefore commits before
+ * invoking this function and re-validates afterwards (see `next`).
+ *
+ * The hook is retried up to `maxRetries` times (matching the step's own retry
+ * budget, i.e. `maxRetries + 1` total calls). On exhaustion the step is marked
+ * failed, the session is aborted and an EngineError is thrown after committing,
+ * so the failure state is durable — but only if the step is still pending. A
+ * concurrent `next()` may have allocated the step while the hook was running;
+ * in that case this call must not abort the session, so it returns `null` and
+ * the caller re-selects (idempotent resume).
+ *
+ * Returns the hook's artifacts on success (`[]` when the hook is absent).
+ */
+async function runBeforeStep(
+  db: Database,
+  sessionId: string,
+  sessionDir: string,
+  step: StepRow,
+  stepDef: StepDef,
+  attemptNumber: number,
+): Promise<ArtifactInput[] | null> {
+  if (!stepDef.beforeStep) {
+    return [];
+  }
+
+  const ctx: StepCtx = {
+    sessionDir,
+    artifacts: getArtifacts(db, sessionId),
+    stepKey: step.stepKey,
+    attemptNumber,
+  };
+
+  let lastError: unknown;
+  for (let retry = 0; retry <= stepDef.maxRetries; retry++) {
+    try {
+      return await stepDef.beforeStep(ctx);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  // Retry budget exhausted: record the durable failure only when the step is
+  // still ours. Use a short dedicated transaction so the failed/aborted state
+  // is committed atomically before the error propagates.
+  db.exec("BEGIN IMMEDIATE");
+  let stillPending = false;
+  try {
+    const stepRow = db.query("SELECT status FROM steps WHERE id = ?").get(step.id) as
+      | Record<string, unknown>
+      | undefined;
+    stillPending = stepRow !== undefined && stepRow.status === "pending";
+    if (stillPending) {
+      db.run("UPDATE steps SET status = 'failed' WHERE id = ?", [step.id]);
+      db.run("UPDATE sessions SET status = 'aborted', updated_at = datetime('now') WHERE id = ?", [
+        sessionId,
+      ]);
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // Preserve the original error if rollback itself cannot be completed.
+    }
+    throw error;
+  }
+
+  if (stillPending) {
+    const reason = lastError instanceof Error ? lastError.message : String(lastError);
+    throw new EngineError(
+      `beforeStep failed after ${stepDef.maxRetries} retries for step: ${step.stepKey} (${reason})`,
+    );
+  }
+  return null;
+}
+
 export async function next(sessionId: string, workflowPath?: string): Promise<NextResult> {
   const db = openSessionDb(sessionId);
 
@@ -161,192 +246,299 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
       stepDefsByKey.set(s.key, s);
     }
 
-    // Serialize the final read/allocate/write sequence. WAL and busy_timeout
-    // only control how SQLite waits; BEGIN IMMEDIATE prevents two next calls
-    // from allocating the same attempt and re-running a step concurrently.
-    // It intentionally starts after the asynchronous workflow import so a
-    // second call in the same process cannot block the event loop while the
-    // first call is waiting to resume.
-    db.exec("BEGIN IMMEDIATE");
-    transactionActive = true;
     const commit = (): void => {
       db.exec("COMMIT");
       transactionActive = false;
     };
 
-    const sessionRowRaw = db.query("SELECT * FROM sessions WHERE id = ?").get(sessionId) as
-      | Record<string, unknown>
-      | undefined;
-    if (!sessionRowRaw) {
-      throw new EngineError(`Session not found: ${sessionId}`);
-    }
-    const session = dbRowToSessionRow(sessionRowRaw);
-    const sessionDir = session.sessionDir;
+    // Serialize the final read/allocate/write sequence. WAL and busy_timeout
+    // only control how SQLite waits; BEGIN IMMEDIATE prevents two next calls
+    // from allocating the same attempt and re-running a step concurrently.
+    // The transaction intentionally starts after the asynchronous workflow
+    // import so a second call in the same process cannot block the event loop
+    // while the first call is waiting to resume.
+    //
+    // When the selected step defines a beforeStep hook, the hook runs OUTSIDE
+    // the transaction (slow user I/O must not hold the write lock; see
+    // runBeforeStep). The loop below re-acquires the lock afterwards and
+    // re-validates: if a concurrent next() allocated the step while the hook
+    // was running, we re-select from scratch, which takes the idempotent
+    // resume path on the next iteration.
+    while (true) {
+      db.exec("BEGIN IMMEDIATE");
+      transactionActive = true;
 
-    if (session.status === "done") {
-      throw new EngineError(`Session already done: ${sessionId}`);
-    }
-
-    if (session.status === "aborted") {
-      throw new EngineError(`Session is aborted: ${sessionId}`);
-    }
-
-    let currentStepRaw: Record<string, unknown> | undefined;
-
-    if (session.currentStep) {
-      currentStepRaw = db
-        .query("SELECT * FROM steps WHERE session_id = ? AND step_key = ?")
-        .get(sessionId, session.currentStep) as Record<string, unknown> | undefined;
-    }
-
-    if (!currentStepRaw) {
-      const rows = db
-        .query(
-          "SELECT * FROM steps WHERE session_id = ? AND status IN ('pending', 'running') ORDER BY step_index LIMIT 1",
-        )
-        .all(sessionId) as Record<string, unknown>[];
-      if (rows.length > 0) {
-        currentStepRaw = rows[0];
-      } else {
-        const allDone = db
-          .query(
-            "SELECT COUNT(*) as cnt FROM steps WHERE session_id = ? AND status != 'passed' AND status != 'skipped'",
-          )
-          .get(sessionId) as Record<string, unknown>;
-        if ((allDone.cnt as number) === 0) {
-          db.run("UPDATE sessions SET status = 'done', updated_at = datetime('now') WHERE id = ?", [
-            sessionId,
-          ]);
-          commit();
-          throw new EngineError(`All steps completed for session: ${sessionId}`);
-        }
-        throw new EngineError(`No pending steps found for session: ${sessionId}`);
+      const sessionRowRaw = db.query("SELECT * FROM sessions WHERE id = ?").get(sessionId) as
+        | Record<string, unknown>
+        | undefined;
+      if (!sessionRowRaw) {
+        throw new EngineError(`Session not found: ${sessionId}`);
       }
-    }
+      const session = dbRowToSessionRow(sessionRowRaw);
+      const sessionDir = session.sessionDir;
 
-    let currentStep = dbRowToStepRow(currentStepRaw);
-    let stepDef = stepDefsByKey.get(currentStep.stepKey);
+      if (session.status === "done") {
+        throw new EngineError(`Session already done: ${sessionId}`);
+      }
 
-    if (!stepDef) {
-      throw new EngineError(`Step definition not found in workflow: ${currentStep.stepKey}`);
-    }
+      if (session.status === "aborted") {
+        throw new EngineError(`Session is aborted: ${sessionId}`);
+      }
 
-    if (currentStep.status === "running") {
-      // Idempotent resume: the previous `next` committed an attempt but the
-      // process was interrupted before `report`. Instead of allocating a new
-      // attempt, reissue the exact same prompt so the CLI can resume the
-      // session ("同じ --session <id> を指定すれば再開できます").
-      //
-      // Concurrency is still safe: this branch is only reached inside the
-      // BEGIN IMMEDIATE transaction, so two concurrent `next` calls are
-      // serialized and the running attempt is never duplicated. The running
-      // attempt is excluded from previousAttempts so the prompt inputs match
-      // the original allocation.
-      const allAttempts = getPreviousAttempts(db, currentStep.id);
-      const previousAttempts = allAttempts.filter((a) => a.endedAt !== undefined);
-      const attemptNumber = previousAttempts.length + 1;
+      let currentStepRaw: Record<string, unknown> | undefined;
+
+      if (session.currentStep) {
+        currentStepRaw = db
+          .query("SELECT * FROM steps WHERE session_id = ? AND step_key = ?")
+          .get(sessionId, session.currentStep) as Record<string, unknown> | undefined;
+      }
+
+      if (!currentStepRaw) {
+        const rows = db
+          .query(
+            "SELECT * FROM steps WHERE session_id = ? AND status IN ('pending', 'running') ORDER BY step_index LIMIT 1",
+          )
+          .all(sessionId) as Record<string, unknown>[];
+        if (rows.length > 0) {
+          currentStepRaw = rows[0];
+        } else {
+          const allDone = db
+            .query(
+              "SELECT COUNT(*) as cnt FROM steps WHERE session_id = ? AND status != 'passed' AND status != 'skipped'",
+            )
+            .get(sessionId) as Record<string, unknown>;
+          if ((allDone.cnt as number) === 0) {
+            db.run("UPDATE sessions SET status = 'done', updated_at = datetime('now') WHERE id = ?", [
+              sessionId,
+            ]);
+            commit();
+            throw new EngineError(`All steps completed for session: ${sessionId}`);
+          }
+          throw new EngineError(`No pending steps found for session: ${sessionId}`);
+        }
+      }
+
+      let currentStep = dbRowToStepRow(currentStepRaw);
+      let stepDef = stepDefsByKey.get(currentStep.stepKey);
+
+      if (!stepDef) {
+        throw new EngineError(`Step definition not found in workflow: ${currentStep.stepKey}`);
+      }
+
+      if (currentStep.status === "running") {
+        // Idempotent resume: the previous `next` committed an attempt but the
+        // process was interrupted before `report`. Instead of allocating a new
+        // attempt, reissue the exact same prompt so the CLI can resume the
+        // session ("同じ --session <id> を指定すれば再開できます").
+        //
+        // Concurrency is still safe: this branch is only reached inside the
+        // BEGIN IMMEDIATE transaction, so two concurrent `next` calls are
+        // serialized and the running attempt is never duplicated. The running
+        // attempt is excluded from previousAttempts so the prompt inputs match
+        // the original allocation.
+        const allAttempts = getPreviousAttempts(db, currentStep.id);
+        const previousAttempts = allAttempts.filter((a) => a.endedAt !== undefined);
+        const attemptNumber = previousAttempts.length + 1;
+        const artifacts = getArtifacts(db, sessionId);
+
+        const promptCtx: PromptCtx = {
+          sessionDir,
+          artifactDbPath: session.artifactDbPath ?? undefined,
+          attemptNumber,
+          retryCount: currentStep.retryCount,
+          maxRetries: currentStepRaw.max_retries as number,
+          previousAttempts,
+          artifacts,
+        };
+
+        const nextResult = buildNextResult(
+          sessionId,
+          session,
+          currentStep,
+          stepDef,
+          promptCtx,
+          artifacts,
+        );
+
+        commit();
+        return nextResult;
+      }
+
+      // Condition evaluation: skip steps whose condition returns false
+      while (currentStep.status === "pending" && stepDef.condition) {
+        const conditionCtx = buildConditionCtx(db, sessionId);
+        if (stepDef.condition(conditionCtx)) {
+          break;
+        }
+        // Mark step as skipped
+        db.run(`UPDATE steps SET status = 'skipped' WHERE id = ?`, [currentStep.id]);
+
+        // Find next pending step
+        const nextRow = db
+          .query(
+            `SELECT * FROM steps WHERE session_id = ? AND step_index > ? AND status = 'pending' ORDER BY step_index LIMIT 1`,
+          )
+          .get(sessionId, currentStep.stepIndex) as Record<string, unknown> | undefined;
+
+        if (!nextRow) {
+          const allDone = db
+            .query(
+              `SELECT COUNT(*) as cnt FROM steps WHERE session_id = ? AND status NOT IN ('passed', 'skipped')`,
+            )
+            .get(sessionId) as Record<string, unknown>;
+          if ((allDone.cnt as number) === 0) {
+            db.run(`UPDATE sessions SET status = 'done', updated_at = datetime('now') WHERE id = ?`, [
+              sessionId,
+            ]);
+            commit();
+            throw new EngineError(`All steps completed for session: ${sessionId}`);
+          }
+          throw new EngineError(`No pending steps found for session: ${sessionId}`);
+        }
+
+        currentStep = dbRowToStepRow(nextRow);
+        stepDef = stepDefsByKey.get(currentStep.stepKey);
+        if (!stepDef) {
+          throw new EngineError(`Step definition not found in workflow: ${currentStep.stepKey}`);
+        }
+      }
+
+      const previousAttempts = getPreviousAttempts(db, currentStep.id);
       const artifacts = getArtifacts(db, sessionId);
+      const attemptNumber = previousAttempts.length + 1;
+
+      if (!stepDef.beforeStep) {
+        // Fast path: the step has no hook, so no user code runs inside the
+        // transaction (no await at all). The lock is held only for the
+        // synchronous read/allocate/write sequence.
+        const promptCtx: PromptCtx = {
+          sessionDir,
+          artifactDbPath: session.artifactDbPath ?? undefined,
+          attemptNumber,
+          retryCount: currentStep.retryCount,
+          maxRetries: currentStepRaw.max_retries as number,
+          previousAttempts,
+          artifacts,
+        };
+
+        const nextResult = buildNextResult(
+          sessionId,
+          session,
+          currentStep,
+          stepDef,
+          promptCtx,
+          artifacts,
+        );
+
+        db.run(
+          `INSERT INTO step_attempts (step_id, attempt_number)
+           VALUES (?, ?)`,
+          [currentStep.id, attemptNumber],
+        );
+
+        db.run(`UPDATE steps SET status = 'running' WHERE id = ?`, [currentStep.id]);
+
+        db.run(`UPDATE sessions SET current_step = ?, updated_at = datetime('now') WHERE id = ?`, [
+          currentStep.stepKey,
+          sessionId,
+        ]);
+
+        commit();
+        return nextResult;
+      }
+
+      // The step defines a beforeStep hook. Commit before running it so the
+      // hook's async I/O never holds the write lock; re-acquire afterwards.
+      // (This matches the plan's NOTE: no await inside the transaction — the
+      // hook simply runs outside it instead.)
+      commit();
+
+      const hookArtifacts = await runBeforeStep(
+        db,
+        sessionId,
+        sessionDir,
+        currentStep,
+        stepDef,
+        attemptNumber,
+      );
+      if (hookArtifacts === null) {
+        // A concurrent next() allocated the step (or otherwise changed it)
+        // while the hook was running. Nothing to roll back; re-select from
+        // scratch, which takes the idempotent resume path.
+        continue;
+      }
+
+      // Re-acquire and re-validate before touching the DB: the step must
+      // still be pending for this call to own the allocation.
+      db.exec("BEGIN IMMEDIATE");
+      transactionActive = true;
+
+      const reSessionRowRaw = db.query("SELECT * FROM sessions WHERE id = ?").get(sessionId) as
+        | Record<string, unknown>
+        | undefined;
+      if (!reSessionRowRaw) {
+        throw new EngineError(`Session not found: ${sessionId}`);
+      }
+      const reSession = dbRowToSessionRow(reSessionRowRaw);
+      if (reSession.status === "done") {
+        throw new EngineError(`Session already done: ${sessionId}`);
+      }
+      if (reSession.status === "aborted") {
+        throw new EngineError(`Session is aborted: ${sessionId}`);
+      }
+
+      const reStepRaw = db.query("SELECT * FROM steps WHERE id = ?").get(currentStep.id) as
+        | Record<string, unknown>
+        | undefined;
+      const reStep = reStepRaw ? dbRowToStepRow(reStepRaw) : undefined;
+      if (!reStepRaw || reStep.status !== "pending") {
+        // The step changed under us (allocated → running, or skipped via a
+        // concurrent condition evaluation). Drop this call's hook result and
+        // re-select from scratch on the next iteration.
+        commit();
+        continue;
+      }
+
+      if (hookArtifacts.length > 0) {
+        registerHookArtifacts(db, sessionId, reStep.stepKey, hookArtifacts, "beforeStep");
+      }
+      const finalArtifacts = getArtifacts(db, sessionId);
 
       const promptCtx: PromptCtx = {
         sessionDir,
-        artifactDbPath: session.artifactDbPath ?? undefined,
+        artifactDbPath: reSession.artifactDbPath ?? undefined,
         attemptNumber,
-        retryCount: currentStep.retryCount,
-        maxRetries: currentStepRaw.max_retries as number,
+        retryCount: reStep.retryCount,
+        maxRetries: reStepRaw.max_retries as number,
         previousAttempts,
-        artifacts,
+        artifacts: finalArtifacts,
       };
 
       const nextResult = buildNextResult(
         sessionId,
-        session,
-        currentStep,
+        reSession,
+        reStep,
         stepDef,
         promptCtx,
-        artifacts,
+        finalArtifacts,
       );
+
+      db.run(
+        `INSERT INTO step_attempts (step_id, attempt_number)
+         VALUES (?, ?)`,
+        [reStep.id, attemptNumber],
+      );
+
+      db.run(`UPDATE steps SET status = 'running' WHERE id = ?`, [reStep.id]);
+
+      db.run(`UPDATE sessions SET current_step = ?, updated_at = datetime('now') WHERE id = ?`, [
+        reStep.stepKey,
+        sessionId,
+      ]);
 
       commit();
       return nextResult;
     }
-
-    // Condition evaluation: skip steps whose condition returns false
-    while (currentStep.status === "pending" && stepDef.condition) {
-      const conditionCtx = buildConditionCtx(db, sessionId);
-      if (stepDef.condition(conditionCtx)) {
-        break;
-      }
-      // Mark step as skipped
-      db.run(`UPDATE steps SET status = 'skipped' WHERE id = ?`, [currentStep.id]);
-
-      // Find next pending step
-      const nextRow = db
-        .query(
-          `SELECT * FROM steps WHERE session_id = ? AND step_index > ? AND status = 'pending' ORDER BY step_index LIMIT 1`,
-        )
-        .get(sessionId, currentStep.stepIndex) as Record<string, unknown> | undefined;
-
-      if (!nextRow) {
-        const allDone = db
-          .query(
-            `SELECT COUNT(*) as cnt FROM steps WHERE session_id = ? AND status NOT IN ('passed', 'skipped')`,
-          )
-          .get(sessionId) as Record<string, unknown>;
-        if ((allDone.cnt as number) === 0) {
-          db.run(`UPDATE sessions SET status = 'done', updated_at = datetime('now') WHERE id = ?`, [
-            sessionId,
-          ]);
-          commit();
-          throw new EngineError(`All steps completed for session: ${sessionId}`);
-        }
-        throw new EngineError(`No pending steps found for session: ${sessionId}`);
-      }
-
-      currentStep = dbRowToStepRow(nextRow);
-      stepDef = stepDefsByKey.get(currentStep.stepKey);
-      if (!stepDef) {
-        throw new EngineError(`Step definition not found in workflow: ${currentStep.stepKey}`);
-      }
-    }
-
-    const previousAttempts = getPreviousAttempts(db, currentStep.id);
-    const artifacts = getArtifacts(db, sessionId);
-    const attemptNumber = previousAttempts.length + 1;
-
-    const promptCtx: PromptCtx = {
-      sessionDir,
-      artifactDbPath: session.artifactDbPath ?? undefined,
-      attemptNumber,
-      retryCount: currentStep.retryCount,
-      maxRetries: currentStepRaw.max_retries as number,
-      previousAttempts,
-      artifacts,
-    };
-
-    const nextResult = buildNextResult(
-      sessionId,
-      session,
-      currentStep,
-      stepDef,
-      promptCtx,
-      artifacts,
-    );
-
-    db.run(
-      `INSERT INTO step_attempts (step_id, attempt_number)
-       VALUES (?, ?)`,
-      [currentStep.id, attemptNumber],
-    );
-
-    db.run(`UPDATE steps SET status = 'running' WHERE id = ?`, [currentStep.id]);
-
-    db.run(`UPDATE sessions SET current_step = ?, updated_at = datetime('now') WHERE id = ?`, [
-      currentStep.stepKey,
-      sessionId,
-    ]);
-
-    commit();
-    return nextResult;
   } catch (error) {
     if (transactionActive) {
       try {

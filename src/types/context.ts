@@ -34,3 +34,11 @@ export interface PromptCtx {
   previousAttempts: AttemptSummary[];
   artifacts: ArtifactRecord[];
 }
+
+/** `beforeStep` / `afterStep` フックに渡されるコンテキスト。 */
+export interface StepCtx {
+  sessionDir: string;
+  artifacts: ArtifactRecord[];
+  stepKey: string;
+  attemptNumber: number;
+}
