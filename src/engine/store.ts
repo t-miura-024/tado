@@ -2,6 +2,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Database } from "bun:sqlite";
+import { and, desc, eq } from "drizzle-orm";
+import { drizzle, type BunSQLiteDatabase } from "drizzle-orm/bun-sqlite";
+import { migrate } from "drizzle-orm/bun-sqlite/migrator";
+import { artifacts as artifactsTable, sessions, stepAttempts, steps } from "./schema.ts";
 import type { WorkflowDef } from "../types/workflow-def.ts";
 import type { ConditionCtx } from "../types/context.ts";
 import type { ArtifactInput, ArtifactRecord } from "../types/artifact.ts";
@@ -16,6 +20,9 @@ export class EngineError extends Error {
 
 const BUSY_TIMEOUT_MS = 5000;
 
+/** Directory that contains the drizzle migration files (`drizzle/` at repo root). */
+const MIGRATIONS_FOLDER = path.join(__dirname, "..", "..", "drizzle");
+
 /** Resolve the root directory used for all tado state and session artifacts. */
 export function getTadoHome(): string {
   const configuredHome = process.env.TADO_HOME?.trim();
@@ -27,50 +34,16 @@ export function getWorkflowDbPath(): string {
   return path.join(getTadoHome(), "workflow.db");
 }
 
-export interface SessionRow {
-  id: string;
-  workflowId: string;
-  sessionDir: string;
-  artifactDbPath: string | null;
-  currentStep: string | null;
-  status: "running" | "paused" | "done" | "aborted";
-  createdAt: string;
-  updatedAt: string;
-}
+export type { ArtifactRow, SessionRow, StepAttemptRow, StepRow } from "./schema.ts";
 
-export interface StepRow {
-  id: number;
-  sessionId: string;
-  stepKey: string;
-  stepIndex: number;
-  phase: string | null;
-  type: "task" | "human_gate" | "parallel";
-  status: "pending" | "running" | "passed" | "failed" | "skipped";
-  retryCount: number;
-  maxRetries: number;
-  createdAt: string;
-}
-
-export interface StepAttemptRow {
-  id: number;
-  stepId: number;
-  attemptNumber: number;
-  startedAt: string;
-  endedAt: string | null;
-  resultJson: string | null;
-  subtaskResultsJson: string | null;
-  checkResultsJson: string | null;
-  checkStatus: "pass" | "fail" | "error" | null;
-}
-
-export interface ArtifactRow {
-  id: number;
-  sessionId: string;
-  stepKey: string;
-  artifactKey: string;
-  filePath: string;
-  createdAt: string;
-}
+/**
+ * Drizzle database handle for tado.
+ *
+ * `TadoDb` exposes the query builder APIs; the underlying
+ * `bun:sqlite` connection is reachable through `$client` (used for `close()`
+ * and PRAGMA inspection).
+ */
+export type TadoDb = BunSQLiteDatabase & { $client: Database };
 
 export async function importWorkflowDef(workflowPath: string): Promise<WorkflowDef> {
   const resolved = path.resolve(workflowPath);
@@ -85,16 +58,18 @@ export async function importWorkflowDef(workflowPath: string): Promise<WorkflowD
   return def;
 }
 
-export function openDb(): Database {
+export function openDb(): TadoDb {
   const dbPath = getWorkflowDbPath();
   try {
-    const db = new Database(dbPath);
-    db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS};`);
-    const journalMode = db.query("PRAGMA journal_mode").get() as Record<string, unknown>;
+    const sqlite = new Database(dbPath);
+    // 以下の PRAGMA（busy_timeout / journal_mode）は Drizzle では表現できない
+    // 接続設定のため raw 実行を維持する。データアクセスは全て Drizzle API で行う。
+    sqlite.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS};`);
+    const journalMode = sqlite.query("PRAGMA journal_mode").get() as Record<string, unknown>;
     if (journalMode.journal_mode !== "wal") {
-      db.exec("PRAGMA journal_mode = WAL;");
+      sqlite.exec("PRAGMA journal_mode = WAL;");
     }
-    return db;
+    return drizzle(sqlite);
   } catch (error) {
     const reason = error instanceof Error ? `: ${error.message}` : `: ${String(error)}`;
     throw new EngineError(`Unable to open session database: ${dbPath}${reason}`);
@@ -109,7 +84,7 @@ export function openDb(): Database {
  * reasons (permissions, corruption, or a lock timeout), which must not be
  * reported as a missing session.
  */
-export function openSessionDb(sessionId: string): Database {
+export function openSessionDb(sessionId: string): TadoDb {
   const dbPath = getWorkflowDbPath();
   try {
     fs.statSync(dbPath);
@@ -122,13 +97,13 @@ export function openSessionDb(sessionId: string): Database {
     throw new EngineError(`Unable to access session database: ${dbPath}${reason}`);
   }
 
-  let db: Database | undefined;
+  let db: TadoDb | undefined;
   try {
     db = openDb();
-    db.query("SELECT id FROM sessions LIMIT 1").all();
+    db.select({ id: sessions.id }).from(sessions).limit(1).all();
     return db;
   } catch (error) {
-    db?.close();
+    db?.$client.close();
     if (error instanceof EngineError) {
       throw error;
     }
@@ -137,85 +112,35 @@ export function openSessionDb(sessionId: string): Database {
   }
 }
 
-export function initDb(db: Database): void {
-  const schemaPath = path.join(__dirname, "schema.sql");
-  const schema = fs.readFileSync(schemaPath, "utf-8");
-  db.exec("PRAGMA foreign_keys = ON;");
-  db.exec(schema);
+/**
+ * Apply all pending drizzle migrations.
+ *
+ * Existing databases (e.g. `~/.tado/workflow.db`) are migrated in place
+ * without data loss; the baseline migration is idempotent so it becomes a
+ * no-op when the tables already exist.
+ */
+export function migrateDb(db: TadoDb): void {
+  migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
 }
 
-export function dbRowToSessionRow(row: Record<string, unknown>): SessionRow {
-  return {
-    id: row.id as string,
-    workflowId: row.workflow_id as string,
-    sessionDir: row.session_dir as string,
-    artifactDbPath: row.artifact_db_path as string | null,
-    currentStep: row.current_step as string | null,
-    status: row.status as SessionRow["status"],
-    createdAt: row.created_at as string,
-    updatedAt: row.updated_at as string,
-  };
-}
-
-export function dbRowToStepRow(row: Record<string, unknown>): StepRow {
-  return {
-    id: row.id as number,
-    sessionId: row.session_id as string,
-    stepKey: row.step_key as string,
-    stepIndex: row.step_index as number,
-    phase: row.phase as string | null,
-    type: row.type as StepRow["type"],
-    status: row.status as StepRow["status"],
-    retryCount: row.retry_count as number,
-    maxRetries: row.max_retries as number,
-    createdAt: row.created_at as string,
-  };
-}
-
-export function dbRowToStepAttemptRow(row: Record<string, unknown>): StepAttemptRow {
-  return {
-    id: row.id as number,
-    stepId: row.step_id as number,
-    attemptNumber: row.attempt_number as number,
-    startedAt: row.started_at as string,
-    endedAt: row.ended_at as string | null,
-    resultJson: row.result_json as string | null,
-    subtaskResultsJson: row.subtask_results_json as string | null,
-    checkResultsJson: row.check_results_json as string | null,
-    checkStatus: row.check_status as StepAttemptRow["checkStatus"],
-  };
-}
-
-export function dbRowToArtifactRow(row: Record<string, unknown>): ArtifactRow {
-  return {
-    id: row.id as number,
-    sessionId: row.session_id as string,
-    stepKey: row.step_key as string,
-    artifactKey: row.artifact_key as string,
-    filePath: row.file_path as string,
-    createdAt: row.created_at as string,
-  };
-}
-
-export function getPreviousAttempts(db: Database, stepId: number): AttemptSummary[] {
+export function getPreviousAttempts(db: TadoDb, stepId: number): AttemptSummary[] {
   const rows = db
-    .query("SELECT * FROM step_attempts WHERE step_id = ? ORDER BY attempt_number")
-    .all(stepId) as Record<string, unknown>[];
+    .select()
+    .from(stepAttempts)
+    .where(eq(stepAttempts.stepId, stepId))
+    .orderBy(stepAttempts.attemptNumber)
+    .all();
   return rows.map((r) => ({
-    attemptNumber: r.attempt_number as number,
-    startedAt: r.started_at as string,
-    endedAt: (r.ended_at as string | null) ?? undefined,
-    checkStatus: (r.check_status as string | null) ?? undefined,
-    checkResults: r.check_results_json as string | null,
+    attemptNumber: r.attemptNumber,
+    startedAt: r.startedAt,
+    endedAt: r.endedAt ?? undefined,
+    checkStatus: r.checkStatus ?? undefined,
+    checkResults: r.checkResultsJson,
   }));
 }
 
-export function getArtifacts(db: Database, sessionId: string): ArtifactRecord[] {
-  const rows = db.query("SELECT * FROM artifacts WHERE session_id = ?").all(sessionId) as Record<
-    string,
-    unknown
-  >[];
-  return rows.map((r) => dbRowToArtifactRow(r));
+export function getArtifacts(db: TadoDb, sessionId: string): ArtifactRecord[] {
+  return db.select().from(artifactsTable).where(eq(artifactsTable.sessionId, sessionId)).all();
 }
 
 /**
@@ -226,7 +151,7 @@ export function getArtifacts(db: Database, sessionId: string): ArtifactRecord[] 
  * ログ出力のみ行う（README「ステップフック」節参照）。
  */
 export function registerHookArtifacts(
-  db: Database,
+  db: TadoDb,
   sessionId: string,
   stepKey: string,
   artifacts: ArtifactInput[],
@@ -236,43 +161,54 @@ export function registerHookArtifacts(
     return;
   }
   const now = new Date().toISOString().replace("T", " ").substring(0, 19);
-  const selectStmt = db.prepare(
-    "SELECT file_path FROM artifacts WHERE session_id = ? AND artifact_key = ?",
-  );
-  const deleteStmt = db.prepare("DELETE FROM artifacts WHERE session_id = ? AND artifact_key = ?");
-  const insertStmt = db.prepare(
-    "INSERT INTO artifacts (session_id, step_key, artifact_key, file_path, created_at) VALUES (?, ?, ?, ?, ?)",
-  );
   for (const a of artifacts) {
-    const existing = selectStmt.get(sessionId, a.key) as { file_path: string } | undefined;
+    const existing = db
+      .select({ filePath: artifactsTable.filePath })
+      .from(artifactsTable)
+      .where(and(eq(artifactsTable.sessionId, sessionId), eq(artifactsTable.artifactKey, a.key)))
+      .get();
     if (existing) {
       console.warn(
-        `[tado] ${source} artifact overwritten: session=${sessionId} step=${stepKey} key=${a.key} (${existing.file_path} -> ${a.path})`,
+        `[tado] ${source} artifact overwritten: session=${sessionId} step=${stepKey} key=${a.key} (${existing.filePath} -> ${a.path})`,
       );
     }
-    deleteStmt.run(sessionId, a.key);
-    insertStmt.run(sessionId, stepKey, a.key, a.path, now);
+    db.delete(artifactsTable)
+      .where(and(eq(artifactsTable.sessionId, sessionId), eq(artifactsTable.artifactKey, a.key)))
+      .run();
+    db.insert(artifactsTable)
+      .values({
+        sessionId,
+        stepKey,
+        artifactKey: a.key,
+        filePath: a.path,
+        createdAt: now,
+      })
+      .run();
   }
 }
 
-export function buildConditionCtx(db: Database, sessionId: string): ConditionCtx {
+export function buildConditionCtx(db: TadoDb, sessionId: string): ConditionCtx {
   const artifacts = getArtifacts(db, sessionId);
   const gateChoices: Record<string, string> = {};
 
   const gateStepRows = db
-    .query(
-      `SELECT id, step_key FROM steps WHERE session_id = ? AND type = 'human_gate' AND status = 'passed'`,
+    .select({ id: steps.id, stepKey: steps.stepKey })
+    .from(steps)
+    .where(
+      and(eq(steps.sessionId, sessionId), eq(steps.type, "human_gate"), eq(steps.status, "passed")),
     )
-    .all(sessionId) as Record<string, unknown>[];
+    .all();
 
   for (const gs of gateStepRows) {
     const attempt = db
-      .query(
-        `SELECT result_json FROM step_attempts WHERE step_id = ? AND check_status = 'pass' ORDER BY attempt_number DESC LIMIT 1`,
-      )
-      .get(gs.id as number) as Record<string, unknown> | undefined;
-    if (attempt?.result_json) {
-      gateChoices[gs.step_key as string] = (attempt.result_json as string).trim();
+      .select({ resultJson: stepAttempts.resultJson })
+      .from(stepAttempts)
+      .where(and(eq(stepAttempts.stepId, gs.id), eq(stepAttempts.checkStatus, "pass")))
+      .orderBy(desc(stepAttempts.attemptNumber))
+      .limit(1)
+      .get();
+    if (attempt?.resultJson) {
+      gateChoices[gs.stepKey] = attempt.resultJson.trim();
     }
   }
 

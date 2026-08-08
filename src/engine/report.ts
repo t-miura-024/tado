@@ -1,21 +1,19 @@
-import { Database } from "bun:sqlite";
+import { and, desc, eq, gt, gte, sql } from "drizzle-orm";
+import { artifacts as artifactsTable, sessions, stepAttempts, steps } from "./schema.ts";
 import type { StepDef } from "../types/workflow-def.ts";
 import type { CheckCtx, StepCtx } from "../types/context.ts";
 import type { ReportInput, ReportResult, StatusResult, AttemptResult } from "../types/result.ts";
 import {
   openSessionDb,
-  dbRowToSessionRow,
-  dbRowToStepRow,
-  dbRowToStepAttemptRow,
   importWorkflowDef,
   getArtifacts,
   registerHookArtifacts,
   EngineError,
 } from "./store.ts";
-import type { StepRow } from "./store.ts";
+import type { StepRow, TadoDb } from "./store.ts";
 
 function handleHumanGateTransition(
-  db: Database,
+  db: TadoDb,
   sessionId: string,
   step: StepRow,
   input: ReportInput,
@@ -27,23 +25,25 @@ function handleHumanGateTransition(
 
   if (answer === "revise") {
     const targetStep = stepDef.humanGate?.reviseTargetStep ?? stepDef.onFail.target ?? step.stepKey;
-    db.run("UPDATE steps SET status = 'passed' WHERE id = ?", [step.id]);
+    db.update(steps).set({ status: "passed" }).where(eq(steps.id, step.id)).run();
 
     // Reset target and all subsequent steps to pending
     const targetStepRow = db
-      .query("SELECT step_index FROM steps WHERE session_id = ? AND step_key = ?")
-      .get(sessionId, targetStep) as Record<string, unknown> | undefined;
+      .select({ stepIndex: steps.stepIndex })
+      .from(steps)
+      .where(and(eq(steps.sessionId, sessionId), eq(steps.stepKey, targetStep)))
+      .get();
     if (targetStepRow) {
-      db.run(
-        `UPDATE steps SET status = 'pending', retry_count = 0 WHERE session_id = ? AND step_index >= ?`,
-        [sessionId, targetStepRow.step_index as number],
-      );
+      db.update(steps)
+        .set({ status: "pending", retryCount: 0 })
+        .where(and(eq(steps.sessionId, sessionId), gte(steps.stepIndex, targetStepRow.stepIndex)))
+        .run();
     }
 
-    db.run("UPDATE sessions SET current_step = ?, updated_at = datetime('now') WHERE id = ?", [
-      targetStep,
-      sessionId,
-    ]);
+    db.update(sessions)
+      .set({ currentStep: targetStep, updatedAt: sql`datetime('now')` })
+      .where(eq(sessions.id, sessionId))
+      .run();
     return {
       sessionId,
       stepKey: input.stepKey,
@@ -55,9 +55,10 @@ function handleHumanGateTransition(
   }
 
   if (answer === "abort") {
-    db.run("UPDATE sessions SET status = 'aborted', updated_at = datetime('now') WHERE id = ?", [
-      sessionId,
-    ]);
+    db.update(sessions)
+      .set({ status: "aborted", updatedAt: sql`datetime('now')` })
+      .where(eq(sessions.id, sessionId))
+      .run();
     return {
       sessionId,
       stepKey: input.stepKey,
@@ -71,27 +72,26 @@ function handleHumanGateTransition(
 }
 
 function handleStepFailure(
-  db: Database,
+  db: TadoDb,
   sessionId: string,
   step: StepRow,
-  stepRaw: Record<string, unknown>,
   input: ReportInput,
   checkStatus: "pass" | "fail" | "error",
   checkReasons: string[],
   stepDef?: StepDef,
 ): ReportResult {
   const newRetryCount = step.retryCount + 1;
-  const maxRetries = stepRaw.max_retries as number;
+  const maxRetries = step.maxRetries;
 
   if (newRetryCount <= maxRetries) {
-    db.run("UPDATE steps SET retry_count = ?, status = 'pending' WHERE id = ?", [
-      newRetryCount,
-      step.id,
-    ]);
-    db.run("UPDATE sessions SET current_step = ?, updated_at = datetime('now') WHERE id = ?", [
-      step.stepKey,
-      sessionId,
-    ]);
+    db.update(steps)
+      .set({ retryCount: newRetryCount, status: "pending" })
+      .where(eq(steps.id, step.id))
+      .run();
+    db.update(sessions)
+      .set({ currentStep: step.stepKey, updatedAt: sql`datetime('now')` })
+      .where(eq(sessions.id, sessionId))
+      .run();
     return {
       sessionId,
       stepKey: input.stepKey,
@@ -101,19 +101,19 @@ function handleStepFailure(
     };
   }
 
-  const onFailAction = stepRaw.on_fail_action as string;
-  const onFailTarget = stepRaw.on_fail_target as string | null;
+  const onFailAction = step.onFailAction;
+  const onFailTarget = step.onFailTarget;
 
   if (onFailAction === "goto" && onFailTarget) {
     const requeueSource = stepDef?.onFail?.requeueSource === true;
-    db.run(`UPDATE steps SET status = ? WHERE id = ?`, [
-      requeueSource ? "pending" : "failed",
-      step.id,
-    ]);
-    db.run("UPDATE sessions SET current_step = ?, updated_at = datetime('now') WHERE id = ?", [
-      onFailTarget,
-      sessionId,
-    ]);
+    db.update(steps)
+      .set({ status: requeueSource ? "pending" : "failed" })
+      .where(eq(steps.id, step.id))
+      .run();
+    db.update(sessions)
+      .set({ currentStep: onFailTarget, updatedAt: sql`datetime('now')` })
+      .where(eq(sessions.id, sessionId))
+      .run();
     return {
       sessionId,
       stepKey: input.stepKey,
@@ -127,10 +127,11 @@ function handleStepFailure(
   }
 
   if (onFailAction === "abort") {
-    db.run("UPDATE steps SET status = 'failed' WHERE id = ?", [step.id]);
-    db.run("UPDATE sessions SET status = 'aborted', updated_at = datetime('now') WHERE id = ?", [
-      sessionId,
-    ]);
+    db.update(steps).set({ status: "failed" }).where(eq(steps.id, step.id)).run();
+    db.update(sessions)
+      .set({ status: "aborted", updatedAt: sql`datetime('now')` })
+      .where(eq(sessions.id, sessionId))
+      .run();
     return {
       sessionId,
       stepKey: input.stepKey,
@@ -141,10 +142,11 @@ function handleStepFailure(
   }
 
   if (onFailAction === "escalate") {
-    db.run("UPDATE steps SET status = 'failed' WHERE id = ?", [step.id]);
-    db.run("UPDATE sessions SET status = 'paused', updated_at = datetime('now') WHERE id = ?", [
-      sessionId,
-    ]);
+    db.update(steps).set({ status: "failed" }).where(eq(steps.id, step.id)).run();
+    db.update(sessions)
+      .set({ status: "paused", updatedAt: sql`datetime('now')` })
+      .where(eq(sessions.id, sessionId))
+      .run();
     return {
       sessionId,
       stepKey: input.stepKey,
@@ -154,7 +156,7 @@ function handleStepFailure(
     };
   }
 
-  db.run("UPDATE steps SET status = 'failed' WHERE id = ?", [step.id]);
+  db.update(steps).set({ status: "failed" }).where(eq(steps.id, step.id)).run();
   return {
     sessionId,
     stepKey: input.stepKey,
@@ -171,57 +173,62 @@ export async function report(
 ): Promise<ReportResult> {
   const db = openSessionDb(sessionId);
 
-  const sessionRowRaw = db.query("SELECT * FROM sessions WHERE id = ?").get(sessionId) as
-    | Record<string, unknown>
-    | undefined;
-  if (!sessionRowRaw) {
-    db.close();
+  const session = db.select().from(sessions).where(eq(sessions.id, sessionId)).get();
+  if (!session) {
+    db.$client.close();
     throw new EngineError(`Session not found: ${sessionId}`);
   }
-  const session = dbRowToSessionRow(sessionRowRaw);
   const sessionDir = session.sessionDir;
 
-  const resolvedWorkflowPath = workflowPath ?? (sessionRowRaw.workflow_path as string);
+  const resolvedWorkflowPath = workflowPath ?? session.workflowPath;
   if (!resolvedWorkflowPath) {
-    db.close();
+    db.$client.close();
     throw new EngineError("No workflow path available");
   }
 
-  const stepRaw = db
-    .query("SELECT * FROM steps WHERE session_id = ? AND step_key = ?")
-    .get(sessionId, input.stepKey) as Record<string, unknown> | undefined;
-  if (!stepRaw) {
-    db.close();
+  const step = db
+    .select()
+    .from(steps)
+    .where(and(eq(steps.sessionId, sessionId), eq(steps.stepKey, input.stepKey)))
+    .get();
+  if (!step) {
+    db.$client.close();
     throw new EngineError(`Step not found: ${input.stepKey}`);
   }
-  const step = dbRowToStepRow(stepRaw);
 
-  const attemptRaw = db
-    .query("SELECT * FROM step_attempts WHERE step_id = ? ORDER BY attempt_number DESC LIMIT 1")
-    .get(step.id) as Record<string, unknown> | undefined;
-  if (!attemptRaw) {
-    db.close();
+  const attempt = db
+    .select()
+    .from(stepAttempts)
+    .where(eq(stepAttempts.stepId, step.id))
+    .orderBy(desc(stepAttempts.attemptNumber))
+    .limit(1)
+    .get();
+  if (!attempt) {
+    db.$client.close();
     throw new EngineError(`No attempt found for step: ${input.stepKey}`);
   }
-  const attempt = dbRowToStepAttemptRow(attemptRaw);
 
-  db.run(
-    `UPDATE step_attempts SET ended_at = datetime('now'), result_json = ?, subtask_results_json = ?
-     WHERE id = ?`,
-    [
-      input.subagentOutput ?? null,
-      input.subtaskResults ? JSON.stringify(input.subtaskResults) : null,
-      attempt.id,
-    ],
-  );
+  db.update(stepAttempts)
+    .set({
+      endedAt: sql`datetime('now')`,
+      resultJson: input.subagentOutput ?? null,
+      subtaskResultsJson: input.subtaskResults ? JSON.stringify(input.subtaskResults) : null,
+    })
+    .where(eq(stepAttempts.id, attempt.id))
+    .run();
 
   if (input.artifacts && input.artifacts.length > 0) {
     const now = new Date().toISOString().replace("T", " ").substring(0, 19);
-    const insertArtifact = db.prepare(
-      "INSERT INTO artifacts (session_id, step_key, artifact_key, file_path, created_at) VALUES (?, ?, ?, ?, ?)",
-    );
     for (const a of input.artifacts) {
-      insertArtifact.run(sessionId, input.stepKey, a.key, a.path, now);
+      db.insert(artifactsTable)
+        .values({
+          sessionId,
+          stepKey: input.stepKey,
+          artifactKey: a.key,
+          filePath: a.path,
+          createdAt: now,
+        })
+        .run();
     }
   }
 
@@ -291,28 +298,34 @@ export async function report(
     checkReasons = input.errors ? [input.errors] : [];
   }
 
-  db.run(`UPDATE step_attempts SET check_results_json = ?, check_status = ? WHERE id = ?`, [
-    JSON.stringify(checkReasons),
-    checkStatus,
-    attempt.id,
-  ]);
+  db.update(stepAttempts)
+    .set({ checkResultsJson: JSON.stringify(checkReasons), checkStatus })
+    .where(eq(stepAttempts.id, attempt.id))
+    .run();
 
   if (checkStatus === "pass") {
-    db.run(`UPDATE steps SET status = 'passed' WHERE id = ?`, [step.id]);
+    db.update(steps).set({ status: "passed" }).where(eq(steps.id, step.id)).run();
 
-    const nextStepRaw = db
-      .query(
-        "SELECT * FROM steps WHERE session_id = ? AND step_index > ? AND status = 'pending' ORDER BY step_index LIMIT 1",
+    const nextStep = db
+      .select()
+      .from(steps)
+      .where(
+        and(
+          eq(steps.sessionId, sessionId),
+          gt(steps.stepIndex, step.stepIndex),
+          eq(steps.status, "pending"),
+        ),
       )
-      .get(sessionId, step.stepIndex) as Record<string, unknown> | undefined;
+      .orderBy(steps.stepIndex)
+      .limit(1)
+      .get();
 
-    if (nextStepRaw) {
-      const nextStep = dbRowToStepRow(nextStepRaw);
-      db.run("UPDATE sessions SET current_step = ?, updated_at = datetime('now') WHERE id = ?", [
-        nextStep.stepKey,
-        sessionId,
-      ]);
-      db.close();
+    if (nextStep) {
+      db.update(sessions)
+        .set({ currentStep: nextStep.stepKey, updatedAt: sql`datetime('now')` })
+        .where(eq(sessions.id, sessionId))
+        .run();
+      db.$client.close();
       return {
         sessionId,
         stepKey: input.stepKey,
@@ -321,10 +334,11 @@ export async function report(
         message: `Step passed. Next step: ${nextStep.stepKey}`,
       };
     } else {
-      db.run("UPDATE sessions SET status = 'done', updated_at = datetime('now') WHERE id = ?", [
-        sessionId,
-      ]);
-      db.close();
+      db.update(sessions)
+        .set({ status: "done", updatedAt: sql`datetime('now')` })
+        .where(eq(sessions.id, sessionId))
+        .run();
+      db.$client.close();
       return {
         sessionId,
         stepKey: input.stepKey,
@@ -345,7 +359,7 @@ export async function report(
         checkReasons,
       );
       if (hgResult) {
-        db.close();
+        db.$client.close();
         return hgResult;
       }
     }
@@ -354,13 +368,12 @@ export async function report(
       db,
       sessionId,
       step,
-      stepRaw,
       input,
       checkStatus,
       checkReasons,
       stepDef,
     );
-    db.close();
+    db.$client.close();
     return result;
   }
 }
@@ -368,28 +381,28 @@ export async function report(
 export function status(sessionId: string): StatusResult {
   const db = openSessionDb(sessionId);
 
-  const sessionRowRaw = db.query("SELECT * FROM sessions WHERE id = ?").get(sessionId) as
-    | Record<string, unknown>
-    | undefined;
-  if (!sessionRowRaw) {
-    db.close();
+  const session = db.select().from(sessions).where(eq(sessions.id, sessionId)).get();
+  if (!session) {
+    db.$client.close();
     throw new EngineError(`Session not found: ${sessionId}`);
   }
-  const session = dbRowToSessionRow(sessionRowRaw);
 
   const stepRows = db
-    .query("SELECT * FROM steps WHERE session_id = ? ORDER BY step_index")
-    .all(sessionId) as Record<string, unknown>[];
+    .select()
+    .from(steps)
+    .where(eq(steps.sessionId, sessionId))
+    .orderBy(steps.stepIndex)
+    .all();
 
-  const steps = stepRows.map((sRaw) => {
-    const s = dbRowToStepRow(sRaw);
+  const stepsResult = stepRows.map((s) => {
     const attemptRows = db
-      .query("SELECT * FROM step_attempts WHERE step_id = ? ORDER BY attempt_number")
-      .all(s.id) as Record<string, unknown>[];
+      .select()
+      .from(stepAttempts)
+      .where(eq(stepAttempts.stepId, s.id))
+      .orderBy(stepAttempts.attemptNumber)
+      .all();
 
-    const maxRetries = sRaw.max_retries as number;
-    const attempts = attemptRows.map((aRaw) => {
-      const a = dbRowToStepAttemptRow(aRaw);
+    const attempts = attemptRows.map((a) => {
       return {
         attemptNumber: a.attemptNumber,
         startedAt: a.startedAt,
@@ -404,12 +417,12 @@ export function status(sessionId: string): StatusResult {
       type: s.type,
       status: s.status,
       retryCount: s.retryCount,
-      maxRetries,
+      maxRetries: s.maxRetries,
       attempts,
     };
   });
 
-  db.close();
+  db.$client.close();
 
   return {
     sessionId,
@@ -418,6 +431,6 @@ export function status(sessionId: string): StatusResult {
     currentStep: session.currentStep,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
-    steps,
+    steps: stepsResult,
   };
 }

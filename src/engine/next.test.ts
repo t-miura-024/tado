@@ -1175,9 +1175,7 @@ describe("next", () => {
       const fulfilled = results.filter((result) => result.status === "fulfilled");
       expect(fulfilled.length).toBe(2);
       const prompts = new Set(
-        fulfilled.map(
-          (result) => (result as PromiseFulfilledResult<NextResult>).value.prompt,
-        ),
+        fulfilled.map((result) => (result as PromiseFulfilledResult<NextResult>).value.prompt),
       );
       expect(prompts.size).toBe(1);
       for (const result of fulfilled) {

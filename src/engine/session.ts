@@ -1,7 +1,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { eq } from "drizzle-orm";
 import type { InitResult } from "../types/result.ts";
-import { importWorkflowDef, openDb, initDb, getTadoHome } from "./store.ts";
+import { importWorkflowDef, migrateDb, openDb, getTadoHome } from "./store.ts";
+import { artifacts, sessions, steps } from "./schema.ts";
 
 function generateSessionId(): string {
   const now = new Date();
@@ -26,30 +28,32 @@ export async function init(workflowPath: string, sessionId?: string): Promise<In
   fs.mkdirSync(sessionDir, { recursive: true });
 
   const db = openDb();
-  initDb(db);
+  migrateDb(db);
 
-  db.run(
-    `INSERT INTO sessions (id, workflow_id, workflow_path, session_dir, status)
-     VALUES (?, ?, ?, ?, 'running')`,
-    [sid, def.id, resolvedPath, sessionDir],
-  );
+  db.insert(sessions)
+    .values({
+      id: sid,
+      workflowId: def.id,
+      workflowPath: resolvedPath,
+      sessionDir,
+      status: "running",
+    })
+    .run();
 
   for (let i = 0; i < def.steps.length; i++) {
     const step = def.steps[i];
-    db.run(
-      `INSERT INTO steps (session_id, step_key, step_index, phase, type, max_retries, on_fail_action, on_fail_target)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        sid,
-        step.key,
-        i,
-        step.phase,
-        step.type,
-        step.maxRetries,
-        step.onFail.action,
-        step.onFail.target ?? null,
-      ],
-    );
+    db.insert(steps)
+      .values({
+        sessionId: sid,
+        stepKey: step.key,
+        stepIndex: i,
+        phase: step.phase ?? null,
+        type: step.type,
+        maxRetries: step.maxRetries,
+        onFailAction: step.onFail.action,
+        onFailTarget: step.onFail.target ?? null,
+      })
+      .run();
   }
 
   let artifactDbPath: string | null = null;
@@ -63,22 +67,27 @@ export async function init(workflowPath: string, sessionId?: string): Promise<In
     artifactDbPath = afterResult.artifactDbPath ?? null;
 
     if (artifactDbPath) {
-      db.run("UPDATE sessions SET artifact_db_path = ? WHERE id = ?", [artifactDbPath, sid]);
+      db.update(sessions).set({ artifactDbPath }).where(eq(sessions.id, sid)).run();
     }
 
     if (afterResult.artifacts && afterResult.artifacts.length > 0 && def.steps.length > 0) {
       const now = new Date().toISOString().replace("T", " ").substring(0, 19);
       const firstStep = def.steps[0];
-      const insertArtifact = db.prepare(
-        "INSERT INTO artifacts (session_id, step_key, artifact_key, file_path, created_at) VALUES (?, ?, ?, ?, ?)",
-      );
       for (const a of afterResult.artifacts) {
-        insertArtifact.run(sid, firstStep.key, a.key, a.path, now);
+        db.insert(artifacts)
+          .values({
+            sessionId: sid,
+            stepKey: firstStep.key,
+            artifactKey: a.key,
+            filePath: a.path,
+            createdAt: now,
+          })
+          .run();
       }
     }
   }
 
-  db.close();
+  db.$client.close();
 
   return { sessionId: sid, sessionDir, workflowId: def.id };
 }

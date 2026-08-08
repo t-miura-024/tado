@@ -2,11 +2,10 @@ import type { StepDef } from "../types/workflow-def.ts";
 import type { PromptCtx, StepCtx } from "../types/context.ts";
 import type { ArtifactInput, ArtifactRecord } from "../types/artifact.ts";
 import type { AttemptSummary, NextResult, ParallelNextResult } from "../types/result.ts";
-import type { Database } from "bun:sqlite";
+import { and, count, eq, gt, inArray, notInArray, sql } from "drizzle-orm";
+import { sessions, stepAttempts, steps } from "./schema.ts";
 import {
   openSessionDb,
-  dbRowToSessionRow,
-  dbRowToStepRow,
   importWorkflowDef,
   getPreviousAttempts,
   getArtifacts,
@@ -14,7 +13,7 @@ import {
   buildConditionCtx,
   EngineError,
 } from "./store.ts";
-import type { SessionRow, StepRow } from "./store.ts";
+import type { SessionRow, StepRow, TadoDb } from "./store.ts";
 
 export const ARTIFACT_PRESENT_INSTRUCTION =
   "このゲートをユーザーに提示する際、上記「確認する成果物」のファイルパスを必ず表示すること（ユーザーがファイルを開いて内容を確認できるように）。";
@@ -229,7 +228,7 @@ function buildNextResult(
  * Returns the hook's artifacts on success (`[]` when the hook is absent).
  */
 async function runBeforeStep(
-  db: Database,
+  db: TadoDb,
   sessionId: string,
   sessionDir: string,
   step: StepRow,
@@ -259,23 +258,26 @@ async function runBeforeStep(
   // Retry budget exhausted: record the durable failure only when the step is
   // still ours. Use a short dedicated transaction so the failed/aborted state
   // is committed atomically before the error propagates.
-  db.exec("BEGIN IMMEDIATE");
+  db.run(sql`BEGIN IMMEDIATE`);
   let stillPending = false;
   try {
-    const stepRow = db.query("SELECT status FROM steps WHERE id = ?").get(step.id) as
-      | Record<string, unknown>
-      | undefined;
+    const stepRow = db
+      .select({ status: steps.status })
+      .from(steps)
+      .where(eq(steps.id, step.id))
+      .get();
     stillPending = stepRow !== undefined && stepRow.status === "pending";
     if (stillPending) {
-      db.run("UPDATE steps SET status = 'failed' WHERE id = ?", [step.id]);
-      db.run("UPDATE sessions SET status = 'aborted', updated_at = datetime('now') WHERE id = ?", [
-        sessionId,
-      ]);
+      db.update(steps).set({ status: "failed" }).where(eq(steps.id, step.id)).run();
+      db.update(sessions)
+        .set({ status: "aborted", updatedAt: sql`datetime('now')` })
+        .where(eq(sessions.id, sessionId))
+        .run();
     }
-    db.exec("COMMIT");
+    db.run(sql`COMMIT`);
   } catch (error) {
     try {
-      db.exec("ROLLBACK");
+      db.run(sql`ROLLBACK`);
     } catch {
       // Preserve the original error if rollback itself cannot be completed.
     }
@@ -296,14 +298,12 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
 
   let transactionActive = false;
   try {
-    const initialSessionRowRaw = db.query("SELECT * FROM sessions WHERE id = ?").get(sessionId) as
-      | Record<string, unknown>
-      | undefined;
-    if (!initialSessionRowRaw) {
+    const initialSessionRow = db.select().from(sessions).where(eq(sessions.id, sessionId)).get();
+    if (!initialSessionRow) {
       throw new EngineError(`Session not found: ${sessionId}`);
     }
 
-    const resolvedWorkflowPath = workflowPath ?? (initialSessionRowRaw.workflow_path as string);
+    const resolvedWorkflowPath = workflowPath ?? initialSessionRow.workflowPath;
     if (!resolvedWorkflowPath) {
       throw new EngineError(
         "No workflow path available; provide --workflow flag or ensure session has workflow_path stored",
@@ -317,7 +317,7 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
     }
 
     const commit = (): void => {
-      db.exec("COMMIT");
+      db.run(sql`COMMIT`);
       transactionActive = false;
     };
 
@@ -335,16 +335,14 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
     // was running, we re-select from scratch, which takes the idempotent
     // resume path on the next iteration.
     while (true) {
-      db.exec("BEGIN IMMEDIATE");
+      db.run(sql`BEGIN IMMEDIATE`);
       transactionActive = true;
 
-      const sessionRowRaw = db.query("SELECT * FROM sessions WHERE id = ?").get(sessionId) as
-        | Record<string, unknown>
-        | undefined;
-      if (!sessionRowRaw) {
+      const sessionRow = db.select().from(sessions).where(eq(sessions.id, sessionId)).get();
+      if (!sessionRow) {
         throw new EngineError(`Session not found: ${sessionId}`);
       }
-      const session = dbRowToSessionRow(sessionRowRaw);
+      const session = sessionRow;
       const sessionDir = session.sessionDir;
 
       if (session.status === "done") {
@@ -355,33 +353,39 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
         throw new EngineError(`Session is aborted: ${sessionId}`);
       }
 
-      let currentStepRaw: Record<string, unknown> | undefined;
+      let currentStepRaw: StepRow | undefined;
 
       if (session.currentStep) {
         currentStepRaw = db
-          .query("SELECT * FROM steps WHERE session_id = ? AND step_key = ?")
-          .get(sessionId, session.currentStep) as Record<string, unknown> | undefined;
+          .select()
+          .from(steps)
+          .where(and(eq(steps.sessionId, sessionId), eq(steps.stepKey, session.currentStep)))
+          .get();
       }
 
       if (!currentStepRaw) {
-        const rows = db
-          .query(
-            "SELECT * FROM steps WHERE session_id = ? AND status IN ('pending', 'running') ORDER BY step_index LIMIT 1",
-          )
-          .all(sessionId) as Record<string, unknown>[];
-        if (rows.length > 0) {
-          currentStepRaw = rows[0];
+        const row = db
+          .select()
+          .from(steps)
+          .where(and(eq(steps.sessionId, sessionId), inArray(steps.status, ["pending", "running"])))
+          .orderBy(steps.stepIndex)
+          .limit(1)
+          .get();
+        if (row) {
+          currentStepRaw = row;
         } else {
           const allDone = db
-            .query(
-              "SELECT COUNT(*) as cnt FROM steps WHERE session_id = ? AND status != 'passed' AND status != 'skipped'",
+            .select({ cnt: count() })
+            .from(steps)
+            .where(
+              and(eq(steps.sessionId, sessionId), notInArray(steps.status, ["passed", "skipped"])),
             )
-            .get(sessionId) as Record<string, unknown>;
-          if ((allDone.cnt as number) === 0) {
-            db.run(
-              "UPDATE sessions SET status = 'done', updated_at = datetime('now') WHERE id = ?",
-              [sessionId],
-            );
+            .get();
+          if ((allDone?.cnt ?? 0) === 0) {
+            db.update(sessions)
+              .set({ status: "done", updatedAt: sql`datetime('now')` })
+              .where(eq(sessions.id, sessionId))
+              .run();
             commit();
             throw new EngineError(`All steps completed for session: ${sessionId}`);
           }
@@ -389,7 +393,7 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
         }
       }
 
-      let currentStep = dbRowToStepRow(currentStepRaw);
+      let currentStep = currentStepRaw;
       let stepDef = stepDefsByKey.get(currentStep.stepKey);
 
       if (!stepDef) {
@@ -414,7 +418,7 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
 
         const attempt: AttemptInfo = {
           attemptNumber,
-          maxRetries: currentStepRaw.max_retries as number,
+          maxRetries: currentStepRaw.maxRetries,
           previousAttempts,
         };
 
@@ -445,33 +449,43 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
           break;
         }
         // Mark step as skipped
-        db.run(`UPDATE steps SET status = 'skipped' WHERE id = ?`, [currentStep.id]);
+        db.update(steps).set({ status: "skipped" }).where(eq(steps.id, currentStep.id)).run();
 
         // Find next pending step
         const nextRow = db
-          .query(
-            `SELECT * FROM steps WHERE session_id = ? AND step_index > ? AND status = 'pending' ORDER BY step_index LIMIT 1`,
+          .select()
+          .from(steps)
+          .where(
+            and(
+              eq(steps.sessionId, sessionId),
+              gt(steps.stepIndex, currentStep.stepIndex),
+              eq(steps.status, "pending"),
+            ),
           )
-          .get(sessionId, currentStep.stepIndex) as Record<string, unknown> | undefined;
+          .orderBy(steps.stepIndex)
+          .limit(1)
+          .get();
 
         if (!nextRow) {
           const allDone = db
-            .query(
-              `SELECT COUNT(*) as cnt FROM steps WHERE session_id = ? AND status NOT IN ('passed', 'skipped')`,
+            .select({ cnt: count() })
+            .from(steps)
+            .where(
+              and(eq(steps.sessionId, sessionId), notInArray(steps.status, ["passed", "skipped"])),
             )
-            .get(sessionId) as Record<string, unknown>;
-          if ((allDone.cnt as number) === 0) {
-            db.run(
-              `UPDATE sessions SET status = 'done', updated_at = datetime('now') WHERE id = ?`,
-              [sessionId],
-            );
+            .get();
+          if ((allDone?.cnt ?? 0) === 0) {
+            db.update(sessions)
+              .set({ status: "done", updatedAt: sql`datetime('now')` })
+              .where(eq(sessions.id, sessionId))
+              .run();
             commit();
             throw new EngineError(`All steps completed for session: ${sessionId}`);
           }
           throw new EngineError(`No pending steps found for session: ${sessionId}`);
         }
 
-        currentStep = dbRowToStepRow(nextRow);
+        currentStep = nextRow;
         stepDef = stepDefsByKey.get(currentStep.stepKey);
         if (!stepDef) {
           throw new EngineError(`Step definition not found in workflow: ${currentStep.stepKey}`);
@@ -488,7 +502,7 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
         // synchronous read/allocate/write sequence.
         const attempt: AttemptInfo = {
           attemptNumber,
-          maxRetries: currentStepRaw.max_retries as number,
+          maxRetries: currentStepRaw.maxRetries,
           previousAttempts,
         };
 
@@ -508,18 +522,14 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
           attempt,
         );
 
-        db.run(
-          `INSERT INTO step_attempts (step_id, attempt_number)
-           VALUES (?, ?)`,
-          [currentStep.id, attemptNumber],
-        );
+        db.insert(stepAttempts).values({ stepId: currentStep.id, attemptNumber }).run();
 
-        db.run(`UPDATE steps SET status = 'running' WHERE id = ?`, [currentStep.id]);
+        db.update(steps).set({ status: "running" }).where(eq(steps.id, currentStep.id)).run();
 
-        db.run(`UPDATE sessions SET current_step = ?, updated_at = datetime('now') WHERE id = ?`, [
-          currentStep.stepKey,
-          sessionId,
-        ]);
+        db.update(sessions)
+          .set({ currentStep: currentStep.stepKey, updatedAt: sql`datetime('now')` })
+          .where(eq(sessions.id, sessionId))
+          .run();
 
         commit();
         return nextResult;
@@ -548,16 +558,13 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
 
       // Re-acquire and re-validate before touching the DB: the step must
       // still be pending for this call to own the allocation.
-      db.exec("BEGIN IMMEDIATE");
+      db.run(sql`BEGIN IMMEDIATE`);
       transactionActive = true;
 
-      const reSessionRowRaw = db.query("SELECT * FROM sessions WHERE id = ?").get(sessionId) as
-        | Record<string, unknown>
-        | undefined;
-      if (!reSessionRowRaw) {
+      const reSession = db.select().from(sessions).where(eq(sessions.id, sessionId)).get();
+      if (!reSession) {
         throw new EngineError(`Session not found: ${sessionId}`);
       }
-      const reSession = dbRowToSessionRow(reSessionRowRaw);
       if (reSession.status === "done") {
         throw new EngineError(`Session already done: ${sessionId}`);
       }
@@ -565,11 +572,8 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
         throw new EngineError(`Session is aborted: ${sessionId}`);
       }
 
-      const reStepRaw = db.query("SELECT * FROM steps WHERE id = ?").get(currentStep.id) as
-        | Record<string, unknown>
-        | undefined;
-      const reStep = reStepRaw ? dbRowToStepRow(reStepRaw) : undefined;
-      if (!reStepRaw || reStep.status !== "pending") {
+      const reStep = db.select().from(steps).where(eq(steps.id, currentStep.id)).get();
+      if (!reStep || reStep.status !== "pending") {
         // The step changed under us (allocated → running, or skipped via a
         // concurrent condition evaluation). Drop this call's hook result and
         // re-select from scratch on the next iteration.
@@ -584,7 +588,7 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
 
       const attempt: AttemptInfo = {
         attemptNumber,
-        maxRetries: currentStepRaw.max_retries as number,
+        maxRetries: currentStepRaw.maxRetries,
         previousAttempts,
       };
 
@@ -604,18 +608,14 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
         attempt,
       );
 
-      db.run(
-        `INSERT INTO step_attempts (step_id, attempt_number)
-         VALUES (?, ?)`,
-        [reStep.id, attemptNumber],
-      );
+      db.insert(stepAttempts).values({ stepId: reStep.id, attemptNumber }).run();
 
-      db.run(`UPDATE steps SET status = 'running' WHERE id = ?`, [reStep.id]);
+      db.update(steps).set({ status: "running" }).where(eq(steps.id, reStep.id)).run();
 
-      db.run(`UPDATE sessions SET current_step = ?, updated_at = datetime('now') WHERE id = ?`, [
-        reStep.stepKey,
-        sessionId,
-      ]);
+      db.update(sessions)
+        .set({ currentStep: reStep.stepKey, updatedAt: sql`datetime('now')` })
+        .where(eq(sessions.id, sessionId))
+        .run();
 
       commit();
       return nextResult;
@@ -623,13 +623,13 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
   } catch (error) {
     if (transactionActive) {
       try {
-        db.exec("ROLLBACK");
+        db.run(sql`ROLLBACK`);
       } catch {
         // Preserve the original error if rollback itself cannot be completed.
       }
     }
     throw error;
   } finally {
-    db.close();
+    db.$client.close();
   }
 }
