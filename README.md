@@ -113,6 +113,8 @@ tado init --workflow ./workflow.ts
 SubAgent の実行やコマンド実行を行う基本ステップです。
 
 ```typescript
+import { buildStepPrompt } from "tado/prompt";
+
 {
   key: "write_spec",
   phase: "仕様策定",
@@ -122,7 +124,17 @@ SubAgent の実行やコマンド実行を行う基本ステップです。
   task: {
     action: "run_subagent",
     subagentType: "spec-writer",
-    buildPrompt: (ctx) => `## 目的\n仕様書を作成してください。\n\n### コンテキスト\n- セッション: ${ctx.sessionDir}`,
+    buildPrompt: (ctx) =>
+      buildStepPrompt({
+        purpose: ["仕様書を作成してください。"],
+        criteria: ["変更対象・変更内容・影響範囲が明記されていること。"],
+        approach: ["セッション情報を確認してから作業を進めること。"],
+        output: [
+          `セッションディレクトリ: ${ctx.sessionDir}`,
+          "仕様書（Markdown）のパスと要約",
+        ],
+        policy: ["仕様にない機能は追加しないこと。"],
+      }),
   },
   check: (ctx) => {
     const output = ctx.attemptResult.subagentOutput ?? "";
@@ -134,7 +146,7 @@ SubAgent の実行やコマンド実行を行う基本ステップです。
 ```
 
 - `task.action`: `run_subagent` / `run_command` / `orchestrate`
-- `buildPrompt(ctx: PromptCtx)`: `next` が呼ばれたときにプロンプトを生成します。`ctx` からは `sessionDir`・`attemptNumber`・`retryCount`・`previousAttempts` などを参照できます。
+- `buildPrompt(ctx: PromptCtx)`: `next` が呼ばれたときにプロンプトを生成します。`ctx` からは `sessionDir`・`artifactDbPath`・`artifacts` を参照できます。構造化プロンプトは `buildStepPrompt(spec)`（`tado/prompt`）で構築できます。セッション情報・リトライフィードバックはエンジンが自動付与します。
 - `check(ctx: CheckCtx)`: `report` 後に実行される完了検証です。`ctx.attemptResult`（実行結果）や `ctx.sessionDir` を使って判定し、`{ status, reasons }` を返します。
 
 #### human_gate

@@ -36,6 +36,9 @@ describe("next", () => {
     expect(result.action).toBe("run_subagent");
     expect(result.subagentType).toBe("test-agent");
     expect(result.prompt).toContain("Execute step1_task");
+    expect(result.prompt).toContain("## セッション情報");
+    expect(result.prompt).toContain("- セッションディレクトリ: ");
+    expect(result.prompt).toContain("- 試行: 1/2");
     expect(result.context.attemptNumber).toBe(1);
     expect(result.context.retryCount).toBe(0);
     expect(result.context.maxRetries).toBe(2);
@@ -121,6 +124,9 @@ describe("next", () => {
     const first = await next(sessionId);
     expect(first.context.attemptNumber).toBe(2);
     expect(first.context.retryCount).toBe(1);
+    expect(first.prompt).toContain("- 試行: 2/2");
+    expect(first.prompt).toContain("## 前回の試行フィードバック");
+    expect(first.prompt).toContain("Output does not contain success");
 
     // Resuming attempt 2 reissues the same prompt without allocating attempt 3.
     const resumed = await next(sessionId);
@@ -136,6 +142,33 @@ describe("next", () => {
       .get(sessionId, "step1_task") as Record<string, unknown>;
     expect(attempts.count).toBe(2);
     db.close();
+  });
+
+  it("human_gateのreviseで再実行されたステップでは pass 試行をリトライフィードバックに含めない", async () => {
+    const { sessionId } = await init(FIXTURE_WORKFLOW);
+
+    // step1_task を成功させる（checkStatus='pass' の試行が残る）
+    await next(sessionId);
+    await report(sessionId, {
+      stepKey: "step1_task",
+      status: "completed",
+      subagentOutput: "success task done",
+    });
+
+    // step2_human_gate で revise を選択 → step1_task に巻き戻る
+    await next(sessionId);
+    await report(sessionId, {
+      stepKey: "step2_human_gate",
+      status: "completed",
+      subagentOutput: "revise",
+    });
+
+    // step1_task が再実行される。過去の pass 試行は「前回の試行」に混入させない
+    const result = await next(sessionId);
+    expect(result.stepKey).toBe("step1_task");
+    expect(result.context.attemptNumber).toBe(2);
+    expect(result.prompt).not.toContain("## 前回の試行フィードバック");
+    expect(result.prompt).not.toContain("（pass）");
   });
 
   it("human_gateのプロンプトを返す", async () => {
@@ -184,8 +217,10 @@ describe("next", () => {
     expect(result.parallel!.subtasks).toHaveLength(2);
     expect(result.parallel!.subtasks[0].key).toBe("sub_a");
     expect(result.parallel!.subtasks[0].prompt).toContain("Subtask A");
+    expect(result.parallel!.subtasks[0].prompt).toContain("## セッション情報");
     expect(result.parallel!.subtasks[1].key).toBe("sub_b");
     expect(result.parallel!.subtasks[1].prompt).toContain("Subtask B");
+    expect(result.parallel!.subtasks[1].prompt).toContain("## セッション情報");
   });
 
   it("存在しないセッションでEngineErrorをスローする", async () => {
@@ -349,7 +384,7 @@ describe("next", () => {
       const { sessionId } = await init(workflowPath);
       const r1 = await next(sessionId);
       expect(r1.stepKey).toBe("step1");
-      expect(r1.prompt).toBe("step1 prompt");
+      expect(r1.prompt).toContain("step1 prompt");
     });
 
     it("conditionがundefinedのときにステップを実行する（後方互換）", async () => {

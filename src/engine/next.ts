@@ -1,7 +1,7 @@
 import type { StepDef } from "../types/workflow-def.ts";
 import type { PromptCtx, StepCtx } from "../types/context.ts";
 import type { ArtifactInput, ArtifactRecord } from "../types/artifact.ts";
-import type { NextResult, ParallelNextResult } from "../types/result.ts";
+import type { AttemptSummary, NextResult, ParallelNextResult } from "../types/result.ts";
 import type { Database } from "bun:sqlite";
 import {
   openSessionDb,
@@ -19,6 +19,73 @@ import type { SessionRow, StepRow } from "./store.ts";
 export const ARTIFACT_PRESENT_INSTRUCTION =
   "このゲートをユーザーに提示する際、上記「確認する成果物」のファイルパスを必ず表示すること（ユーザーがファイルを開いて内容を確認できるように）。";
 
+/** buildPrompt 結果の末尾に付与するボイラープレート生成に必要な試行情報。 */
+interface AttemptInfo {
+  attemptNumber: number;
+  maxRetries: number;
+  previousAttempts: AttemptSummary[];
+}
+
+/** 過去の試行の check 理由（JSON 文字列）を表示用の文字列配列に変換する。 */
+function parseCheckReasons(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed.map(String);
+    return [String(parsed)];
+  } catch {
+    return [raw];
+  }
+}
+
+/**
+ * リトライ時の前回試行フィードバックを構築する。
+ *
+ * pass 試行（成功済み）は混入させず、直近の失敗試行（fail / error）のみを
+ * 対象にする。失敗試行がなければ空文字（フィードバック節は出力しない）。
+ * 例: human_gate の revise で再実行されたステップでは、過去の pass 試行が
+ * 「前回の試行」としてモデルに誤解を与えないようにする（difit 指摘対応）。
+ */
+function buildRetryFeedback(attempts: AttemptSummary[]): string {
+  const failedAttempts = attempts.filter(
+    (attempt) => attempt.checkStatus === "fail" || attempt.checkStatus === "error",
+  );
+  if (failedAttempts.length === 0) return "";
+  const blocks = failedAttempts.map((attempt) => {
+    const status = attempt.checkStatus ? `（${attempt.checkStatus}）` : "";
+    const reasons = parseCheckReasons(attempt.checkResults);
+    const reasonLines =
+      reasons.length > 0
+        ? reasons.map((reason) => `  - ${reason}`).join("\n")
+        : "  - （理由の記録なし）";
+    return `- 試行 ${attempt.attemptNumber}${status}\n${reasonLines}`;
+  });
+  return `## 前回の試行フィードバック\n\n${blocks.join("\n")}`;
+}
+
+/**
+ * buildPrompt 結果の末尾に連結するボイラープレート（セッション情報・
+ * リトライフィードバック）を構築する（ADR-0003）。
+ */
+function buildBoilerplate(sessionDir: string, attempt: AttemptInfo): string {
+  const lines = [
+    "## セッション情報",
+    "",
+    `- セッションディレクトリ: ${sessionDir}`,
+    `- 試行: ${attempt.attemptNumber}/${attempt.maxRetries}`,
+  ];
+  const feedback = buildRetryFeedback(attempt.previousAttempts);
+  if (feedback) {
+    lines.push("", feedback);
+  }
+  return lines.join("\n");
+}
+
+/** buildPrompt の戻り値にボイラープレートを末尾連結する。 */
+function appendBoilerplate(prompt: string, boilerplate: string): string {
+  return prompt === "" ? boilerplate : `${prompt}\n\n${boilerplate}`;
+}
+
 /**
  * Build the full prompt/result for the current step without touching the DB.
  *
@@ -32,6 +99,7 @@ function buildNextResult(
   stepDef: StepDef,
   promptCtx: PromptCtx,
   artifacts: ArtifactRecord[],
+  attempt: AttemptInfo,
 ): NextResult {
   if (stepDef.type === "human_gate") {
     const hg = stepDef.humanGate!;
@@ -64,7 +132,7 @@ function buildNextResult(
       context: {
         sessionDir: session.sessionDir,
         artifactDbPath: session.artifactDbPath,
-        attemptNumber: promptCtx.attemptNumber,
+        attemptNumber: attempt.attemptNumber,
         retryCount: currentStep.retryCount,
         maxRetries: stepDef.maxRetries,
       },
@@ -73,8 +141,9 @@ function buildNextResult(
 
   if (stepDef.type === "parallel") {
     const pd = stepDef.parallel!;
+    const boilerplate = buildBoilerplate(session.sessionDir, attempt);
     const subtasks = pd.subtasks.map((st) => {
-      const stPrompt = st.buildPrompt(promptCtx);
+      const stPrompt = appendBoilerplate(st.buildPrompt(promptCtx), boilerplate);
       return {
         key: st.key,
         subagentType: st.subagentType,
@@ -104,7 +173,7 @@ function buildNextResult(
       context: {
         sessionDir: session.sessionDir,
         artifactDbPath: session.artifactDbPath,
-        attemptNumber: promptCtx.attemptNumber,
+        attemptNumber: attempt.attemptNumber,
         retryCount: currentStep.retryCount,
         maxRetries: stepDef.maxRetries,
       },
@@ -112,7 +181,8 @@ function buildNextResult(
   }
 
   const taskStep = stepDef.task!;
-  const prompt = taskStep.buildPrompt(promptCtx);
+  const boilerplate = buildBoilerplate(session.sessionDir, attempt);
+  const prompt = appendBoilerplate(taskStep.buildPrompt(promptCtx), boilerplate);
 
   return {
     sessionId,
@@ -131,7 +201,7 @@ function buildNextResult(
     context: {
       sessionDir: session.sessionDir,
       artifactDbPath: session.artifactDbPath,
-      attemptNumber: promptCtx.attemptNumber,
+      attemptNumber: attempt.attemptNumber,
       retryCount: currentStep.retryCount,
       maxRetries: stepDef.maxRetries,
     },
@@ -308,9 +378,10 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
             )
             .get(sessionId) as Record<string, unknown>;
           if ((allDone.cnt as number) === 0) {
-            db.run("UPDATE sessions SET status = 'done', updated_at = datetime('now') WHERE id = ?", [
-              sessionId,
-            ]);
+            db.run(
+              "UPDATE sessions SET status = 'done', updated_at = datetime('now') WHERE id = ?",
+              [sessionId],
+            );
             commit();
             throw new EngineError(`All steps completed for session: ${sessionId}`);
           }
@@ -341,13 +412,15 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
         const attemptNumber = previousAttempts.length + 1;
         const artifacts = getArtifacts(db, sessionId);
 
+        const attempt: AttemptInfo = {
+          attemptNumber,
+          maxRetries: currentStepRaw.max_retries as number,
+          previousAttempts,
+        };
+
         const promptCtx: PromptCtx = {
           sessionDir,
           artifactDbPath: session.artifactDbPath ?? undefined,
-          attemptNumber,
-          retryCount: currentStep.retryCount,
-          maxRetries: currentStepRaw.max_retries as number,
-          previousAttempts,
           artifacts,
         };
 
@@ -358,6 +431,7 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
           stepDef,
           promptCtx,
           artifacts,
+          attempt,
         );
 
         commit();
@@ -387,9 +461,10 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
             )
             .get(sessionId) as Record<string, unknown>;
           if ((allDone.cnt as number) === 0) {
-            db.run(`UPDATE sessions SET status = 'done', updated_at = datetime('now') WHERE id = ?`, [
-              sessionId,
-            ]);
+            db.run(
+              `UPDATE sessions SET status = 'done', updated_at = datetime('now') WHERE id = ?`,
+              [sessionId],
+            );
             commit();
             throw new EngineError(`All steps completed for session: ${sessionId}`);
           }
@@ -411,13 +486,15 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
         // Fast path: the step has no hook, so no user code runs inside the
         // transaction (no await at all). The lock is held only for the
         // synchronous read/allocate/write sequence.
+        const attempt: AttemptInfo = {
+          attemptNumber,
+          maxRetries: currentStepRaw.max_retries as number,
+          previousAttempts,
+        };
+
         const promptCtx: PromptCtx = {
           sessionDir,
           artifactDbPath: session.artifactDbPath ?? undefined,
-          attemptNumber,
-          retryCount: currentStep.retryCount,
-          maxRetries: currentStepRaw.max_retries as number,
-          previousAttempts,
           artifacts,
         };
 
@@ -428,6 +505,7 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
           stepDef,
           promptCtx,
           artifacts,
+          attempt,
         );
 
         db.run(
@@ -504,13 +582,15 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
       }
       const finalArtifacts = getArtifacts(db, sessionId);
 
+      const attempt: AttemptInfo = {
+        attemptNumber,
+        maxRetries: currentStepRaw.max_retries as number,
+        previousAttempts,
+      };
+
       const promptCtx: PromptCtx = {
         sessionDir,
         artifactDbPath: reSession.artifactDbPath ?? undefined,
-        attemptNumber,
-        retryCount: reStep.retryCount,
-        maxRetries: reStepRaw.max_retries as number,
-        previousAttempts,
         artifacts: finalArtifacts,
       };
 
@@ -521,6 +601,7 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
         stepDef,
         promptCtx,
         finalArtifacts,
+        attempt,
       );
 
       db.run(

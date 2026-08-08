@@ -10,8 +10,7 @@ const def = {
       task: {
         action: "run_subagent",
         subagentType: "test-agent",
-        buildPrompt: (ctx) =>
-          `Execute step1_task attempt ${ctx.attemptNumber}. Session: ${ctx.sessionDir}`,
+        buildPrompt: (ctx) => `Execute step1_task. Session: ${ctx.sessionDir}`,
       },
       check: (ctx) => {
         const output = ctx.attemptResult.subagentOutput ?? "";

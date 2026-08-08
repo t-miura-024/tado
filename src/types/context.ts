@@ -2,7 +2,7 @@
  * ワークフローの各フック（check / condition / buildPrompt 等）に渡されるコンテキストの型定義。
  */
 import type { ArtifactRecord } from "./artifact.ts";
-import type { AttemptResult, AttemptSummary } from "./result.ts";
+import type { AttemptResult } from "./result.ts";
 
 /** ステップの `condition` 判定に渡されるコンテキスト。 */
 export interface ConditionCtx {
@@ -28,10 +28,6 @@ export interface CheckCtx {
 export interface PromptCtx {
   sessionDir: string;
   artifactDbPath?: string;
-  attemptNumber: number;
-  retryCount: number;
-  maxRetries: number;
-  previousAttempts: AttemptSummary[];
   artifacts: ArtifactRecord[];
 }
 
