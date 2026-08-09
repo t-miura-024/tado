@@ -104,7 +104,9 @@ function buildProgram(): Command {
     .command("update")
     .description("Update all installed tado Skills to the latest version")
     .action(async () => {
-      await updateCommand();
+      if (await updateCommand()) {
+        process.exitCode = 1;
+      }
     });
 
   return program;

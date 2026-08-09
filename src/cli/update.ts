@@ -46,14 +46,14 @@ export async function performUpdate(skillsDir: string): Promise<void> {
 export async function updateCommand(
   cwd: string = process.cwd(),
   deps: UpdateDeps = defaultUpdateDeps(),
-): Promise<void> {
+): Promise<boolean> {
   deps.ensureBun();
 
   const locations = deps.findInstalledLocations(cwd);
   if (locations.length === 0) {
     deps.intro("tado update");
     deps.outro("No tado installations found. Run `tado install` first.");
-    return;
+    return false;
   }
 
   deps.intro("tado update");
@@ -80,10 +80,11 @@ export async function updateCommand(
     for (const f of failures) {
       deps.logError(`  ${f.location.tool} (${f.location.scope}): ${f.error}`);
     }
-    process.exitCode = 1;
   }
 
   deps.outro(
     failures.length === 0 ? "All installations updated!" : "Update completed with errors.",
   );
+
+  return failures.length > 0;
 }

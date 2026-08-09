@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, type Mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, mock, type Mock } from "bun:test";
 import type { InstallLocation } from "./paths.ts";
 import { updateCommand, type UpdateDeps } from "./update.ts";
 
@@ -47,24 +47,14 @@ function createDeps(): DepsAndMocks {
   return { deps, findInstalledLocations, performInstall, intro, outro, logInfo, logError };
 }
 
-let savedExitCode: string | number | null | undefined;
-
-beforeEach(() => {
-  savedExitCode = process.exitCode;
-  process.exitCode = undefined;
-});
-
-afterEach(() => {
-  process.exitCode = savedExitCode;
-});
-
 describe("updateCommand", () => {
   it("インストール済み0件で早期リターンする", async () => {
     const { deps, findInstalledLocations, intro, outro, performInstall } = createDeps();
     findInstalledLocations.mockReturnValue([]);
 
-    await updateCommand("/tmp/test", deps);
+    const failed = await updateCommand("/tmp/test", deps);
 
+    expect(failed).toBe(false);
     expect(intro).toHaveBeenCalledWith("tado update");
     expect(outro).toHaveBeenCalledWith("No tado installations found. Run `tado install` first.");
     expect(performInstall).not.toHaveBeenCalled();
@@ -81,12 +71,12 @@ describe("updateCommand", () => {
       .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(new Error("network error"));
 
-    await updateCommand("/tmp/test", deps);
+    const failed = await updateCommand("/tmp/test", deps);
 
+    expect(failed).toBe(true);
     expect(performInstall).toHaveBeenCalledTimes(2);
     expect(performInstall).toHaveBeenCalledWith("/tmp/a");
     expect(performInstall).toHaveBeenCalledWith("/tmp/b");
-    expect(process.exitCode).toBe(1);
     expect(logError).toHaveBeenCalled();
     expect(outro).toHaveBeenCalledWith("Update completed with errors.");
   });

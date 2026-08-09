@@ -233,6 +233,25 @@ tado init --workflow examples/simple-workflow.ts
 - [`skills/tado/SKILL.md`](./skills/tado/SKILL.md) — ワークフローエンジンのコマンド仕様・返却 JSON スキーマ・ワークフロー定義の作成方法
 - [`skills/tado-run/SKILL.md`](./skills/tado-run/SKILL.md) — `init` → `next` / `report` サイクルでワークフローを進行させる汎用ランナー
 
+## 開発
+
+依存のインストールと lint / format / test の実行方法です。
+
+```bash
+bun install
+bun run check   # oxlint + oxfmt --check
+bun test
+```
+
+### Git hooks（lefthook）
+
+コミット・プッシュ時に以下のチェックが自動実行されます。`bun install` の postinstall で自動インストールされるため、clone や新しい worktree で `bun install` を実行すれば有効になります（設定は `lefthook.yml`）。
+
+- **コミット前（pre-commit）**: ステージ済みの TS ファイルに oxfmt でフォーマットを適用し（差分は再ステージ）、続けて oxlint で lint を実行します。失敗するとコミットはブロックされます。
+- **プッシュ前（pre-push）**: `bun test` を実行します。失敗するとプッシュはブロックされます。
+
+チェックに引っかかった場合は、指摘を修正して再度コミット・プッシュしてください。緊急時は `LEFTHOOK=0`（環境変数）または `--no-verify`（git の引数）で一時的にスキップできます。
+
 ## ライセンス
 
 [MIT](./LICENSE)
