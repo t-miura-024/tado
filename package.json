@@ -12,6 +12,7 @@
   },
   "type": "module",
   "exports": {
+    ".": "./src/types/index.ts",
     "./prompt": "./src/prompt.ts",
     "./types/*": "./src/types/*"
   },
@@ -20,7 +21,7 @@
     "test": "bun test",
     "lint": "oxlint",
     "format": "oxfmt",
-    "check": "oxlint && oxfmt --check",
+    "check": "oxlint && oxfmt --check && tsc --noEmit",
     "db:generate": "bunx --bun drizzle-kit generate",
     "db:migrate": "bunx --bun drizzle-kit migrate"
   },
@@ -35,6 +36,7 @@
     "drizzle-kit": "^0.31.10",
     "lefthook": "^2.1.10",
     "oxfmt": "^0.60.0",
-    "oxlint": "^1.75.0"
+    "oxlint": "^1.75.0",
+    "typescript": "^5.9.0"
   }
 }

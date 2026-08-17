@@ -4,6 +4,10 @@ tado のデータ永続化とセッション管理に関わる語彙。
 
 ## Language
 
+**型 barrel**:
+型のみを集約して再 export するファイル。`import type` のルート解決（`from 'tado'`）を提供する。
+_Avoid_: ルート index、値も含む barrel
+
 **TADO_HOME**:
 tado のデータ置き場ルート。デフォルトは `~/.tado`、環境変数で上書き可能。
 
