@@ -1,4 +1,6 @@
-const def = {
+import type { WorkflowDef } from "../../types/workflow-def.ts";
+
+const def: WorkflowDef = {
   id: "test-simple",
   steps: [
     {

@@ -105,7 +105,7 @@ describe("CLI統合", () => {
     });
 
     proc.stdin.write(new TextEncoder().encode(input));
-    proc.stdin.close();
+    proc.stdin.end();
 
     const out = await new Response(proc.stdout).text();
     const err = await new Response(proc.stderr).text();

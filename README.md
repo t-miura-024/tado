@@ -57,6 +57,8 @@ tado status --session <id>
 
 `tado` パッケージから `WorkflowDef` などの型を import し、ワークフロー定義ファイル（`workflow.ts`）を作成します。
 
+型は原則ルート（`import type { WorkflowDef } from "tado"`）から import してください。`tado/types/*` のサブパスは `.ts` 付き（例: `tado/types/workflow-def.ts`）でのみ参照できます。
+
 ```typescript
 import type { WorkflowDef } from "tado";
 
