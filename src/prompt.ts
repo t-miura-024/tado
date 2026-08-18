@@ -1,12 +1,16 @@
 /**
- * ステップのプロンプト本文を `## 見出し` + `- 箇条書き` の構造化形式で構築するヘルパー。
+ * ステップのプロンプト本文を固定セクション構成で構築するヘルパー。
+ *
+ * 各セクションの中身は string[] を 1 行ずつそのまま（raw）レンダリングする。
+ * 箇条書き・番号付きリスト・コードフェンス等の Markdown 記法は行テキストとして
+ * 自由に記述でき、空行は `""` アイテムで明示的に制御する。
  *
  * ctx を直接受け取らない純粋フォーマッター（ADR-0002）。
  * セッション情報などの実行時依存の値は、workflow 作者が buildPrompt の
  * クロージャ内でテンプレートリテラルや引数として埋め込む。
  */
 
-/** `buildStepPrompt` に渡す構造化プロンプト定義。 */
+/** `buildStepPrompt` に渡すプロンプト定義。各セクションは raw Markdown 行の配列。 */
 export interface StepPromptSpec {
   purpose: string[];
   criteria: string[];
@@ -28,13 +32,13 @@ const SECTION_ORDER: { field: keyof StepPromptSpec; title: string }[] = [
 ];
 
 function renderSection(title: string, items: string[]): string {
-  const bullets = items.map((item) => `- ${item}`).join("\n");
-  return `## ${title}\n\n${bullets}`;
+  return `## ${title}\n\n${items.join("\n")}`;
 }
 
 /**
- * 構造化プロンプト定義を `## 見出し` + `- 箇条書き` の文字列にレンダリングする。
+ * プロンプト定義を `## 見出し` + 素通しの行としてレンダリングする。
  *
+ * 各行はそのまま出力される（プレフィックスなし・トリムなし・空行の自動挿入なし）。
  * 空（または未指定）のセクションは出力に含めない。セクションは
  * purpose → criteria → approach → output → policy → input の順で出力される。
  */

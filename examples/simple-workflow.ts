@@ -29,7 +29,14 @@ const def: WorkflowDef = {
           buildStepPrompt({
             purpose: ["テンプレートタスクを実行してください。"],
             criteria: ["出力に `done` が含まれていること。"],
-            approach: ["セッションディレクトリを確認してから作業を進めること。"],
+            approach: [
+              "1. セッションディレクトリを確認する",
+              "2. タスクを実行する",
+              "",
+              "```bash",
+              "ls <セッションディレクトリ>",
+              "```",
+            ],
             output: [
               `セッションディレクトリ: ${ctx.sessionDir}`,
               "実行結果の要約（`done` を含める）",
