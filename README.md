@@ -41,12 +41,16 @@ tado next --session <id>
 # ステップ実行結果の報告（stdin から JSON）
 echo '{"stepKey":"...","status":"completed","subagentOutput":"..."}' | tado report --session <id>
 
+# human_gate への回答（人間が自分の端末で実行・TTY 必須）
+tado confirm --session <id>
+
 # 現在状態の確認
 tado status --session <id>
 ```
 
 典型的な進行は `init` → `next`（プロンプト取得）→ ステップ実行 → `report`（結果報告）のサイクルです。
 `next` が返すプロンプトは完全で、LLM が手順を再構築する余地はありません。ワークフローが完了するまでサイクルを繰り返します。
+human_gate ステップだけは例外で、`report` では回答できず、人間が自分の端末から `tado confirm` を実行します（後述）。
 
 状態 DB は全セッションで共有される `~/.tado/workflow.db` に、成果物は `~/.tado/<sessionId>/` に保存されます。
 `TADO_HOME` 環境変数を設定すると保存先を変更できます。中断したセッションは、同じ `--session <id>` を指定すれば再開できます。
@@ -186,11 +190,18 @@ import { buildStepPrompt } from "tado/prompt";
 - `choices`: 人間に提示する選択肢
 - `reviseTargetStep`: `revise` 選択時に巻き戻るステップの `key`
 
-Human Gate への回答は `report` で渡します:
+Human Gate への回答は **`tado confirm` サブコマンドでのみ**受け付けます（ADR-0007）。
+LLM が人間の回答を転記する経路は存在せず、`report` で human_gate ステップを報告するとエラーになります。
 
 ```bash
-echo '{"stepKey":"approve_spec","status":"completed","subagentOutput":"approve"}' | tado report --session <id>
+# 人間が自分の端末（TTY 付き）で実行する。
+# 成果物パスと選択肢がその端末に表示され、選択と状態遷移が行われる。
+tado confirm --session <id>
 ```
+
+- `confirm` は stdin が TTY の場合のみ実行できるため、エージェントの Bash ツールからは構造的に実行できません。LLM が人間への案内を省略しても、ゲートは停止するだけで通過しません
+- 承認の成立に加え、TTY なしで拒否された実行試行も `gate_events` テーブルに監査記録として残ります
+- `confirm` で `revise` を選ぶと `reviseTargetStep` 以降が pending に戻り、`abort` を選ぶとセッションが中断されます
 
 #### parallel
 

@@ -2,7 +2,8 @@ import { describe, it, expect, afterEach } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Database } from "bun:sqlite";
-import { init, next, report, status, EngineError, getWorkflowDbPath } from "./index.ts";
+import { init, next, report, status, confirm, EngineError, getWorkflowDbPath } from "./index.ts";
+import { mockConfirmDeps } from "./__fixtures__/confirm-helper.ts";
 
 const TEST_TADO_HOME = path.join(__dirname, "__test_sessions_report__");
 process.env.TADO_HOME = TEST_TADO_HOME;
@@ -92,7 +93,7 @@ describe("レポート", () => {
     db.close();
   });
 
-  it("human_gateのapproveを処理する", async () => {
+  it("human_gateのapproveをconfirmで処理する", async () => {
     const { sessionId } = await init(FIXTURE_WORKFLOW);
 
     await next(sessionId);
@@ -103,12 +104,9 @@ describe("レポート", () => {
     });
 
     await next(sessionId);
-    const result = await report(sessionId, {
-      stepKey: "step2_human_gate",
-      status: "completed",
-      subagentOutput: "approve",
-    });
+    const result = await confirm(sessionId, mockConfirmDeps("approve"));
 
+    expect(result.choice).toBe("approve");
     expect(result.nextAction).toBe("continue");
 
     const db = new Database(getWorkflowDbPath());
@@ -119,7 +117,7 @@ describe("レポート", () => {
     db.close();
   });
 
-  it("human_gateのreviseを処理する", async () => {
+  it("human_gateのreviseをconfirmで処理する", async () => {
     const { sessionId } = await init(FIXTURE_WORKFLOW);
 
     await next(sessionId);
@@ -130,17 +128,13 @@ describe("レポート", () => {
     });
 
     await next(sessionId);
-    const result = await report(sessionId, {
-      stepKey: "step2_human_gate",
-      status: "completed",
-      subagentOutput: "revise",
-    });
+    const result = await confirm(sessionId, mockConfirmDeps("revise"));
 
     expect(result.nextAction).toBe("goto");
     expect(result.targetStep).toBe("step1_task");
   });
 
-  it("human_gateのabortを処理する", async () => {
+  it("human_gateのabortをconfirmで処理する", async () => {
     const { sessionId } = await init(FIXTURE_WORKFLOW);
 
     await next(sessionId);
@@ -151,13 +145,36 @@ describe("レポート", () => {
     });
 
     await next(sessionId);
-    const result = await report(sessionId, {
-      stepKey: "step2_human_gate",
-      status: "completed",
-      subagentOutput: "abort",
-    });
+    const result = await confirm(sessionId, mockConfirmDeps("abort"));
 
     expect(result.nextAction).toBe("abort");
+  });
+
+  it("human_gateへのreportを拒否する", async () => {
+    const { sessionId } = await init(FIXTURE_WORKFLOW);
+
+    await next(sessionId);
+    await report(sessionId, {
+      stepKey: "step1_task",
+      status: "completed",
+      subagentOutput: "success task done",
+    });
+
+    await next(sessionId);
+    await expect(
+      report(sessionId, {
+        stepKey: "step2_human_gate",
+        status: "completed",
+        subagentOutput: "approve",
+      }),
+    ).rejects.toThrow(EngineError);
+
+    const db = new Database(getWorkflowDbPath());
+    const step = db
+      .query("SELECT status FROM steps WHERE session_id = ? AND step_key = ?")
+      .get(sessionId, "step2_human_gate") as Record<string, unknown>;
+    expect(step.status).toBe("running");
+    db.close();
   });
 
   it("全ステップ完了時にセッションを完了する", async () => {
@@ -171,11 +188,7 @@ describe("レポート", () => {
     });
 
     await next(sessionId);
-    await report(sessionId, {
-      stepKey: "step2_human_gate",
-      status: "completed",
-      subagentOutput: "approve",
-    });
+    await confirm(sessionId, mockConfirmDeps("approve"));
 
     await next(sessionId);
     const result = await report(sessionId, {
@@ -551,11 +564,7 @@ describe("レポート", () => {
       });
 
       await next(sessionId);
-      await report(sessionId, {
-        stepKey: "step2_human_gate",
-        status: "completed",
-        subagentOutput: "approve",
-      });
+      await confirm(sessionId, mockConfirmDeps("approve"));
 
       const parResult = await next(sessionId);
       expect(parResult.stepType).toBe("parallel");
@@ -596,11 +605,7 @@ describe("レポート", () => {
       });
 
       await next(sessionId);
-      await report(sessionId, {
-        stepKey: "step2_human_gate",
-        status: "completed",
-        subagentOutput: "approve",
-      });
+      await confirm(sessionId, mockConfirmDeps("approve"));
 
       await next(sessionId);
 
@@ -757,11 +762,7 @@ describe("レポート", () => {
       await report(sessionId, { stepKey: "prepare", status: "completed", subagentOutput: "done" });
 
       await next(sessionId);
-      const gateResult = await report(sessionId, {
-        stepKey: "refined_gate",
-        status: "completed",
-        subagentOutput: "revise",
-      });
+      const gateResult = await confirm(sessionId, mockConfirmDeps("revise"));
 
       expect(gateResult.nextAction).toBe("goto");
       expect(gateResult.targetStep).toBe("grill");
@@ -860,7 +861,7 @@ describe("レポート", () => {
       await next(sessionId);
       await report(sessionId, { stepKey: "work", status: "completed", subagentOutput: "done" });
       await next(sessionId);
-      await report(sessionId, { stepKey: "gate", status: "completed", subagentOutput: "revise" });
+      await confirm(sessionId, mockConfirmDeps("revise"));
 
       // Second pass: work → gate (approve) → done_step
       await next(sessionId);
@@ -870,7 +871,7 @@ describe("レポート", () => {
         subagentOutput: "done again",
       });
       await next(sessionId);
-      await report(sessionId, { stepKey: "gate", status: "completed", subagentOutput: "approve" });
+      await confirm(sessionId, mockConfirmDeps("approve"));
 
       const r = await next(sessionId);
       expect(r.stepKey).toBe("done_step");

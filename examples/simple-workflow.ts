@@ -7,6 +7,9 @@
  * 使い方:
  *   tado init --workflow examples/simple-workflow.ts
  *   tado next --session <id>
+ *
+ * step2_approve（human_gate）に到達したら、ユーザー自身の端末で次を実行する:
+ *   tado confirm --session <id>
  */
 import { buildStepPrompt } from "../src/prompt.ts";
 import type { WorkflowDef } from "../src/types/workflow-def.ts";

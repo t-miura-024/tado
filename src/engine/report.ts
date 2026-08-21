@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, gte, sql } from "drizzle-orm";
+import { and, desc, eq, gt, sql } from "drizzle-orm";
 import { artifacts as artifactsTable, sessions, stepAttempts, steps } from "./schema.ts";
 import type { StepDef } from "../types/workflow-def.ts";
 import type { CheckCtx, StepCtx } from "../types/context.ts";
@@ -11,65 +11,6 @@ import {
   EngineError,
 } from "./store.ts";
 import type { StepRow, TadoDb } from "./store.ts";
-
-function handleHumanGateTransition(
-  db: TadoDb,
-  sessionId: string,
-  step: StepRow,
-  input: ReportInput,
-  stepDef: StepDef,
-  checkStatus: "pass" | "fail" | "error",
-  checkReasons: string[],
-): ReportResult | null {
-  const answer = (input.subagentOutput ?? "").trim();
-
-  if (answer === "revise") {
-    const targetStep = stepDef.humanGate?.reviseTargetStep ?? stepDef.onFail.target ?? step.stepKey;
-    db.update(steps).set({ status: "passed" }).where(eq(steps.id, step.id)).run();
-
-    // Reset target and all subsequent steps to pending
-    const targetStepRow = db
-      .select({ stepIndex: steps.stepIndex })
-      .from(steps)
-      .where(and(eq(steps.sessionId, sessionId), eq(steps.stepKey, targetStep)))
-      .get();
-    if (targetStepRow) {
-      db.update(steps)
-        .set({ status: "pending", retryCount: 0 })
-        .where(and(eq(steps.sessionId, sessionId), gte(steps.stepIndex, targetStepRow.stepIndex)))
-        .run();
-    }
-
-    db.update(sessions)
-      .set({ currentStep: targetStep, updatedAt: sql`datetime('now')` })
-      .where(eq(sessions.id, sessionId))
-      .run();
-    return {
-      sessionId,
-      stepKey: input.stepKey,
-      checkResult: { status: checkStatus, reasons: checkReasons },
-      nextAction: "goto",
-      targetStep,
-      message: `User requested revision. Going to: ${targetStep}`,
-    };
-  }
-
-  if (answer === "abort") {
-    db.update(sessions)
-      .set({ status: "aborted", updatedAt: sql`datetime('now')` })
-      .where(eq(sessions.id, sessionId))
-      .run();
-    return {
-      sessionId,
-      stepKey: input.stepKey,
-      checkResult: { status: checkStatus, reasons: checkReasons },
-      nextAction: "abort",
-      message: "Session aborted by user.",
-    };
-  }
-
-  return null;
-}
 
 function handleStepFailure(
   db: TadoDb,
@@ -196,6 +137,16 @@ export async function report(
     throw new EngineError(`Step not found: ${input.stepKey}`);
   }
 
+  // human_gate の回答は report では受理しない（ADR-0007）。
+  // 人間は自分の端末から `tado confirm` で回答する。LLM の転記は捏造になりうるため
+  // 構造的に排除する。
+  if (step.type === "human_gate") {
+    db.$client.close();
+    throw new EngineError(
+      `human_gate steps cannot be reported. The human must run: tado confirm --session ${sessionId}`,
+    );
+  }
+
   const attempt = db
     .select()
     .from(stepAttempts)
@@ -274,25 +225,6 @@ export async function report(
       checkStatus = "error";
       checkReasons = [e instanceof Error ? e.message : String(e)];
     }
-
-    if (stepDef.type === "human_gate") {
-      const answer = (input.subagentOutput ?? "").trim();
-
-      if (checkStatus === "pass") {
-        if (answer === "approve") {
-          checkReasons = ["User approved"];
-        } else if (answer === "revise") {
-          checkStatus = "fail";
-          checkReasons = ["User requested revision"];
-        } else if (answer === "abort") {
-          checkStatus = "fail";
-          checkReasons = ["User requested abort"];
-        } else {
-          checkStatus = "fail";
-          checkReasons = [`Unknown gate response: ${answer}`];
-        }
-      }
-    }
   } else {
     checkStatus = input.status === "completed" ? "pass" : "fail";
     checkReasons = input.errors ? [input.errors] : [];
@@ -348,22 +280,6 @@ export async function report(
       };
     }
   } else {
-    if (stepDef && stepDef.type === "human_gate") {
-      const hgResult = handleHumanGateTransition(
-        db,
-        sessionId,
-        step,
-        input,
-        stepDef,
-        checkStatus,
-        checkReasons,
-      );
-      if (hgResult) {
-        db.$client.close();
-        return hgResult;
-      }
-    }
-
     const result = handleStepFailure(
       db,
       sessionId,

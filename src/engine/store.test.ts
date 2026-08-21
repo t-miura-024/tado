@@ -215,7 +215,7 @@ describe("ストア", () => {
       const migrations = afterRaw
         .query("SELECT COUNT(*) AS cnt FROM __drizzle_migrations")
         .get() as Record<string, unknown>;
-      expect(migrations.cnt).toBe(1);
+      expect(migrations.cnt).toBe(2);
       afterRaw.close();
       db.$client.close();
     });
