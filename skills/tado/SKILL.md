@@ -1,6 +1,6 @@
 ---
 name: tado
-description: LLM のワークフロー順守を強制する決定論的ワークフローエンジン。init/next/report/status の4コマンドでセッション管理・ステップ進行・リトライ判定を行う。
+description: LLM のワークフロー順守を強制する決定論的ワークフローエンジン。init/next/report/confirm/status のコマンドでセッション管理・ステップ進行・ヒューマンゲート・リトライ判定を行う。
 ---
 
 # tado
@@ -16,7 +16,7 @@ Skill (上位スキル)
   └── workflow.ts  ── ワークフロー定義（WorkflowDef）
                           │
 tado (共有エンジン)        │
-  ├── CLI  ── エントリポイント（init/next/report/status）
+  ├── CLI  ── エントリポイント（init/next/report/confirm/status）
   └── engine ── 状態機械核心（SQLite 管理）
 ```
 
@@ -67,10 +67,12 @@ tado next --session <id>
   "stepKey": "approve",
   "stepType": "human_gate",
   "action": "human_gate",
-  "prompt": "## Human Gate: 仕様確認\n\n### 選択肢\n- approve: 承認\n- revise: 修正\n- abort: 中断",
-  "constraints": { "mustCallTaskTool": false, "readonly": true, "reportAfterCompletion": true }
+  "prompt": "## Human Gate: 仕様確認\n\n### 確認する成果物\n...\n\n### 選択肢\n- **approve**: 承認\n- **revise**: 修正\n- **abort**: 中断\n\n### 人間の確認が必要です\n...",
+  "constraints": { "mustCallTaskTool": false, "readonly": true, "reportAfterCompletion": false }
 }
 ```
+
+human_gate ステップは LLM 自身では完了できません。プロンプトの指示に従い、ユーザーに `tado confirm` の実行を促してください（下記「confirm」参照）。`report` で human_gate に回答することはできません。
 
 **parallel:**
 
@@ -125,13 +127,23 @@ stdin から JSON でステップ実行結果を受け取り、完了検証を�
 
 **Human Gate の回答:**
 
-```json
-{
-  "stepKey": "approve",
-  "status": "completed",
-  "subagentOutput": "approve"
-}
+human_gate への回答は `report` では受け付けません。人間が自分の端末（TTY 付き）で `tado confirm` を実行すると、成果物パスと選択肢がその端末に表示され、選択・状態遷移まで行われます。LLM は回答を転記してはならず、転記しようとしてもエンジンが拒否します。
+
+### confirm
+
+```bash
+tado confirm --session <id>
 ```
+
+human_gate の回答を人間から直接受け付ける対話コマンドです。
+
+- stdin が TTY の場合のみ実行できるため、エージェントの Bash ツールからは構造的に実行できない
+- 現在のステップが human_gate でない場合はエラーになる
+- TTY なしでの実行試行も `gate_events` テーブルに監査記録として残る
+- 選択肢の value（approve / revise / abort 等）を入力させ、選択に応じて状態遷移する:
+  - `approve`: ゲート通過。次のステップへ
+  - `revise`: `reviseTargetStep` 以降を pending に戻して巻き戻す
+  - `abort`: セッションを中断する
 
 ### status
 

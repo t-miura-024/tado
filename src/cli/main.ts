@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import * as fs from "node:fs";
 import { Command } from "commander";
-import { init, next, report, status, EngineError } from "../engine/index.ts";
+import { init, next, report, status, confirm, EngineError } from "../engine/index.ts";
 import type { ReportInput } from "../types/result.ts";
 import { installCommand } from "./install.ts";
 import { updateCommand } from "./update.ts";
@@ -81,6 +81,15 @@ function buildProgram(): Command {
         return;
       }
       const result = await report(opts.session, input, opts.workflow);
+      output(result);
+    });
+
+  program
+    .command("confirm")
+    .description("Record a human gate answer (interactive; requires a TTY)")
+    .requiredOption("--session <id>", "Session ID")
+    .action(async (opts: SessionOpts) => {
+      const result = await confirm(opts.session);
       output(result);
     });
 

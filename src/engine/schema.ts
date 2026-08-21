@@ -101,6 +101,29 @@ export const artifacts = sqliteTable("artifacts", {
     .default(sql`(datetime('now'))`),
 });
 
+/**
+ * human_gate の監査ログ。confirm の成立（confirmed）と、TTY なしで拒否された
+ * 実行試行（rejected）の両方を記録する。エージェントによる回避工作はここに痕跡を残す。
+ */
+export const gateEvents = sqliteTable(
+  "gate_events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    stepKey: text("step_key").notNull(),
+    attemptNumber: integer("attempt_number"),
+    event: text("event").notNull(),
+    choice: text("choice"),
+    ttyName: text("tty_name"),
+    createdAt: text("created_at")
+      .notNull()
+      .default(sql`(datetime('now'))`),
+  },
+  (t) => [check("gate_events_event_check", sql`${t.event} IN ('confirmed','rejected')`)],
+);
+
 export type SessionRow = typeof sessions.$inferSelect;
 export type NewSession = typeof sessions.$inferInsert;
 export type StepRow = typeof steps.$inferSelect;
@@ -109,3 +132,4 @@ export type StepAttemptRow = typeof stepAttempts.$inferSelect;
 export type NewStepAttempt = typeof stepAttempts.$inferInsert;
 export type ArtifactRow = typeof artifacts.$inferSelect;
 export type NewArtifact = typeof artifacts.$inferInsert;
+export type GateEventRow = typeof gateEvents.$inferSelect;

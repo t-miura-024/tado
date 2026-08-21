@@ -3,14 +3,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { Database } from "bun:sqlite";
 import type { NextResult } from "../types/result.ts";
-import {
-  init,
-  next,
-  report,
-  EngineError,
-  ARTIFACT_PRESENT_INSTRUCTION,
-  getWorkflowDbPath,
-} from "./index.ts";
+import { init, next, report, confirm, EngineError, getWorkflowDbPath } from "./index.ts";
+import { mockConfirmDeps } from "./__fixtures__/confirm-helper.ts";
 
 const TEST_TADO_HOME = path.join(__dirname, "__test_sessions_next__");
 process.env.TADO_HOME = TEST_TADO_HOME;
@@ -157,11 +151,7 @@ describe("next", () => {
 
     // step2_human_gate で revise を選択 → step1_task に巻き戻る
     await next(sessionId);
-    await report(sessionId, {
-      stepKey: "step2_human_gate",
-      status: "completed",
-      subagentOutput: "revise",
-    });
+    await confirm(sessionId, mockConfirmDeps("revise"));
 
     // step1_task が再実行される。過去の pass 試行は「前回の試行」に混入させない
     const result = await next(sessionId);
@@ -187,9 +177,12 @@ describe("next", () => {
     expect(result.stepKey).toBe("step2_human_gate");
     expect(result.stepType).toBe("human_gate");
     expect(result.action).toBe("human_gate");
+    expect(result.constraints.reportAfterCompletion).toBe(false);
     expect(result.prompt).toContain("approve");
     expect(result.prompt).toContain("revise");
     expect(result.prompt).toContain("abort");
+    expect(result.prompt).toContain(`tado confirm --session ${sessionId}`);
+    expect(result.prompt).not.toContain("回答は選択肢の value を入力してください");
   });
 
   it("並列サブタスクのプロンプトを返す", async () => {
@@ -203,11 +196,7 @@ describe("next", () => {
     });
 
     await next(sessionId);
-    await report(sessionId, {
-      stepKey: "step2_human_gate",
-      status: "completed",
-      subagentOutput: "approve",
-    });
+    await confirm(sessionId, mockConfirmDeps("approve"));
 
     const result = await next(sessionId);
 
@@ -611,11 +600,7 @@ describe("next", () => {
 
       // Pass the gate with 'approve'
       await next(sessionId);
-      await report(sessionId, {
-        stepKey: "gate_step",
-        status: "completed",
-        subagentOutput: "approve",
-      });
+      await confirm(sessionId, mockConfirmDeps("approve"));
 
       // conditional_step should execute because gateChoices['gate_step'] === 'approve'
       const r = await next(sessionId);
@@ -684,11 +669,7 @@ describe("next", () => {
 
       // Gate approves → condition gateChoices['gate_step'] === 'approve' is true → step executes
       await next(sessionId);
-      await report(sessionId, {
-        stepKey: "gate_step",
-        status: "completed",
-        subagentOutput: "approve",
-      });
+      await confirm(sessionId, mockConfirmDeps("approve"));
 
       const r = await next(sessionId);
       expect(r.stepKey).toBe("conditional_step");
@@ -769,8 +750,8 @@ describe("next", () => {
     });
   });
 
-  describe("ヒューマンゲートのアーティファクト提示指示", () => {
-    it("アーティファクト登録時にパスと提示指示を含める", async () => {
+  describe("ヒューマンゲートのアーティファクト提示", () => {
+    it("アーティファクト登録時にパスとconfirmコマンドを含める", async () => {
       const tmpDir = path.join(TEST_TADO_HOME, "gate-present-test");
       fs.mkdirSync(tmpDir, { recursive: true });
       const workflowPath = path.join(tmpDir, "gate-present-workflow.ts");
@@ -827,15 +808,15 @@ describe("next", () => {
         artifacts: [{ key: "issue-body.md", path: "/tmp/plan/issue-body.md" }],
       });
 
-      // human gate prompt should present the artifact path AND the instruction
+      // human gate prompt should present the artifact path AND the confirm command
       const result = await next(sessionId);
       expect(result.stepKey).toBe("decompose_gate");
       expect(result.stepType).toBe("human_gate");
       expect(result.prompt).toContain("- issue-body.md: /tmp/plan/issue-body.md");
-      expect(result.prompt).toContain(ARTIFACT_PRESENT_INSTRUCTION);
+      expect(result.prompt).toContain(`tado confirm --session ${sessionId}`);
     });
 
-    it("アーティファクト未登録時に提示指示を含めない", async () => {
+    it("アーティファクト未登録時に成果物なしを表示する", async () => {
       const { sessionId } = await init(FIXTURE_WORKFLOW);
 
       await next(sessionId);
@@ -850,7 +831,7 @@ describe("next", () => {
       expect(result.stepKey).toBe("step2_human_gate");
       expect(result.stepType).toBe("human_gate");
       expect(result.prompt).toContain("(成果物なし)");
-      expect(result.prompt).not.toContain(ARTIFACT_PRESENT_INSTRUCTION);
+      expect(result.prompt).toContain(`tado confirm --session ${sessionId}`);
     });
   });
 

@@ -92,7 +92,17 @@ export interface ReportResult {
   sessionId: string;
   stepKey: string;
   checkResult: CheckResult;
-  nextAction: "continue" | "retry" | "goto" | "abort" | "escalate" | "done" | "human_gate";
+  nextAction: "continue" | "retry" | "goto" | "abort" | "escalate" | "done";
+  targetStep?: string;
+  message: string;
+}
+
+/** `confirm` コマンドの返却値。人間のゲート回答とその結果の遷移を含む。 */
+export interface ConfirmResult {
+  sessionId: string;
+  stepKey: string;
+  choice: string;
+  nextAction: "continue" | "goto" | "abort" | "done";
   targetStep?: string;
   message: string;
 }

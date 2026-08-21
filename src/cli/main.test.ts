@@ -152,6 +152,7 @@ describe("CLI統合", () => {
     expect(out).toContain("init");
     expect(out).toContain("next");
     expect(out).toContain("report");
+    expect(out).toContain("confirm");
     expect(out).toContain("status");
     expect(out).toContain("install");
     expect(out).toContain("update");

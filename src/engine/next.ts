@@ -15,9 +15,6 @@ import {
 } from "./store.ts";
 import type { SessionRow, StepRow, TadoDb } from "./store.ts";
 
-export const ARTIFACT_PRESENT_INSTRUCTION =
-  "このゲートをユーザーに提示する際、上記「確認する成果物」のファイルパスを必ず表示すること（ユーザーがファイルを開いて内容を確認できるように）。";
-
 /** buildPrompt 結果の末尾に付与するボイラープレート生成に必要な試行情報。 */
 interface AttemptInfo {
   attemptNumber: number;
@@ -111,9 +108,28 @@ function buildNextResult(
       .join("\n");
     const artifactsSection =
       artifactList.length > 0
-        ? `${artifactList.map((a) => `- ${a.artifactKey}: ${a.filePath}`).join("\n")}\n\n${ARTIFACT_PRESENT_INSTRUCTION}`
+        ? artifactList.map((a) => `- ${a.artifactKey}: ${a.filePath}`).join("\n")
         : "(成果物なし)";
-    const prompt = `## Human Gate: ${stepDef.phase}\n\n### 確認する成果物\n${artifactsSection}\n\n### 選択肢\n${choicesText}\n\n回答は選択肢の value を入力してください。`;
+    const prompt = [
+      `## Human Gate: ${stepDef.phase}`,
+      "",
+      "### 確認する成果物",
+      artifactsSection,
+      "",
+      "### 選択肢",
+      choicesText,
+      "",
+      "### 人間の確認が必要です",
+      "このステップはあなた自身では完了できません。report でゲートに回答することもできません。",
+      "次のコマンドをユーザーに伝え、ユーザー自身の端末（TTY 付き）での実行を促してください",
+      "（コマンド全文をそのまま表示し、上記の成果物パスも案内に含めてください）:",
+      "",
+      `    tado confirm --session ${sessionId}`,
+      "",
+      "- confirm は TTY 付き端末専用で、エージェントからは実行できません",
+      "- ユーザーが実行すると、成果物と選択肢がその端末に表示され、選択が記録されます",
+      "- 承認が済むまでワークフローは停止します。next を再実行するとこのプロンプトが再表示されます",
+    ].join("\n");
 
     return {
       sessionId,
@@ -126,7 +142,7 @@ function buildNextResult(
       constraints: {
         mustCallTaskTool: false,
         readonly: true,
-        reportAfterCompletion: true,
+        reportAfterCompletion: false,
       },
       context: {
         sessionDir: session.sessionDir,
