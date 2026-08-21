@@ -140,7 +140,7 @@ human_gate の回答を人間から直接受け付ける対話コマンドです
 - stdin が TTY の場合のみ実行できるため、エージェントの Bash ツールからは構造的に実行できない
 - 現在のステップが human_gate でない場合はエラーになる
 - TTY なしでの実行試行も `gate_events` テーブルに監査記録として残る
-- 選択肢の value（approve / revise / abort 等）を入力させ、選択に応じて状態遷移する:
+- fzf 風の TUI（入力で絞り込み、↑↓で選択、Enter で確定）で選択させ、選択に応じて状態遷移する:
   - `approve`: ゲート通過。次のステップへ
   - `revise`: `reviseTargetStep` 以降を pending に戻して巻き戻す
   - `abort`: セッションを中断する

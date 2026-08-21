@@ -1,10 +1,17 @@
 import { spawnSync } from "node:child_process";
-import * as readline from "node:readline/promises";
+import * as clack from "@clack/prompts";
 import { and, desc, eq, gt, gte, sql } from "drizzle-orm";
 import { gateEvents, sessions, stepAttempts, steps } from "./schema.ts";
 import type { StepRow, TadoDb } from "./store.ts";
 import { getArtifacts, importWorkflowDef, openSessionDb, EngineError } from "./store.ts";
 import type { ConfirmResult } from "../types/result.ts";
+
+/** 人間に提示するゲート内容。 */
+export interface GateView {
+  phase: string;
+  artifacts: { key: string; filePath: string }[];
+  choices: { value: string; label: string; desc?: string }[];
+}
 
 /**
  * confirm の入出力を注入するためのポート。
@@ -13,22 +20,34 @@ import type { ConfirmResult } from "../types/result.ts";
 export interface ConfirmDeps {
   isTTY(): boolean;
   ttyName(): string | null;
-  readLine(prompt: string): Promise<string>;
-  write(text: string): void;
-  close(): void;
+  /** ゲート内容を提示し、有効な選択値を 1 つ返す。人間が中断した場合は null を返す。 */
+  presentGate(view: GateView): Promise<string | null>;
 }
 
 export function defaultConfirmDeps(): ConfirmDeps {
-  const rl = readline.createInterface({ input: process.stdin });
   return {
     isTTY: () => process.stdin.isTTY === true,
     ttyName: () => {
       const r = spawnSync("tty", [], { stdio: ["inherit", "pipe", "ignore"], encoding: "utf-8" });
       return r.status === 0 ? (r.stdout ?? "").trim() || null : null;
     },
-    readLine: (prompt) => rl.question(prompt),
-    write: (text) => process.stdout.write(text),
-    close: () => rl.close(),
+    presentGate: async (view) => {
+      const artifactsBody =
+        view.artifacts.length > 0
+          ? view.artifacts.map((a) => `- ${a.key}: ${a.filePath}`).join("\n")
+          : "(成果物なし)";
+      clack.note(artifactsBody, `Human Gate: ${view.phase}`);
+      const choice = await clack.autocomplete({
+        message: "回答を選択してください（入力で絞り込み、↑↓で選択）",
+        options: view.choices.map((c) => ({ value: c.value, label: c.label, hint: c.desc })),
+        placeholder: "Type to filter...",
+      });
+      if (clack.isCancel(choice)) {
+        clack.cancel("confirm canceled.");
+        return null;
+      }
+      return choice;
+    },
   };
 }
 
@@ -119,27 +138,13 @@ export async function confirm(
       .map((k) => artifacts.find((a) => a.artifactKey === k))
       .filter(Boolean) as ReturnType<typeof getArtifacts>;
 
-    const choicesText = hg.choices
-      .map((c) => `- ${c.value}: ${c.label}${c.desc ? ` (${c.desc})` : ""}`)
-      .join("\n");
-    const artifactsSection =
-      artifactList.length > 0
-        ? artifactList.map((a) => `- ${a.artifactKey}: ${a.filePath}`).join("\n")
-        : "(成果物なし)";
-
-    deps.write(
-      `## Human Gate: ${stepDef.phase}\n\n### 確認する成果物\n${artifactsSection}\n\n### 選択肢\n${choicesText}\n\n`,
-    );
-
-    const validValues = new Set(hg.choices.map((c) => c.value));
-    let choice = "";
-    for (;;) {
-      const answer = (await deps.readLine("選択を入力してください: ")).trim();
-      if (validValues.has(answer)) {
-        choice = answer;
-        break;
-      }
-      deps.write(`無効な選択です: ${answer}\n`);
+    const choice = await deps.presentGate({
+      phase: stepDef.phase,
+      artifacts: artifactList.map((a) => ({ key: a.artifactKey, filePath: a.filePath })),
+      choices: hg.choices.map((c) => ({ value: c.value, label: c.label, desc: c.desc })),
+    });
+    if (choice === null) {
+      throw new EngineError("confirm canceled by user.");
     }
 
     recordGateEvent(
@@ -252,7 +257,6 @@ export async function confirm(
       message: "User approved. All steps completed. Session done.",
     };
   } finally {
-    deps.close();
     db.$client.close();
   }
 }

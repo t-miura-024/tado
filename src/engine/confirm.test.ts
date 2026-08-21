@@ -36,9 +36,7 @@ function nonTtyDeps(): ConfirmDeps {
   return {
     isTTY: () => false,
     ttyName: () => null,
-    readLine: async () => "",
-    write: () => {},
-    close: () => {},
+    presentGate: async () => null,
   };
 }
 
@@ -139,16 +137,22 @@ describe("confirm", () => {
     db.close();
   });
 
-  it("無効な入力は再プロンプトされ有効な選択で受理される", async () => {
+  it("キャンセル時は遷移せずEngineErrorをスローする", async () => {
     const sessionId = await reachGate();
 
-    const result = await confirm(sessionId, mockConfirmDeps("maybe", " approve ", "approve"));
-
-    expect(result.choice).toBe("approve");
+    await expect(confirm(sessionId, mockConfirmDeps())).rejects.toThrow(
+      "confirm canceled by user.",
+    );
 
     const events = gateEvents(sessionId);
-    expect(events).toHaveLength(1);
-    expect(events[0].event).toBe("confirmed");
+    expect(events).toHaveLength(0);
+
+    const db = new Database(getWorkflowDbPath());
+    const step = db
+      .query("SELECT status FROM steps WHERE session_id = ? AND step_key = ?")
+      .get(sessionId, "step2_human_gate") as Record<string, unknown>;
+    expect(step.status).toBe("running");
+    db.close();
   });
 
   it("ゲート以外のステップが current の場合はEngineErrorをスローする", async () => {
