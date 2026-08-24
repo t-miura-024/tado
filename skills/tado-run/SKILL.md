@@ -52,9 +52,3 @@ echo '{"stepKey":"...","status":"completed","subagentOutput":"..."}' | tado repo
 ```bash
 tado status --session <id>
 ```
-
-## 注意事項
-
-- 本 Skill はエンジン起動手順の集約であり、ワークフロー固有の判断は行わない。固有の指示は `next` が返すプロンプトに従う。
-- `next` が返すプロンプトは完全。手順を抜かしたり簡略化したりしない。
-- コマンド仕様・返却 JSON の詳細スキーマ（task / human_gate / parallel 各形式）・ワークフロー定義の作成方法は `tado` Skill を参照。本 Skill はそれらを重複して持たない。
