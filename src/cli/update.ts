@@ -1,6 +1,7 @@
 import * as clack from "@clack/prompts";
+import { getTadoHome } from "../engine/store.ts";
 import { findInstalledLocations, type InstallLocation } from "./paths.ts";
-import { ensureBun, performInstall } from "./install.ts";
+import { ensureBun, performInstall, installTadoPackage } from "./install.ts";
 
 /**
  * `updateCommand` が依存する外部リソース。
@@ -11,6 +12,8 @@ export interface UpdateDeps {
   findInstalledLocations: (cwd: string) => InstallLocation[];
   ensureBun: () => void;
   performInstall: (skillsDir: string) => Promise<void>;
+  installTadoPackage: () => Promise<void>;
+  getTadoHome: () => string;
   intro: (message: string) => void;
   outro: (message: string) => void;
   logInfo: (message: string) => void;
@@ -24,6 +27,8 @@ export function defaultUpdateDeps(): UpdateDeps {
     findInstalledLocations,
     ensureBun,
     performInstall,
+    installTadoPackage,
+    getTadoHome,
     intro: (message) => clack.intro(message),
     outro: (message) => clack.outro(message),
     logInfo: (message) => clack.log.info(message),
@@ -42,7 +47,7 @@ export async function performUpdate(skillsDir: string): Promise<void> {
   await performInstall(skillsDir);
 }
 
-/** Scan all known locations and update every installed instance. */
+/** Scan all known locations and update every installed instance, plus TADO_HOME package. */
 export async function updateCommand(
   cwd: string = process.cwd(),
   deps: UpdateDeps = defaultUpdateDeps(),
@@ -60,7 +65,8 @@ export async function updateCommand(
   deps.logInfo(`Found ${locations.length} installation(s).`);
 
   const spinner = deps.createSpinner();
-  const failures: { location: InstallLocation; error: string }[] = [];
+  const failures: { location: InstallLocation | { tool: string; scope: string }; error: string }[] =
+    [];
 
   for (const loc of locations) {
     const label = `${loc.tool} (${loc.scope})`;
@@ -75,10 +81,25 @@ export async function updateCommand(
     }
   }
 
+  // Additionally update TADO_HOME package once. performInstall already updates TADO_HOME
+  // per-location, but we ensure at least one explicit update for completeness and to
+  // handle the case where only TADO_HOME is installed.
+  const tadoHome = deps.getTadoHome();
+  spinner.start("Updating TADO_HOME package...");
+  try {
+    await deps.installTadoPackage();
+    spinner.stop(`Updated TADO_HOME at ${tadoHome}`);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    spinner.stop("Failed to update TADO_HOME");
+    failures.push({ location: { tool: "tado-home", scope: "package" }, error: msg });
+  }
+
   if (failures.length > 0) {
     deps.logError(`${failures.length} update(s) failed:`);
     for (const f of failures) {
-      deps.logError(`  ${f.location.tool} (${f.location.scope}): ${f.error}`);
+      const loc = f.location as InstallLocation & { tool: string; scope: string };
+      deps.logError(`  ${loc.tool} (${loc.scope}): ${f.error}`);
     }
   }
 

@@ -2,7 +2,16 @@ import { describe, it, expect, afterEach } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Database } from "bun:sqlite";
-import { init, next, report, status, confirm, EngineError, getWorkflowDbPath } from "./index.ts";
+import {
+  init,
+  next,
+  report,
+  status,
+  confirm,
+  EngineError,
+  getWorkflowDbPath,
+  getWorkflowsDir,
+} from "./index.ts";
 import { mockConfirmDeps } from "./__fixtures__/confirm-helper.ts";
 
 const TEST_TADO_HOME = path.join(__dirname, "__test_sessions_report__");
@@ -19,9 +28,22 @@ afterEach(() => {
   cleanup(TEST_TADO_HOME);
 });
 
+function setupSimpleWorkflow(): void {
+  const dir = path.join(getWorkflowsDir(), "test-simple");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.copyFileSync(FIXTURE_WORKFLOW, path.join(dir, "index.ts"));
+}
+
+function setupWorkflowFromContent(id: string, content: string): void {
+  const dir = path.join(getWorkflowsDir(), id);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "index.ts"), content);
+}
+
 describe("レポート", () => {
   it("ステップを合格としてマークし次に進む", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW);
+    setupSimpleWorkflow();
+    const { sessionId } = await init("test-simple");
     await next(sessionId);
 
     const result = await report(sessionId, {
@@ -42,7 +64,8 @@ describe("レポート", () => {
   });
 
   it("maxRetries内で失敗時にリトライする", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW);
+    setupSimpleWorkflow();
+    const { sessionId } = await init("test-simple");
     await next(sessionId);
 
     const result = await report(sessionId, {
@@ -64,7 +87,8 @@ describe("レポート", () => {
   });
 
   it("maxRetries超過後にonFail abortを発動する", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW);
+    setupSimpleWorkflow();
+    const { sessionId } = await init("test-simple");
 
     for (let i = 0; i < 2; i++) {
       await next(sessionId);
@@ -94,7 +118,8 @@ describe("レポート", () => {
   });
 
   it("human_gateのapproveをconfirmで処理する", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW);
+    setupSimpleWorkflow();
+    const { sessionId } = await init("test-simple");
 
     await next(sessionId);
     await report(sessionId, {
@@ -118,7 +143,8 @@ describe("レポート", () => {
   });
 
   it("human_gateのreviseをconfirmで処理する", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW);
+    setupSimpleWorkflow();
+    const { sessionId } = await init("test-simple");
 
     await next(sessionId);
     await report(sessionId, {
@@ -135,7 +161,8 @@ describe("レポート", () => {
   });
 
   it("human_gateのabortをconfirmで処理する", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW);
+    setupSimpleWorkflow();
+    const { sessionId } = await init("test-simple");
 
     await next(sessionId);
     await report(sessionId, {
@@ -151,7 +178,8 @@ describe("レポート", () => {
   });
 
   it("human_gateへのreportを拒否する", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW);
+    setupSimpleWorkflow();
+    const { sessionId } = await init("test-simple");
 
     await next(sessionId);
     await report(sessionId, {
@@ -178,7 +206,8 @@ describe("レポート", () => {
   });
 
   it("全ステップ完了時にセッションを完了する", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW);
+    setupSimpleWorkflow();
+    const { sessionId } = await init("test-simple");
 
     await next(sessionId);
     await report(sessionId, {
@@ -210,12 +239,7 @@ describe("レポート", () => {
 
   describe("onFail戦略付きリトライ", () => {
     it("maxRetries超過後にonFail gotoをサポートする", async () => {
-      const tmpDir = path.join(TEST_TADO_HOME, "goto-test");
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const workflowPath = path.join(tmpDir, "goto-workflow.ts");
-      fs.writeFileSync(
-        workflowPath,
-        `
+      const goto_test_workflow_content = `
         const def = {
           id: 'goto-test',
           steps: [
@@ -248,10 +272,10 @@ describe("レポート", () => {
           ],
         };
         export default def;
-      `,
-      );
+            `;
+      setupWorkflowFromContent("goto-test", goto_test_workflow_content);
 
-      const { sessionId } = await init(workflowPath);
+      const { sessionId } = await init("goto-test");
 
       await next(sessionId);
       const r1 = await report(sessionId, {
@@ -274,12 +298,7 @@ describe("レポート", () => {
     });
 
     it("onFail escalateをサポートする", async () => {
-      const tmpDir = path.join(TEST_TADO_HOME, "escalate-test");
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const workflowPath = path.join(tmpDir, "escalate-workflow.ts");
-      fs.writeFileSync(
-        workflowPath,
-        `
+      const escalate_test_workflow_content = `
         const def = {
           id: 'escalate-test',
           steps: [
@@ -299,10 +318,10 @@ describe("レポート", () => {
           ],
         };
         export default def;
-      `,
-      );
+            `;
+      setupWorkflowFromContent("escalate-test", escalate_test_workflow_content);
 
-      const { sessionId } = await init(workflowPath);
+      const { sessionId } = await init("escalate-test");
 
       await next(sessionId);
       const r1 = await report(sessionId, {
@@ -325,7 +344,8 @@ describe("レポート", () => {
 
   describe("アーティファクト", () => {
     it("レポート入力からアーティファクトを登録する", async () => {
-      const { sessionId } = await init(FIXTURE_WORKFLOW);
+      setupSimpleWorkflow();
+      const { sessionId } = await init("test-simple");
       await next(sessionId);
 
       await report(sessionId, {
@@ -353,12 +373,7 @@ describe("レポート", () => {
 
   describe("afterStepフック", () => {
     it("返却artifactsをDBに登録する", async () => {
-      const tmpDir = path.join(TEST_TADO_HOME, "after-step-register-test");
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const workflowPath = path.join(tmpDir, "after-step-workflow.ts");
-      fs.writeFileSync(
-        workflowPath,
-        `
+      const after_step_test_workflow_content = `
         const def = {
           id: 'after-step-test',
           steps: [
@@ -381,10 +396,10 @@ describe("レポート", () => {
           ],
         };
         export default def;
-      `,
-      );
+            `;
+      setupWorkflowFromContent("after-step-test", after_step_test_workflow_content);
 
-      const { sessionId } = await init(workflowPath);
+      const { sessionId } = await init("after-step-test");
       await next(sessionId);
       const r = await report(sessionId, {
         stepKey: "step1",
@@ -405,12 +420,7 @@ describe("レポート", () => {
     });
 
     it("StepCtxにstepKeyとattemptNumberを提供する", async () => {
-      const tmpDir = path.join(TEST_TADO_HOME, "after-step-ctx-test");
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const workflowPath = path.join(tmpDir, "after-step-ctx-workflow.ts");
-      fs.writeFileSync(
-        workflowPath,
-        `
+      const after_step_ctx_test_workflow_content = `
         const def = {
           id: 'after-step-ctx-test',
           steps: [
@@ -433,10 +443,10 @@ describe("レポート", () => {
           ],
         };
         export default def;
-      `,
-      );
+            `;
+      setupWorkflowFromContent("after-step-ctx-test", after_step_ctx_test_workflow_content);
 
-      const { sessionId } = await init(workflowPath);
+      const { sessionId } = await init("after-step-ctx-test");
       await next(sessionId);
       await report(sessionId, { stepKey: "render", status: "completed", subagentOutput: "done" });
 
@@ -450,12 +460,7 @@ describe("レポート", () => {
     });
 
     it("返却artifactsをcheckのCheckCtx.artifactsにマージし同名キーを上書きする", async () => {
-      const tmpDir = path.join(TEST_TADO_HOME, "after-step-merge-test");
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const workflowPath = path.join(tmpDir, "after-step-merge-workflow.ts");
-      fs.writeFileSync(
-        workflowPath,
-        `
+      const after_step_merge_test_workflow_content = `
         const def = {
           id: 'after-step-merge-test',
           steps: [
@@ -483,10 +488,10 @@ describe("レポート", () => {
           ],
         };
         export default def;
-      `,
-      );
+            `;
+      setupWorkflowFromContent("after-step-merge-test", after_step_merge_test_workflow_content);
 
-      const { sessionId } = await init(workflowPath);
+      const { sessionId } = await init("after-step-merge-test");
       await next(sessionId);
 
       // Report input registers out.md with the OLD path
@@ -511,12 +516,7 @@ describe("レポート", () => {
     });
 
     it("afterStepの例外をreport()から伝播させる", async () => {
-      const tmpDir = path.join(TEST_TADO_HOME, "after-step-failure-test");
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const workflowPath = path.join(tmpDir, "after-step-failure-workflow.ts");
-      fs.writeFileSync(
-        workflowPath,
-        `
+      const after_step_failure_test_workflow_content = `
         const def = {
           id: 'after-step-failure-test',
           steps: [
@@ -539,10 +539,10 @@ describe("レポート", () => {
           ],
         };
         export default def;
-      `,
-      );
+            `;
+      setupWorkflowFromContent("after-step-failure-test", after_step_failure_test_workflow_content);
 
-      const { sessionId } = await init(workflowPath);
+      const { sessionId } = await init("after-step-failure-test");
       await next(sessionId);
 
       // afterStep の失敗は check には至らず、例外が report() から伝播する。
@@ -554,7 +554,8 @@ describe("レポート", () => {
 
   describe("subtaskResults付き並列レポート", () => {
     it("レポート時にサブタスク結果を保存する", async () => {
-      const { sessionId } = await init(FIXTURE_WORKFLOW);
+      setupSimpleWorkflow();
+      const { sessionId } = await init("test-simple");
 
       await next(sessionId);
       await report(sessionId, {
@@ -595,7 +596,8 @@ describe("レポート", () => {
     });
 
     it("サブタスクの部分失敗を処理する", async () => {
-      const { sessionId } = await init(FIXTURE_WORKFLOW);
+      setupSimpleWorkflow();
+      const { sessionId } = await init("test-simple");
 
       await next(sessionId);
       await report(sessionId, {
@@ -637,12 +639,7 @@ describe("レポート", () => {
 
   describe("check例外処理", () => {
     it("check関数の例外をキャッチしステータスをerrorに設定する", async () => {
-      const tmpDir = path.join(TEST_TADO_HOME, "check-exception-test");
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const workflowPath = path.join(tmpDir, "check-exception-workflow.ts");
-      fs.writeFileSync(
-        workflowPath,
-        `
+      const check_exception_test_workflow_content = `
         const def = {
           id: 'check-exception-test',
           steps: [
@@ -662,10 +659,10 @@ describe("レポート", () => {
           ],
         };
         export default def;
-      `,
-      );
+            `;
+      setupWorkflowFromContent("check-exception-test", check_exception_test_workflow_content);
 
-      const { sessionId } = await init(workflowPath);
+      const { sessionId } = await init("check-exception-test");
       await next(sessionId);
 
       const r = await report(sessionId, {
@@ -681,12 +678,7 @@ describe("レポート", () => {
 
   describe("reviseによる後続ステップのリセット", () => {
     it("revise時に対象ステップと後続すべてをpendingにリセットする", async () => {
-      const tmpDir = path.join(TEST_TADO_HOME, "revise-reset-test");
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const workflowPath = path.join(tmpDir, "revise-reset-workflow.ts");
-      fs.writeFileSync(
-        workflowPath,
-        `
+      const revise_reset_test_workflow_content = `
         const def = {
           id: 'revise-reset-test',
           steps: [
@@ -749,10 +741,10 @@ describe("レポート", () => {
           ],
         };
         export default def;
-      `,
-      );
+            `;
+      setupWorkflowFromContent("revise-reset-test", revise_reset_test_workflow_content);
 
-      const { sessionId } = await init(workflowPath);
+      const { sessionId } = await init("revise-reset-test");
 
       // Execute grill → prepare → gate
       await next(sessionId);
@@ -798,12 +790,7 @@ describe("レポート", () => {
     });
 
     it("revise後の完全な再実行を許可する", async () => {
-      const tmpDir = path.join(TEST_TADO_HOME, "revise-full-test");
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const workflowPath = path.join(tmpDir, "revise-full-workflow.ts");
-      fs.writeFileSync(
-        workflowPath,
-        `
+      const revise_full_test_workflow_content = `
         const def = {
           id: 'revise-full-test',
           steps: [
@@ -852,10 +839,10 @@ describe("レポート", () => {
           ],
         };
         export default def;
-      `,
-      );
+            `;
+      setupWorkflowFromContent("revise-full-test", revise_full_test_workflow_content);
 
-      const { sessionId } = await init(workflowPath);
+      const { sessionId } = await init("revise-full-test");
 
       // First pass: work → gate (revise)
       await next(sessionId);
@@ -889,12 +876,7 @@ describe("レポート", () => {
 
   describe("requeueSource付きレビューループ", () => {
     it("must>0の失敗後にレビューステップをpendingで再キューし、修正後に再実行する", async () => {
-      const tmpDir = path.join(TEST_TADO_HOME, "requeue-test");
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const workflowPath = path.join(tmpDir, "requeue-workflow.ts");
-      fs.writeFileSync(
-        workflowPath,
-        `
+      const requeue_test_workflow_content = `
         let fixPass = false;
         const def = {
           id: 'requeue-test',
@@ -949,10 +931,10 @@ describe("レポート", () => {
           ],
         };
         export default def;
-      `,
-      );
+            `;
+      setupWorkflowFromContent("requeue-test", requeue_test_workflow_content);
 
-      const { sessionId } = await init(workflowPath);
+      const { sessionId } = await init("requeue-test");
 
       // execute → pass
       await next(sessionId);
@@ -1004,7 +986,8 @@ describe("レポート", () => {
 
   describe("ステータス", () => {
     it("セッション情報を返す", async () => {
-      const { sessionId } = await init(FIXTURE_WORKFLOW);
+      setupSimpleWorkflow();
+      const { sessionId } = await init("test-simple");
 
       const result = status(sessionId);
 
@@ -1017,7 +1000,8 @@ describe("レポート", () => {
     });
 
     it("進行後のステップステータスを表示する", async () => {
-      const { sessionId } = await init(FIXTURE_WORKFLOW);
+      setupSimpleWorkflow();
+      const { sessionId } = await init("test-simple");
 
       await next(sessionId);
       const s1 = status(sessionId);

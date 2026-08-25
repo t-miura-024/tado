@@ -7,6 +7,8 @@ import { sessions, stepAttempts, steps } from "./schema.ts";
 import {
   openSessionDb,
   importWorkflowDef,
+  importWorkflowDefFromPath,
+  isPathLike,
   getPreviousAttempts,
   getArtifacts,
   registerHookArtifacts,
@@ -326,7 +328,10 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
       );
     }
 
-    const def = await importWorkflowDef(resolvedWorkflowPath);
+    const isPath = isPathLike(resolvedWorkflowPath);
+    const def = isPath
+      ? await importWorkflowDefFromPath(resolvedWorkflowPath)
+      : await importWorkflowDef(resolvedWorkflowPath);
     const stepDefsByKey = new Map<string, StepDef>();
     for (const s of def.steps) {
       stepDefsByKey.set(s.key, s);

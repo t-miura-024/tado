@@ -33,13 +33,13 @@ bun add github:t-miura-024/tado
 
 ```bash
 # セッション初期化（状態 DB: ~/.tado/workflow.db）
-tado init --workflow <path-to-workflow.ts> [--session <id>]
+tado init --workflow <id> [--session <id>]
 
 # 次のステップのプロンプト取得
-tado next --session <id>
+tado next --session <id> [--workflow <id>]
 
 # ステップ実行結果の報告（stdin から JSON）
-echo '{"stepKey":"...","status":"completed","subagentOutput":"..."}' | tado report --session <id>
+echo '{"stepKey":"...","status":"completed","subagentOutput":"..."}' | tado report --session <id> [--workflow <id>]
 
 # human_gate への回答（人間が自分の端末で実行・TTY 必須）
 tado confirm --session <id>
@@ -52,14 +52,14 @@ tado status --session <id>
 `next` が返すプロンプトは完全で、LLM が手順を再構築する余地はありません。ワークフローが完了するまでサイクルを繰り返します。
 human_gate ステップだけは例外で、`report` では回答できず、人間が自分の端末から `tado confirm` を実行します（後述）。
 
-状態 DB は全セッションで共有される `~/.tado/workflow.db` に、成果物は `~/.tado/<sessionId>/` に保存されます。
+状態 DB は全セッションで共有される `~/.tado/workflow.db` に、成果物は `~/.tado/<sessionId>/` に、ワークフロー定義は `~/.tado/workflows/<name>/index.ts` に保存されます。
 `TADO_HOME` 環境変数を設定すると保存先を変更できます。中断したセッションは、同じ `--session <id>` を指定すれば再開できます。
 
 `next` が成功しコミットされた後、`report` を送信する前にプロセスが中断した場合も、同じ `--session <id>` で `next` を再実行してください。そのステップは実行中（running）状態のままですが、`next` は新しい試行（アテンプト）を割り当てずに同じプロンプトを再発行するため、そのまま作業を続けて `report` を送信できます。
 
 ### ライブラリ
 
-`tado` パッケージから `WorkflowDef` などの型を import し、ワークフロー定義ファイル（`workflow.ts`）を作成します。
+`tado` パッケージから `WorkflowDef` などの型を import し、ワークフロー定義ファイル（`{TADO_HOME}/workflows/<name>/index.ts`）を作成します。
 
 型は原則ルート（`import type { WorkflowDef } from "tado"`）から import してください。`tado/types/*` のサブパスは `.ts` 付き（例: `tado/types/workflow-def.ts`）でのみ参照できます。
 
@@ -68,6 +68,7 @@ import type { WorkflowDef } from "tado";
 
 const def: WorkflowDef = {
   id: "my-workflow",
+  description: "このワークフローの目的を1〜2文で記述する。",
   steps: [
     // ... StepDef の配列
   ],
@@ -76,24 +77,27 @@ const def: WorkflowDef = {
 export default def;
 ```
 
-作成した定義は CLI から読み込みます:
+作成した定義は `~/.tado/workflows/<name>/index.ts` に配置し、CLI から ID で読み込みます:
 
 ```bash
-tado init --workflow ./workflow.ts
+tado init --workflow my-workflow
 ```
+
+ワークフロー ID はディレクトリ名と一致させる必要があります。不一致の場合はエラーになります。`workflows/<name>/` 配下には `scripts/` や `templates/` などの付随ファイルも配置でき、`index.ts` から相対 import できます。
 
 ## ワークフロー定義の作成方法
 
-`WorkflowDef` を default export する TypeScript ファイルを作成します。
+`{TADO_HOME}/workflows/<name>/index.ts` に `WorkflowDef` を default export する TypeScript ファイルを作成します。
 
 ### WorkflowDef の構造
 
-| フィールド    | 型                                           | 説明                                     |
-| ------------- | -------------------------------------------- | ---------------------------------------- |
-| `id`          | `string`                                     | ワークフロー識別子                       |
-| `steps`       | `StepDef[]`                                  | ステップ定義の配列（定義順に進行）       |
-| `beforeInit?` | `(ctx: InitCtx) => Promise<void>`            | 初期化前のフック                         |
-| `afterInit?`  | `(ctx: InitCtx) => Promise<AfterInitResult>` | 初期化後のフック（成果物DBパス等の登録） |
+| フィールド     | 型                                           | 説明                                       |
+| -------------- | -------------------------------------------- | ------------------------------------------ |
+| `id`           | `string`                                     | ワークフロー識別子（ディレクトリ名と一致） |
+| `description?` | `string`                                     | ワークフローの人間可読な説明（1〜2文）     |
+| `steps`        | `StepDef[]`                                  | ステップ定義の配列（定義順に進行）         |
+| `beforeInit?`  | `(ctx: InitCtx) => Promise<void>`            | 初期化前のフック                           |
+| `afterInit?`   | `(ctx: InitCtx) => Promise<AfterInitResult>` | 初期化後のフック（成果物DBパス等の登録）   |
 
 ### StepDef の構造
 
@@ -241,10 +245,13 @@ tado confirm --session <id>
 ## examples/
 
 最小のワークフローテンプレートを [`examples/simple-workflow.ts`](./examples/simple-workflow.ts) に用意しています。
-`task` + `human_gate` の 2 ステップ構成で、ワークフロー定義の雛形としてそのまま利用できます。
+`task` + `human_gate` の 2 ステップ構成で、ワークフロー定義の雛形としてそのまま利用できます。`{TADO_HOME}/workflows/<name>/index.ts` に配置して利用してください。
 
 ```bash
-tado init --workflow examples/simple-workflow.ts
+# 例: テンプレートをワークフローとして登録して起動
+mkdir -p ~/.tado/workflows/my-workflow
+cp examples/simple-workflow.ts ~/.tado/workflows/my-workflow/index.ts
+tado init --workflow my-workflow
 ```
 
 ## 同梱 Skill

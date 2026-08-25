@@ -41,7 +41,7 @@ function buildProgram(): Command {
   program
     .command("init")
     .description("Initialize a new workflow session from a workflow definition")
-    .requiredOption("--workflow <path>", "Path to workflow.ts definition file")
+    .requiredOption("--workflow <id>", "Workflow ID (e.g. mt-plan-create)")
     .option("--session <id>", "Session ID")
     .action(async (opts: InitOpts) => {
       const result = await init(opts.workflow, opts.session);
@@ -52,7 +52,7 @@ function buildProgram(): Command {
     .command("next")
     .description("Get the next step's prompt (advance the session)")
     .requiredOption("--session <id>", "Session ID")
-    .option("--workflow <path>", "Path to workflow.ts definition file")
+    .option("--workflow <id>", "Workflow ID (e.g. mt-plan-create)")
     .action(async (opts: SessionOpts) => {
       const result = await next(opts.session, opts.workflow);
       output(result);
@@ -62,7 +62,7 @@ function buildProgram(): Command {
     .command("report")
     .description("Submit step results via stdin JSON and advance the session")
     .requiredOption("--session <id>", "Session ID")
-    .option("--workflow <path>", "Path to workflow.ts definition file")
+    .option("--workflow <id>", "Workflow ID (e.g. mt-plan-create)")
     .action(async (opts: SessionOpts) => {
       const stdin = readStdin();
       if (!stdin) {

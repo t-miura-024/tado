@@ -45,8 +45,87 @@ export type { ArtifactRow, SessionRow, StepAttemptRow, StepRow } from "./schema.
  */
 export type TadoDb = BunSQLiteDatabase & { $client: Database };
 
-export async function importWorkflowDef(workflowPath: string): Promise<WorkflowDef> {
-  const resolved = path.resolve(workflowPath);
+export function getWorkflowsDir(): string {
+  return path.join(getTadoHome(), "workflows");
+}
+
+export function resolveWorkflowPath(workflowId: string): string {
+  return path.join(getWorkflowsDir(), workflowId, "index.ts");
+}
+
+export function isPathLike(value: string): boolean {
+  return value.includes("/") || value.includes("\\");
+}
+
+export function ensureTadoHomePackage(): void {
+  const home = getTadoHome();
+  try {
+    fs.mkdirSync(home, { recursive: true });
+    const pkgPath = path.join(home, "package.json");
+    if (!fs.existsSync(pkgPath)) {
+      fs.writeFileSync(pkgPath, '{"private":true}\n');
+    }
+  } catch (error) {
+    console.warn(`[tado] ensureTadoHomePackage failed: ${String(error)}`);
+  }
+}
+
+export async function importWorkflowDef(workflowId: string): Promise<WorkflowDef> {
+  ensureTadoHomePackage();
+  const resolved = resolveWorkflowPath(workflowId);
+  if (!fs.existsSync(resolved)) {
+    let available = "";
+    try {
+      const dir = getWorkflowsDir();
+      const entries = fs.readdirSync(dir);
+      const lines: string[] = [];
+      for (const entry of entries) {
+        const wp = path.join(dir, entry, "index.ts");
+        if (!fs.existsSync(wp)) {
+          continue;
+        }
+        try {
+          const mod = await import(wp);
+          const def: WorkflowDef = mod.default ?? mod;
+          if (!def || typeof def.id !== "string" || !Array.isArray(def.steps)) {
+            continue;
+          }
+          if (def.id !== entry) {
+            continue;
+          }
+          lines.push(def.description ? `- ${def.id}: ${def.description}` : `- ${def.id}`);
+        } catch {
+          console.warn(`[tado] failed to load workflow ${entry} for available list`);
+        }
+      }
+      lines.sort();
+      if (lines.length === 0) {
+        available =
+          "\nAvailable workflows: none\n利用可能なワークフローがありません。ワークフローを作成してから実行してください";
+      } else {
+        available = `\nAvailable workflows:\n${lines.join("\n")}`;
+      }
+    } catch {
+      available =
+        "\nAvailable workflows: none\n利用可能なワークフローがありません。ワークフローを作成してから実行してください";
+    }
+    throw new EngineError(`Workflow not found: ${workflowId} (tried ${resolved})${available}`);
+  }
+  const mod = await import(resolved);
+  const def: WorkflowDef = mod.default ?? mod;
+  if (!def || !def.id || !def.steps) {
+    throw new EngineError(`Invalid workflow definition in: ${resolved}`);
+  }
+  if (def.id !== workflowId) {
+    throw new EngineError(
+      `Workflow ID mismatch: directory "${workflowId}" contains workflow with id "${def.id}"`,
+    );
+  }
+  return def;
+}
+
+export async function importWorkflowDefFromPath(filePath: string): Promise<WorkflowDef> {
+  const resolved = path.resolve(filePath);
   if (!fs.existsSync(resolved)) {
     throw new EngineError(`Workflow file not found: ${resolved}`);
   }

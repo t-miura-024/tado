@@ -6,6 +6,7 @@ import { eq } from "drizzle-orm";
 import {
   EngineError,
   importWorkflowDef,
+  importWorkflowDefFromPath,
   openDb,
   migrateDb,
   getPreviousAttempts,
@@ -13,6 +14,7 @@ import {
   buildConditionCtx,
   getTadoHome,
   getWorkflowDbPath,
+  getWorkflowsDir,
   openSessionDb,
 } from "./store.ts";
 import { artifacts, sessions, stepAttempts, steps } from "./schema.ts";
@@ -76,14 +78,31 @@ describe("ストア", () => {
   });
 
   describe("importWorkflowDef", () => {
-    it("有効なワークフロー定義を読み込む", async () => {
-      const def = await importWorkflowDef(FIXTURE_WORKFLOW);
+    it("IDで有効なワークフロー定義を読み込む", async () => {
+      const dir = path.join(getWorkflowsDir(), "test-simple");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.copyFileSync(FIXTURE_WORKFLOW, path.join(dir, "index.ts"));
+      const def = await importWorkflowDef("test-simple");
       expect(def.id).toBe("test-simple");
       expect(def.steps).toHaveLength(3);
     });
 
-    it("存在しないワークフローファイルでEngineErrorをスローする", async () => {
-      await expect(importWorkflowDef("/nonexistent/workflow.ts")).rejects.toThrow(EngineError);
+    it("存在しないIDで Workflow not found エラーをスローする", async () => {
+      await expect(importWorkflowDef("nonexistent-wf")).rejects.toThrow(
+        "Workflow not found: nonexistent-wf",
+      );
+    });
+
+    it("存在しないワークフローファイルでEngineErrorをスローする（path指定）", async () => {
+      await expect(importWorkflowDefFromPath("/nonexistent/workflow.ts")).rejects.toThrow(
+        EngineError,
+      );
+    });
+
+    it("有効なワークフロー定義をパスから読み込む", async () => {
+      const def = await importWorkflowDefFromPath(FIXTURE_WORKFLOW);
+      expect(def.id).toBe("test-simple");
+      expect(def.steps).toHaveLength(3);
     });
   });
 

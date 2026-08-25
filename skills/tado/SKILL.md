@@ -12,8 +12,8 @@ LLM がオーケストレーションする多段ワークフローで、手順�
 ## アーキテクチャ
 
 ```
-Skill (上位スキル)
-  └── workflow.ts  ── ワークフロー定義（WorkflowDef）
+Workflow Registry ({TADO_HOME}/workflows/<name>/index.ts)
+  └── WorkflowDef (id / description / steps)
                           │
 tado (共有エンジン)        │
   ├── CLI  ── エントリポイント（init/next/report/confirm/status）
@@ -25,10 +25,10 @@ tado (共有エンジン)        │
 ### init
 
 ```bash
-tado init --workflow <path-to-workflow.ts> [--session <id>]
+tado init --workflow <id> [--session <id>]
 ```
 
-ワークフロー定義を読み込み、セッションを初期化する。
+`{TADO_HOME}/workflows/<id>/index.ts` からワークフロー定義を解決してセッションを初期化する。存在しない ID の場合は `Workflow not found: <id> (tried {TADO_HOME}/workflows/<id>/index.ts)` と利用可能ワークフロー一覧（ID + description）を併記してエラーになる。
 
 - 単一の `workflow.db` を `{TADO_HOME}/` に作成（デフォルトは `~/.tado/`、`TADO_HOME` で変更可能）
 - セッションディレクトリ `{TADO_HOME}/{sessionId}/` を成果物置き場として作成
@@ -155,8 +155,8 @@ tado status --session <id>
 
 ## ワークフロー定義の作成
 
-各スキルディレクトリに `workflow.ts` を配置する。
-`WorkflowDef` を default export する。
+`{TADO_HOME}/workflows/<name>/index.ts` に配置する。ディレクトリ名と `def.id` は一致させる（不一致はエラー/警告）。
+`WorkflowDef` を default export する。付随ファイル（`scripts/` / `templates/` 等）は `workflows/<name>/` 配下に自由配置でき、`index.ts` から相対 import できる。ワークフローからの `import from "tado"` は `{TADO_HOME}/node_modules/tado` から解決される。
 
 ```typescript
 import { existsSync } from "node:fs";
@@ -164,6 +164,7 @@ import type { CheckCtx, CheckResult, PromptCtx, WorkflowDef } from "tado";
 
 const def: WorkflowDef = {
   id: "my-workflow",
+  description: "このワークフローの目的を1〜2文で記述する。",
   steps: [
     {
       key: "phase1_planner",
@@ -221,7 +222,8 @@ tado next --session <id>
 
 ## 注意事項
 
-- 各スキルは `workflow.ts` でワークフロー定義を提供する
-- 既存の SubAgent やスクリプトは、workflow.ts の buildPrompt/check から参照する
+- ワークフロー定義は `{TADO_HOME}/workflows/<name>/index.ts` に集約される（`TADO_HOME` 環境変数で変更可能）
+- 既存の SubAgent やスクリプトは、`index.ts` の buildPrompt/check から参照する
 - `workflow.db`（`{TADO_HOME}/workflow.db` の状態DB）と成果物DB（research.db等）は完全分離
 - `next` が返すプロンプトは完全で、LLM が再構築の余地を持たない
+- 利用可能なワークフローが0件の場合は「利用可能なワークフローがありません。ワークフローを作成してから実行してください」と案内する。description 未設定は ID のみ表示で許容する

@@ -3,7 +3,14 @@ import * as clack from "@clack/prompts";
 import { and, desc, eq, gt, gte, sql } from "drizzle-orm";
 import { gateEvents, sessions, stepAttempts, steps } from "./schema.ts";
 import type { StepRow, TadoDb } from "./store.ts";
-import { getArtifacts, importWorkflowDef, openSessionDb, EngineError } from "./store.ts";
+import {
+  getArtifacts,
+  importWorkflowDef,
+  importWorkflowDefFromPath,
+  isPathLike,
+  openSessionDb,
+  EngineError,
+} from "./store.ts";
 import type { ConfirmResult } from "../types/result.ts";
 
 /** 人間に提示するゲート内容。 */
@@ -99,7 +106,10 @@ export async function confirm(
       throw new EngineError(`No human gate awaiting confirmation in session: ${sessionId}`);
     }
 
-    const def = await importWorkflowDef(session.workflowPath);
+    const isPath = isPathLike(session.workflowPath);
+    const def = isPath
+      ? await importWorkflowDefFromPath(session.workflowPath)
+      : await importWorkflowDef(session.workflowPath);
     const stepDef = def.steps.find((s) => s.key === stepRow.stepKey);
     const hg = stepDef?.humanGate;
     if (!hg) {

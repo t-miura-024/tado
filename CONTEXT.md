@@ -19,3 +19,27 @@ _Avoid_: approve コマンド, 承認 API
 **無視型スキップ**:
 オーケストレータ LLM がゲートプロンプトを人間に提示せず、自己判断で回答を捏造する失敗モード。本設計が構造的に排除する対象。
 _Avoid_: スキップ（単独で使う）
+
+**ワークフロー（Workflow）**:
+tado エンジンが実行する `WorkflowDef` で定義された一連のステップ列。`id` で識別される。
+_Avoid_: タスク, ジョブ
+
+**ワークフロー集約（Workflow Registry）**:
+`{TADO_HOME}/workflows/<name>/index.ts` 形式でワークフロー定義を一箇所に集約する配置規約。`TADO_HOME` 配下で一元管理される。
+_Avoid_: skills ディレクトリ配置, 分散配置
+
+**ワークフロー解決（Workflow Resolution）**:
+`--workflow` 引数に渡された ID を実際の `index.ts` ファイルパスへ解決する処理。`{TADO_HOME}/workflows/<name>/index.ts` を探索する。
+_Avoid_: パス解決（単独）, workflow lookup
+
+**tado-run**:
+ワークフローエンジンを起動し `next`/`report` サイクルを進行させる汎用ランナー。移行後は起動対象ワークフローの推定・選択も担う。
+_Avoid_: ランナー（単独）, エンジン
+
+**TADO_HOME**:
+tado のデータ置き場ルート。デフォルトは `~/.tado`、環境変数で上書き可能。単一 DB、セッションディレクトリ、workflows ディレクトリを包含する。
+_Avoid_: tado home, ホームディレクトリ
+
+**description**:
+`WorkflowDef` に追加されるワークフローの人間可読な説明。tado-run がプロンプト内容から起動対象を推定する際の判断材料となる。
+_Avoid_: ディスクリプション（カタカナ）, 説明文
