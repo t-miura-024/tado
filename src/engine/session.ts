@@ -2,7 +2,15 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { eq } from "drizzle-orm";
 import type { InitResult } from "../types/result.ts";
-import { importWorkflowDef, migrateDb, openDb, getTadoHome } from "./store.ts";
+import {
+  EngineError,
+  importWorkflowDef,
+  isPathLike,
+  migrateDb,
+  openDb,
+  getTadoHome,
+  resolveWorkflowPath,
+} from "./store.ts";
 import { artifacts, sessions, steps } from "./schema.ts";
 
 function generateSessionId(): string {
@@ -17,9 +25,14 @@ function generateSessionId(): string {
   return `${YYYY}${MM}${DD}-${HH}${mm}${ss}-${rand}`;
 }
 
-export async function init(workflowPath: string, sessionId?: string): Promise<InitResult> {
-  const def = await importWorkflowDef(workflowPath);
-  const resolvedPath = path.resolve(workflowPath);
+export async function init(workflowId: string, sessionId?: string): Promise<InitResult> {
+  if (isPathLike(workflowId)) {
+    throw new EngineError(
+      `Invalid workflow ID: ${workflowId} (must not contain path separators; use workflow ID like "mt-plan-create")`,
+    );
+  }
+  const def = await importWorkflowDef(workflowId);
+  const resolvedPath = resolveWorkflowPath(workflowId);
 
   const sid = sessionId ?? generateSessionId();
   const tadoHome = getTadoHome();

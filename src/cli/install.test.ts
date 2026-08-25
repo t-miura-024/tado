@@ -1,20 +1,45 @@
-import { describe, it, expect, afterEach } from "bun:test";
+import { describe, it, expect, afterEach, beforeEach } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { cleanInstallArtifacts, copySkills, ensureBun, ensurePackageJson } from "./install.ts";
 
 const TEST_DIR = path.join(os.tmpdir(), `tado-install-test-${Date.now()}`);
+const TEST_TADO_HOME = path.join(TEST_DIR, "tado-home");
+let originalTadoHome: string | undefined;
+
+beforeEach(() => {
+  originalTadoHome = process.env.TADO_HOME;
+  process.env.TADO_HOME = TEST_TADO_HOME;
+  // Ensure isolated TADO_HOME is empty at start; cleanup will recreate
+  if (fs.existsSync(TEST_TADO_HOME)) {
+    fs.rmSync(TEST_TADO_HOME, { recursive: true, force: true });
+  }
+});
 
 function cleanup(): void {
   if (fs.existsSync(TEST_DIR)) {
     fs.rmSync(TEST_DIR, { recursive: true, force: true });
   }
+  if (originalTadoHome === undefined) {
+    delete process.env.TADO_HOME;
+  } else {
+    process.env.TADO_HOME = originalTadoHome;
+  }
 }
 
 afterEach(cleanup);
 
-/** Create a fake installed tado package with SKILL.md files. */
+/** Create a fake installed tado package with SKILL.md files in TADO_HOME. */
+function fakePackageInTadoHome(): void {
+  for (const name of ["tado", "tado-run"]) {
+    const dir = path.join(TEST_TADO_HOME, "node_modules", "tado", "skills", name);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "SKILL.md"), `# ${name} skill\n`);
+  }
+}
+
+/** Legacy helper: create fake package in skillsDir for fallback tests (if needed). */
 function fakePackage(skillsDir: string): void {
   for (const name of ["tado", "tado-run"]) {
     const dir = path.join(skillsDir, "node_modules", "tado", "skills", name);
@@ -33,12 +58,14 @@ describe("ensureBun", () => {
 describe("copySkills", () => {
   it("パッケージ内の SKILL.md を skills ディレクトリ直下にコピーする", () => {
     fs.mkdirSync(TEST_DIR, { recursive: true });
-    fakePackage(TEST_DIR);
+    fakePackageInTadoHome();
 
-    copySkills(TEST_DIR);
+    const skillsDir = path.join(TEST_DIR, "skills");
+    fs.mkdirSync(skillsDir, { recursive: true });
+    copySkills(skillsDir);
 
-    const tadoSkill = path.join(TEST_DIR, "tado", "SKILL.md");
-    const tadoRunSkill = path.join(TEST_DIR, "tado-run", "SKILL.md");
+    const tadoSkill = path.join(skillsDir, "tado", "SKILL.md");
+    const tadoRunSkill = path.join(skillsDir, "tado-run", "SKILL.md");
     expect(fs.existsSync(tadoSkill)).toBe(true);
     expect(fs.existsSync(tadoRunSkill)).toBe(true);
     expect(fs.readFileSync(tadoSkill, "utf-8")).toBe("# tado skill\n");
@@ -47,24 +74,40 @@ describe("copySkills", () => {
 
   it("既存の SKILL.md を上書きする", () => {
     fs.mkdirSync(TEST_DIR, { recursive: true });
-    fakePackage(TEST_DIR);
+    fakePackageInTadoHome();
 
-    // 古い内容を配置
-    const destDir = path.join(TEST_DIR, "tado");
+    const skillsDir = path.join(TEST_DIR, "skills");
+    fs.mkdirSync(skillsDir, { recursive: true });
+    const destDir = path.join(skillsDir, "tado");
     fs.mkdirSync(destDir, { recursive: true });
     fs.writeFileSync(path.join(destDir, "SKILL.md"), "old content");
 
-    copySkills(TEST_DIR);
+    copySkills(skillsDir);
 
     expect(fs.readFileSync(path.join(destDir, "SKILL.md"), "utf-8")).toBe("# tado skill\n");
   });
 
   it("パッケージに SKILL.md がない場合はエラー", () => {
     fs.mkdirSync(TEST_DIR, { recursive: true });
-    // node_modules/tado はあるが skills がない
-    fs.mkdirSync(path.join(TEST_DIR, "node_modules", "tado"), { recursive: true });
+    // TADO_HOME には skills がない、fallback の skillsDir にもない
+    fs.mkdirSync(path.join(TEST_TADO_HOME, "node_modules", "tado"), { recursive: true });
+    const skillsDir = path.join(TEST_DIR, "skills");
+    fs.mkdirSync(skillsDir, { recursive: true });
 
-    expect(() => copySkills(TEST_DIR)).toThrow("SKILL.md not found in package");
+    expect(() => copySkills(skillsDir)).toThrow("SKILL.md not found in package");
+  });
+
+  it("fallback: TADO_HOME にない場合は skillsDir のパッケージからコピーする", () => {
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+    // TADO_HOME は空のまま、skillsDir に fake を作る
+    const skillsDir = path.join(TEST_DIR, "skills");
+    fs.mkdirSync(skillsDir, { recursive: true });
+    fakePackage(skillsDir);
+
+    copySkills(skillsDir);
+
+    const tadoSkill = path.join(skillsDir, "tado", "SKILL.md");
+    expect(fs.readFileSync(tadoSkill, "utf-8")).toBe("# tado skill\n");
   });
 });
 

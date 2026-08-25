@@ -2,7 +2,15 @@ import { describe, it, expect, afterEach } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Database } from "bun:sqlite";
-import { init, next, report, confirm, EngineError, getWorkflowDbPath } from "./index.ts";
+import {
+  init,
+  next,
+  report,
+  confirm,
+  EngineError,
+  getWorkflowDbPath,
+  getWorkflowsDir,
+} from "./index.ts";
 import type { ConfirmDeps } from "./confirm.ts";
 import { mockConfirmDeps } from "./__fixtures__/confirm-helper.ts";
 
@@ -20,8 +28,15 @@ afterEach(() => {
   cleanup(TEST_TADO_HOME);
 });
 
+function setupSimpleWorkflow(): void {
+  const dir = path.join(getWorkflowsDir(), "test-simple");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.copyFileSync(FIXTURE_WORKFLOW, path.join(dir, "index.ts"));
+}
+
 async function reachGate(): Promise<string> {
-  const { sessionId } = await init(FIXTURE_WORKFLOW);
+  setupSimpleWorkflow();
+  const { sessionId } = await init("test-simple");
   await next(sessionId);
   await report(sessionId, {
     stepKey: "step1_task",
@@ -156,7 +171,8 @@ describe("confirm", () => {
   });
 
   it("ゲート以外のステップが current の場合はEngineErrorをスローする", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW);
+    setupSimpleWorkflow();
+    const { sessionId } = await init("test-simple");
     await next(sessionId);
 
     await expect(confirm(sessionId, mockConfirmDeps("approve"))).rejects.toThrow(

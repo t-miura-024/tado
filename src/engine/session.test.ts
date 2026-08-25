@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Database } from "bun:sqlite";
-import { init, EngineError, getWorkflowDbPath } from "./index.ts";
+import { init, EngineError, getWorkflowDbPath, getWorkflowsDir } from "./index.ts";
 
 const TEST_TADO_HOME = path.join(__dirname, "__test_sessions_session__");
 process.env.TADO_HOME = TEST_TADO_HOME;
@@ -18,10 +18,23 @@ afterEach(() => {
   cleanup(TEST_TADO_HOME);
 });
 
+function setupSimpleWorkflow(): void {
+  const dir = path.join(getWorkflowsDir(), "test-simple");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.copyFileSync(FIXTURE_WORKFLOW, path.join(dir, "index.ts"));
+}
+
+function setupWorkflowFromFile(id: string, content: string): void {
+  const dir = path.join(getWorkflowsDir(), id);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "index.ts"), content);
+}
+
 describe("セッション", () => {
   describe("init", () => {
     it("セッションディレクトリと単一workflow.dbを作成する", async () => {
-      const result = await init(FIXTURE_WORKFLOW);
+      setupSimpleWorkflow();
+      const result = await init("test-simple");
       expect(result.sessionId).toBeTruthy();
       expect(result.workflowId).toBe("test-simple");
       expect(fs.existsSync(path.join(TEST_TADO_HOME, result.sessionId))).toBe(true);
@@ -48,13 +61,16 @@ describe("セッション", () => {
     });
 
     it("指定されたsessionIdを使用する", async () => {
-      const result = await init(FIXTURE_WORKFLOW, "my-custom-id");
+      setupSimpleWorkflow();
+      const result = await init("test-simple", "my-custom-id");
       expect(result.sessionId).toBe("my-custom-id");
     });
 
     it("複数セッションを単一DBに共存させる", async () => {
-      const first = await init(FIXTURE_WORKFLOW, "session-one");
-      const second = await init(FIXTURE_WORKFLOW, "session-two");
+      setupSimpleWorkflow();
+      const first = await init("test-simple", "session-one");
+      setupSimpleWorkflow();
+      const second = await init("test-simple", "session-two");
       const db = new Database(getWorkflowDbPath());
       const sessions = db.query("SELECT id, session_dir FROM sessions ORDER BY id").all() as Record<
         string,
@@ -69,28 +85,42 @@ describe("セッション", () => {
     });
 
     it("セッション行にworkflow_pathを保存する", async () => {
-      const result = await init(FIXTURE_WORKFLOW);
+      setupSimpleWorkflow();
+      const result = await init("test-simple");
       const db = new Database(getWorkflowDbPath());
       const session = db
         .query("SELECT workflow_path FROM sessions WHERE id = ?")
         .get(result.sessionId) as Record<string, unknown>;
-      expect(path.resolve(session.workflow_path as string)).toBe(path.resolve(FIXTURE_WORKFLOW));
+      expect(session.workflow_path).toBe(path.join(getWorkflowsDir(), "test-simple", "index.ts"));
       db.close();
     });
 
     it("存在しないワークフローファイルでEngineErrorをスローする", async () => {
       await expect(init("/nonexistent/workflow.ts")).rejects.toThrow(EngineError);
     });
+
+    it("IDでワークフローを解決してinitできる", async () => {
+      const dir = path.join(getWorkflowsDir(), "test-simple");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.copyFileSync(FIXTURE_WORKFLOW, path.join(dir, "index.ts"));
+      const result = await init("test-simple");
+      expect(result.workflowId).toBe("test-simple");
+      const db = new Database(getWorkflowDbPath());
+      const session = db
+        .query("SELECT workflow_path FROM sessions WHERE id = ?")
+        .get(result.sessionId) as Record<string, unknown>;
+      expect(session.workflow_path).toBe(path.join(getWorkflowsDir(), "test-simple", "index.ts"));
+      db.close();
+    });
+
+    it("存在しないIDで Workflow not found エラーになる", async () => {
+      await expect(init("nonexistent-id")).rejects.toThrow("Workflow not found: nonexistent-id");
+    });
   });
 
   describe("フック", () => {
     it("beforeInitとafterInitフックを実行する", async () => {
-      const tmpDir = path.join(TEST_TADO_HOME, "hook-test");
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const workflowPath = path.join(tmpDir, "hook-workflow.ts");
-      fs.writeFileSync(
-        workflowPath,
-        `
+      const hookWorkflowContent = `
         const def = {
           id: 'hook-test',
           steps: [
@@ -119,10 +149,10 @@ describe("セッション", () => {
           },
         };
         export default def;
-      `,
-      );
+      `;
+      setupWorkflowFromFile("hook-test", hookWorkflowContent);
 
-      const result = await init(workflowPath);
+      const result = await init("hook-test");
 
       expect(fs.existsSync(path.join(TEST_TADO_HOME, result.sessionId, "_hook_before"))).toBe(true);
       expect(fs.existsSync(path.join(TEST_TADO_HOME, result.sessionId, "_hook_after"))).toBe(true);
@@ -136,12 +166,7 @@ describe("セッション", () => {
     });
 
     it("フックなしで動作する", async () => {
-      const tmpDir = path.join(TEST_TADO_HOME, "no-hook-test");
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const workflowPath = path.join(tmpDir, "no-hook-workflow.ts");
-      fs.writeFileSync(
-        workflowPath,
-        `
+      const noHookWorkflowContent = `
         const def = {
           id: 'no-hook-test',
           steps: [
@@ -161,22 +186,17 @@ describe("セッション", () => {
           ],
         };
         export default def;
-      `,
-      );
+      `;
+      setupWorkflowFromFile("no-hook-test", noHookWorkflowContent);
 
-      const result = await init(workflowPath);
+      const result = await init("no-hook-test");
       expect(result.sessionId).toBeTruthy();
     });
   });
 
   describe("initアーティファクト", () => {
     it("afterInitフックからアーティファクトを登録する", async () => {
-      const tmpDir = path.join(TEST_TADO_HOME, "artifact-hook-test");
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const workflowPath = path.join(tmpDir, "artifact-hook-workflow.ts");
-      fs.writeFileSync(
-        workflowPath,
-        `
+      const artifactHookWorkflowContent = `
         const def = {
           id: 'artifact-hook-test',
           steps: [
@@ -199,10 +219,10 @@ describe("セッション", () => {
           },
         };
         export default def;
-      `,
-      );
+      `;
+      setupWorkflowFromFile("artifact-hook-test", artifactHookWorkflowContent);
 
-      const { sessionId } = await init(workflowPath);
+      const { sessionId } = await init("artifact-hook-test");
 
       const db = new Database(getWorkflowDbPath());
       const rows = db

@@ -3,7 +3,15 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { Database } from "bun:sqlite";
 import type { NextResult } from "../types/result.ts";
-import { init, next, report, confirm, EngineError, getWorkflowDbPath } from "./index.ts";
+import {
+  init,
+  next,
+  report,
+  confirm,
+  EngineError,
+  getWorkflowDbPath,
+  getWorkflowsDir,
+} from "./index.ts";
 import { mockConfirmDeps } from "./__fixtures__/confirm-helper.ts";
 
 const TEST_TADO_HOME = path.join(__dirname, "__test_sessions_next__");
@@ -20,9 +28,22 @@ afterEach(() => {
   cleanup(TEST_TADO_HOME);
 });
 
+function setupSimpleWorkflow(): void {
+  const dir = path.join(getWorkflowsDir(), "test-simple");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.copyFileSync(FIXTURE_WORKFLOW, path.join(dir, "index.ts"));
+}
+
+function setupWorkflowFromContent(id: string, content: string): void {
+  const dir = path.join(getWorkflowsDir(), id);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "index.ts"), content);
+}
+
 describe("next", () => {
   it("最初のステップのタスクプロンプトを返す", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW);
+    setupSimpleWorkflow();
+    const { sessionId } = await init("test-simple");
     const result = await next(sessionId);
 
     expect(result.stepKey).toBe("step1_task");
@@ -46,7 +67,8 @@ describe("next", () => {
   });
 
   it("同一セッションへの同時実行で試行を二重に割り当てない", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW);
+    setupSimpleWorkflow();
+    const { sessionId } = await init("test-simple");
     const results = await Promise.allSettled([next(sessionId), next(sessionId)]);
 
     // A concurrent second call idempotently reissues the same prompt instead of
@@ -71,7 +93,8 @@ describe("next", () => {
   });
 
   it("runningステップを新規アテンプトなしで冪等に再開する", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW);
+    setupSimpleWorkflow();
+    const { sessionId } = await init("test-simple");
     const first = await next(sessionId);
     expect(first.stepKey).toBe("step1_task");
     expect(first.context.attemptNumber).toBe(1);
@@ -106,7 +129,8 @@ describe("next", () => {
   });
 
   it("リトライ後のrunningステップも冪等に再開する", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW);
+    setupSimpleWorkflow();
+    const { sessionId } = await init("test-simple");
     await next(sessionId);
     await report(sessionId, {
       stepKey: "step1_task",
@@ -139,7 +163,8 @@ describe("next", () => {
   });
 
   it("human_gateのreviseで再実行されたステップでは pass 試行をリトライフィードバックに含めない", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW);
+    setupSimpleWorkflow();
+    const { sessionId } = await init("test-simple");
 
     // step1_task を成功させる（checkStatus='pass' の試行が残る）
     await next(sessionId);
@@ -162,7 +187,8 @@ describe("next", () => {
   });
 
   it("human_gateのプロンプトを返す", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW);
+    setupSimpleWorkflow();
+    const { sessionId } = await init("test-simple");
 
     await next(sessionId);
 
@@ -186,7 +212,8 @@ describe("next", () => {
   });
 
   it("並列サブタスクのプロンプトを返す", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW);
+    setupSimpleWorkflow();
+    const { sessionId } = await init("test-simple");
 
     await next(sessionId);
     await report(sessionId, {
@@ -235,7 +262,8 @@ describe("next", () => {
   });
 
   it("完了済みセッションでEngineErrorをスローする", async () => {
-    const { sessionId } = await init(FIXTURE_WORKFLOW);
+    setupSimpleWorkflow();
+    const { sessionId } = await init("test-simple");
     const db = new Database(getWorkflowDbPath());
     db.run("UPDATE sessions SET status = ? WHERE id = ?", ["done", sessionId]);
     db.close();
@@ -244,7 +272,8 @@ describe("next", () => {
 
   describe("DBにworkflow_pathがないワークフロー", () => {
     it("nextとreportで--workflowフラグを受け付ける", async () => {
-      const { sessionId } = await init(FIXTURE_WORKFLOW);
+      setupSimpleWorkflow();
+      const { sessionId } = await init("test-simple");
 
       const result = await next(sessionId, FIXTURE_WORKFLOW);
       expect(result.stepKey).toBe("step1_task");
@@ -265,12 +294,7 @@ describe("next", () => {
 
   describe("条件付きステップスキップ", () => {
     it("conditionがfalseを返すときにステップをスキップする", async () => {
-      const tmpDir = path.join(TEST_TADO_HOME, "condition-skip-test");
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const workflowPath = path.join(tmpDir, "condition-skip-workflow.ts");
-      fs.writeFileSync(
-        workflowPath,
-        `
+      const condition_skip_test_workflow_content = `
         const def = {
           id: 'condition-skip-test',
           steps: [
@@ -317,10 +341,10 @@ describe("next", () => {
           ],
         };
         export default def;
-      `,
-      );
+            `;
+      setupWorkflowFromContent("condition-skip-test", condition_skip_test_workflow_content);
 
-      const { sessionId } = await init(workflowPath);
+      const { sessionId } = await init("condition-skip-test");
 
       // step1 executes normally
       const r1 = await next(sessionId);
@@ -341,12 +365,7 @@ describe("next", () => {
     });
 
     it("conditionがtrueを返すときにステップを実行する", async () => {
-      const tmpDir = path.join(TEST_TADO_HOME, "condition-pass-test");
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const workflowPath = path.join(tmpDir, "condition-pass-workflow.ts");
-      fs.writeFileSync(
-        workflowPath,
-        `
+      const condition_pass_test_workflow_content = `
         const def = {
           id: 'condition-pass-test',
           steps: [
@@ -367,28 +386,24 @@ describe("next", () => {
           ],
         };
         export default def;
-      `,
-      );
+            `;
+      setupWorkflowFromContent("condition-pass-test", condition_pass_test_workflow_content);
 
-      const { sessionId } = await init(workflowPath);
+      const { sessionId } = await init("condition-pass-test");
       const r1 = await next(sessionId);
       expect(r1.stepKey).toBe("step1");
       expect(r1.prompt).toContain("step1 prompt");
     });
 
     it("conditionがundefinedのときにステップを実行する（後方互換）", async () => {
-      const { sessionId } = await init(FIXTURE_WORKFLOW);
+      setupSimpleWorkflow();
+      const { sessionId } = await init("test-simple");
       const r1 = await next(sessionId);
       expect(r1.stepKey).toBe("step1_task");
     });
 
     it("false条件の連続ステップを複数スキップする", async () => {
-      const tmpDir = path.join(TEST_TADO_HOME, "multi-skip-test");
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const workflowPath = path.join(tmpDir, "multi-skip-workflow.ts");
-      fs.writeFileSync(
-        workflowPath,
-        `
+      const multi_skip_test_workflow_content = `
         const def = {
           id: 'multi-skip-test',
           steps: [
@@ -449,10 +464,10 @@ describe("next", () => {
           ],
         };
         export default def;
-      `,
-      );
+            `;
+      setupWorkflowFromContent("multi-skip-test", multi_skip_test_workflow_content);
 
-      const { sessionId } = await init(workflowPath);
+      const { sessionId } = await init("multi-skip-test");
 
       await next(sessionId);
       await report(sessionId, { stepKey: "step1", status: "completed", subagentOutput: "done" });
@@ -474,12 +489,7 @@ describe("next", () => {
     });
 
     it("残りステップすべてがスキップされたときにセッションを完了にする", async () => {
-      const tmpDir = path.join(TEST_TADO_HOME, "all-skip-test");
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const workflowPath = path.join(tmpDir, "all-skip-workflow.ts");
-      fs.writeFileSync(
-        workflowPath,
-        `
+      const all_skip_test_workflow_content = `
         const def = {
           id: 'all-skip-test',
           steps: [
@@ -513,10 +523,10 @@ describe("next", () => {
           ],
         };
         export default def;
-      `,
-      );
+            `;
+      setupWorkflowFromContent("all-skip-test", all_skip_test_workflow_content);
 
-      const { sessionId } = await init(workflowPath);
+      const { sessionId } = await init("all-skip-test");
 
       await next(sessionId);
       await report(sessionId, { stepKey: "step1", status: "completed", subagentOutput: "done" });
@@ -534,12 +544,7 @@ describe("next", () => {
     });
 
     it("conditionコンテキストにgateChoicesを提供する", async () => {
-      const tmpDir = path.join(TEST_TADO_HOME, "gate-choices-test");
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const workflowPath = path.join(tmpDir, "gate-choices-workflow.ts");
-      fs.writeFileSync(
-        workflowPath,
-        `
+      const gate_choices_test_workflow_content = `
         let capturedCtx = null;
         const def = {
           id: 'gate-choices-test',
@@ -593,10 +598,10 @@ describe("next", () => {
         };
         export default def;
         export function getCapturedCtx() { return capturedCtx; }
-      `,
-      );
+            `;
+      setupWorkflowFromContent("gate-choices-test", gate_choices_test_workflow_content);
 
-      const { sessionId } = await init(workflowPath);
+      const { sessionId } = await init("gate-choices-test");
 
       // Pass the gate with 'approve'
       await next(sessionId);
@@ -608,12 +613,7 @@ describe("next", () => {
     });
 
     it("gateChoices条件が満たされたときにステップを実行する", async () => {
-      const tmpDir = path.join(TEST_TADO_HOME, "gate-execute-test");
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const workflowPath = path.join(tmpDir, "gate-execute-workflow.ts");
-      fs.writeFileSync(
-        workflowPath,
-        `
+      const gate_execute_test_workflow_content = `
         const def = {
           id: 'gate-execute-test',
           steps: [
@@ -662,10 +662,10 @@ describe("next", () => {
           ],
         };
         export default def;
-      `,
-      );
+            `;
+      setupWorkflowFromContent("gate-execute-test", gate_execute_test_workflow_content);
 
-      const { sessionId } = await init(workflowPath);
+      const { sessionId } = await init("gate-execute-test");
 
       // Gate approves → condition gateChoices['gate_step'] === 'approve' is true → step executes
       await next(sessionId);
@@ -676,12 +676,7 @@ describe("next", () => {
     });
 
     it("conditionコンテキストにartifactsを提供する", async () => {
-      const tmpDir = path.join(TEST_TADO_HOME, "condition-artifacts-test");
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const workflowPath = path.join(tmpDir, "condition-artifacts-workflow.ts");
-      fs.writeFileSync(
-        workflowPath,
-        `
+      const condition_artifacts_test_workflow_content = `
         const def = {
           id: 'condition-artifacts-test',
           steps: [
@@ -728,10 +723,13 @@ describe("next", () => {
           ],
         };
         export default def;
-      `,
+            `;
+      setupWorkflowFromContent(
+        "condition-artifacts-test",
+        condition_artifacts_test_workflow_content,
       );
 
-      const { sessionId } = await init(workflowPath);
+      const { sessionId } = await init("condition-artifacts-test");
 
       // step1 completes WITHOUT producing the needed artifact
       await next(sessionId);
@@ -752,12 +750,7 @@ describe("next", () => {
 
   describe("ヒューマンゲートのアーティファクト提示", () => {
     it("アーティファクト登録時にパスとconfirmコマンドを含める", async () => {
-      const tmpDir = path.join(TEST_TADO_HOME, "gate-present-test");
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const workflowPath = path.join(tmpDir, "gate-present-workflow.ts");
-      fs.writeFileSync(
-        workflowPath,
-        `
+      const gate_present_test_workflow_content = `
         const def = {
           id: 'gate-present-test',
           steps: [
@@ -794,10 +787,10 @@ describe("next", () => {
           ],
         };
         export default def;
-      `,
-      );
+            `;
+      setupWorkflowFromContent("gate-present-test", gate_present_test_workflow_content);
 
-      const { sessionId } = await init(workflowPath);
+      const { sessionId } = await init("gate-present-test");
 
       // prepare step registers the issue-body.md artifact
       await next(sessionId);
@@ -817,7 +810,8 @@ describe("next", () => {
     });
 
     it("アーティファクト未登録時に成果物なしを表示する", async () => {
-      const { sessionId } = await init(FIXTURE_WORKFLOW);
+      setupSimpleWorkflow();
+      const { sessionId } = await init("test-simple");
 
       await next(sessionId);
       await report(sessionId, {
@@ -837,12 +831,7 @@ describe("next", () => {
 
   describe("beforeStepフック", () => {
     it("返却artifactsがPromptCtx.artifactsに反映されDBに登録される", async () => {
-      const tmpDir = path.join(TEST_TADO_HOME, "before-step-inject-test");
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const workflowPath = path.join(tmpDir, "before-step-workflow.ts");
-      fs.writeFileSync(
-        workflowPath,
-        `
+      const before_step_test_workflow_content = `
         const def = {
           id: 'before-step-test',
           steps: [
@@ -865,10 +854,10 @@ describe("next", () => {
           ],
         };
         export default def;
-      `,
-      );
+            `;
+      setupWorkflowFromContent("before-step-test", before_step_test_workflow_content);
 
-      const { sessionId } = await init(workflowPath);
+      const { sessionId } = await init("before-step-test");
       const result = await next(sessionId);
 
       expect(result.prompt).toContain("prep.md=/tmp/prep.md");
@@ -885,12 +874,7 @@ describe("next", () => {
     });
 
     it("既存の同名キーをbeforeStepの返却値で上書きする", async () => {
-      const tmpDir = path.join(TEST_TADO_HOME, "before-step-overwrite-test");
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const workflowPath = path.join(tmpDir, "before-step-overwrite-workflow.ts");
-      fs.writeFileSync(
-        workflowPath,
-        `
+      const before_step_overwrite_test_workflow_content = `
         const def = {
           id: 'before-step-overwrite-test',
           steps: [
@@ -926,10 +910,13 @@ describe("next", () => {
           ],
         };
         export default def;
-      `,
+            `;
+      setupWorkflowFromContent(
+        "before-step-overwrite-test",
+        before_step_overwrite_test_workflow_content,
       );
 
-      const { sessionId } = await init(workflowPath);
+      const { sessionId } = await init("before-step-overwrite-test");
 
       // step1 registers shared.md with the OLD path
       await next(sessionId);
@@ -957,12 +944,7 @@ describe("next", () => {
     });
 
     it("失敗時にmaxRetriesまでリトライし成功時に続行する", async () => {
-      const tmpDir = path.join(TEST_TADO_HOME, "before-step-retry-test");
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const workflowPath = path.join(tmpDir, "before-step-retry-workflow.ts");
-      fs.writeFileSync(
-        workflowPath,
-        `
+      const before_step_retry_test_workflow_content = `
         let callCount = 0;
         const def = {
           id: 'before-step-retry-test',
@@ -990,10 +972,10 @@ describe("next", () => {
           ],
         };
         export default def;
-      `,
-      );
+            `;
+      setupWorkflowFromContent("before-step-retry-test", before_step_retry_test_workflow_content);
 
-      const { sessionId } = await init(workflowPath);
+      const { sessionId } = await init("before-step-retry-test");
       const result = await next(sessionId);
       expect(result.stepKey).toBe("step1");
 
@@ -1007,12 +989,7 @@ describe("next", () => {
     });
 
     it("リトライ枯渇時にステップをfailedにしてワークフローを停止する", async () => {
-      const tmpDir = path.join(TEST_TADO_HOME, "before-step-exhaust-test");
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const workflowPath = path.join(tmpDir, "before-step-exhaust-workflow.ts");
-      fs.writeFileSync(
-        workflowPath,
-        `
+      const before_step_exhaust_test_workflow_content = `
         const def = {
           id: 'before-step-exhaust-test',
           steps: [
@@ -1035,10 +1012,13 @@ describe("next", () => {
           ],
         };
         export default def;
-      `,
+            `;
+      setupWorkflowFromContent(
+        "before-step-exhaust-test",
+        before_step_exhaust_test_workflow_content,
       );
 
-      const { sessionId } = await init(workflowPath);
+      const { sessionId } = await init("before-step-exhaust-test");
       await expect(next(sessionId)).rejects.toThrow(EngineError);
       await expect(next(sessionId)).rejects.toThrow("Session is aborted");
 
@@ -1056,12 +1036,7 @@ describe("next", () => {
     });
 
     it("runningステップの冪等な再開時にbeforeStepを再実行しない", async () => {
-      const tmpDir = path.join(TEST_TADO_HOME, "before-step-resume-test");
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const workflowPath = path.join(tmpDir, "before-step-resume-workflow.ts");
-      fs.writeFileSync(
-        workflowPath,
-        `
+      const before_step_resume_test_workflow_content = `
         import * as fs from 'node:fs';
         import * as path from 'node:path';
         const def = {
@@ -1087,10 +1062,10 @@ describe("next", () => {
           ],
         };
         export default def;
-      `,
-      );
+            `;
+      setupWorkflowFromContent("before-step-resume-test", before_step_resume_test_workflow_content);
 
-      const { sessionId, sessionDir } = await init(workflowPath);
+      const { sessionId, sessionDir } = await init("before-step-resume-test");
 
       // First next: hook runs once and registers its artifacts
       const first = await next(sessionId);
@@ -1118,12 +1093,7 @@ describe("next", () => {
       // beforeStep はトランザクション外で実行されるため、フックの非同期待機中に
       // 別の next() が割り込める。再検証（resume パス）でアテンプト重複を防ぎ、
       // DB 上の artifacts から同一プロンプトを再発行することを確認する。
-      const tmpDir = path.join(TEST_TADO_HOME, "before-step-concurrent-test");
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const workflowPath = path.join(tmpDir, "before-step-concurrent-workflow.ts");
-      fs.writeFileSync(
-        workflowPath,
-        `
+      const before_step_concurrent_test_workflow_content = `
         const def = {
           id: 'before-step-concurrent-test',
           steps: [
@@ -1147,10 +1117,13 @@ describe("next", () => {
           ],
         };
         export default def;
-      `,
+            `;
+      setupWorkflowFromContent(
+        "before-step-concurrent-test",
+        before_step_concurrent_test_workflow_content,
       );
 
-      const { sessionId } = await init(workflowPath);
+      const { sessionId } = await init("before-step-concurrent-test");
       const results = await Promise.allSettled([next(sessionId), next(sessionId)]);
 
       const fulfilled = results.filter((result) => result.status === "fulfilled");

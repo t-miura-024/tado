@@ -6,6 +6,8 @@ import type { ReportInput, ReportResult, StatusResult, AttemptResult } from "../
 import {
   openSessionDb,
   importWorkflowDef,
+  importWorkflowDefFromPath,
+  isPathLike,
   getArtifacts,
   registerHookArtifacts,
   EngineError,
@@ -183,7 +185,10 @@ export async function report(
     }
   }
 
-  const def = await importWorkflowDef(resolvedWorkflowPath);
+  const isPath = isPathLike(resolvedWorkflowPath);
+  const def = isPath
+    ? await importWorkflowDefFromPath(resolvedWorkflowPath)
+    : await importWorkflowDef(resolvedWorkflowPath);
   const stepDef = def.steps.find((s) => s.key === input.stepKey);
 
   let checkStatus: "pass" | "fail" | "error" = "pass";

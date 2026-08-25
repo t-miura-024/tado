@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as clack from "@clack/prompts";
+import { getTadoHome } from "../engine/store.ts";
 import {
   SCOPES,
   TOOLS,
@@ -26,35 +27,37 @@ export function ensureBun(): void {
 
 /**
  * Remove stale install artifacts (node_modules/tado, bun.lock)
- * from a skills directory so that `bun add` starts from a clean state.
+ * from a directory so that `bun add` starts from a clean state.
+ * Generic for both skillsDir and TADO_HOME.
  */
-export function cleanInstallArtifacts(skillsDir: string): void {
-  const targets = [path.join(skillsDir, "node_modules", "tado"), path.join(skillsDir, "bun.lock")];
+export function cleanInstallArtifacts(dir: string): void {
+  const targets = [path.join(dir, "node_modules", "tado"), path.join(dir, "bun.lock")];
   for (const target of targets) {
     fs.rmSync(target, { recursive: true, force: true });
   }
 }
 
-/** Write a minimal package.json if one does not already exist. */
-export function ensurePackageJson(skillsDir: string): void {
-  const pkgPath = path.join(skillsDir, "package.json");
+/** Write a minimal package.json if one does not already exist. Generic dir. */
+export function ensurePackageJson(dir: string): void {
+  const pkgPath = path.join(dir, "package.json");
   if (!fs.existsSync(pkgPath)) {
     fs.writeFileSync(pkgPath, '{"private":true}\n');
   }
 }
 
 /**
- * Run `bun add` in the target skills directory and copy SKILL.md files.
- * Creates the directory if it does not exist.
- * Cleans stale artifacts first to avoid cache / stale-package issues.
+ * Install or update the tado package into TADO_HOME.
+ * Creates TADO_HOME if needed, ensures package.json, cleans stale artifacts,
+ * then runs `bun add` with cwd = TADO_HOME.
  */
-export async function performInstall(skillsDir: string): Promise<void> {
-  fs.mkdirSync(skillsDir, { recursive: true });
-  cleanInstallArtifacts(skillsDir);
-  ensurePackageJson(skillsDir);
+export async function installTadoPackage(): Promise<void> {
+  const tadoHome = getTadoHome();
+  fs.mkdirSync(tadoHome, { recursive: true });
+  cleanInstallArtifacts(tadoHome);
+  ensurePackageJson(tadoHome);
 
   const addProc = Bun.spawn(["bun", "add", PACKAGE_SPEC], {
-    cwd: skillsDir,
+    cwd: tadoHome,
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -63,23 +66,42 @@ export async function performInstall(skillsDir: string): Promise<void> {
     const stderr = await new Response(addProc.stderr).text();
     throw new Error(`bun add failed (exit ${addExit}): ${stderr.trim()}`);
   }
-
-  copySkills(skillsDir);
 }
 
-/** Copy SKILL.md files from the installed package into the skills directory. */
+/** Copy SKILL.md files from the TADO_HOME package into the skills directory. */
 export function copySkills(skillsDir: string): void {
-  const pkgSkillsDir = path.join(skillsDir, "node_modules", "tado", "skills");
+  const tadoHome = getTadoHome();
+  const primarySkillsDir = path.join(tadoHome, "node_modules", "tado", "skills");
+  const fallbackSkillsDir = path.join(skillsDir, "node_modules", "tado", "skills");
+
   for (const name of SKILL_NAMES) {
-    const src = path.join(pkgSkillsDir, name, "SKILL.md");
+    let src: string | undefined;
+    const primaryCandidate = path.join(primarySkillsDir, name, "SKILL.md");
+    const fallbackCandidate = path.join(fallbackSkillsDir, name, "SKILL.md");
+    if (fs.existsSync(primaryCandidate)) {
+      src = primaryCandidate;
+    } else if (fs.existsSync(fallbackCandidate)) {
+      src = fallbackCandidate;
+    }
+    if (!src) {
+      const tried = `${primaryCandidate} (TADO_HOME) or ${fallbackCandidate} (skillsDir)`;
+      throw new Error(`SKILL.md not found in package: ${tried}`);
+    }
     const destDir = path.join(skillsDir, name);
     const dest = path.join(destDir, "SKILL.md");
-    if (!fs.existsSync(src)) {
-      throw new Error(`SKILL.md not found in package: ${src}`);
-    }
     fs.mkdirSync(destDir, { recursive: true });
     fs.copyFileSync(src, dest);
   }
+}
+
+/**
+ * Perform full install: ensure package in TADO_HOME via bun add, then copy skills.
+ * Creates the skills directory if it does not exist.
+ */
+export async function performInstall(skillsDir: string): Promise<void> {
+  fs.mkdirSync(skillsDir, { recursive: true });
+  await installTadoPackage();
+  copySkills(skillsDir);
 }
 
 /** Interactive install flow: tool selection -> scope selection -> install. */
@@ -134,11 +156,11 @@ export async function installCommand(cwd: string = process.cwd()): Promise<void>
   const skillsDir = resolveSkillsDir(tool, scope, cwd);
 
   const spinner = clack.spinner();
-  spinner.start(`Installing tado for ${tool.label} (${scope})...`);
+  spinner.start(`Installing tado for ${tool.label} (${scope}) and preparing TADO_HOME...`);
 
   try {
     await performInstall(skillsDir);
-    spinner.stop(`Installed tado for ${tool.label} (${scope}) at ${skillsDir}`);
+    spinner.stop(`Installed tado for ${tool.label} (${scope}) at ${skillsDir} and TADO_HOME`);
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     spinner.stop("Installation failed.");

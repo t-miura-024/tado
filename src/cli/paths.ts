@@ -1,6 +1,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs";
+import { getTadoHome } from "../engine/store.ts";
 
 export type ToolId = "claude-code" | "opencode" | "codex" | "cursor";
 export type Scope = "user" | "project";
@@ -67,6 +68,11 @@ export function resolveSkillsDir(
 /** Check whether tado is installed in the given skills directory. */
 export function isInstalled(skillsDir: string): boolean {
   return fs.existsSync(path.join(skillsDir, "node_modules", "tado"));
+}
+
+/** Check whether tado package is installed in TADO_HOME. */
+export function isTadoPackageInstalled(tadoHome: string = getTadoHome()): boolean {
+  return fs.existsSync(path.join(tadoHome, "node_modules", "tado"));
 }
 
 /** Scan all 8 tool x scope combinations and return installed locations. */

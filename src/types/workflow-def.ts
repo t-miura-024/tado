@@ -8,6 +8,7 @@ import type { CheckResult } from "./result.ts";
 /** ワークフロー全体の定義。ステップの列と初期化フックで構成される。 */
 export interface WorkflowDef {
   id: string;
+  description?: string;
   steps: StepDef[];
   beforeInit?: (ctx: InitCtx) => Promise<void>;
   afterInit?: (ctx: InitCtx) => Promise<AfterInitResult>;
