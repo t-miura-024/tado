@@ -46,6 +46,10 @@ tado confirm --session <id>
 
 # 現在状態の確認
 tado status --session <id>
+
+# ワークフロー一覧
+tado list --workflow [--json] [--verbose]
+# 一覧のみ。`tado list` 単体はヘルプを表示
 ```
 
 典型的な進行は `init` → `next`（プロンプト取得）→ ステップ実行 → `report`（結果報告）のサイクルです。

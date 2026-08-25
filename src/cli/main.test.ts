@@ -224,4 +224,134 @@ describe("CLI統合", () => {
 
     expect(out).toContain("Workflow ID");
   });
+
+  it("ヘルプに list を含む", async () => {
+    const proc = Bun.spawn(["bun", "run", CLI_PATH, "--help"], {
+      stdout: "pipe",
+      env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+
+    expect(out).toContain("list");
+  });
+
+  it("list --help でオプションを表示する", async () => {
+    const proc = Bun.spawn(["bun", "run", CLI_PATH, "list", "--help"], {
+      stdout: "pipe",
+      env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+
+    expect(proc.exitCode).toBe(0);
+    expect(out).toContain("--workflow");
+    expect(out).toContain("--json");
+    expect(out).toContain("--verbose");
+  });
+
+  it("tado list 単体でヘルプを表示する", async () => {
+    const proc = Bun.spawn(["bun", "run", CLI_PATH, "list"], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+
+    expect(proc.exitCode).toBe(0);
+    expect(out).toContain("List available workflows");
+    expect(out).toContain("--workflow");
+  });
+
+  it("list --workflow で0件時にメッセージを出力する", async () => {
+    const proc = Bun.spawn(["bun", "run", CLI_PATH, "list", "--workflow"], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+
+    expect(proc.exitCode).toBe(0);
+    expect(out).toBe("No workflows found.\n");
+  });
+
+  it("list --workflow --json で0件時に空配列を出力する", async () => {
+    const proc = Bun.spawn(["bun", "run", CLI_PATH, "list", "--workflow", "--json"], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+
+    expect(proc.exitCode).toBe(0);
+    expect(JSON.parse(out)).toEqual([]);
+  });
+
+  it("list --workflow でワークフロー一覧をテーブル出力する", async () => {
+    setupWorkflow();
+    const proc = Bun.spawn(["bun", "run", CLI_PATH, "list", "--workflow"], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+
+    expect(proc.exitCode).toBe(0);
+    expect(out).toContain("ID");
+    expect(out).toContain("DESCRIPTION");
+    expect(out).toContain("test-simple");
+  });
+
+  it("list --workflow --json で全フィールドを出力する", async () => {
+    setupWorkflow();
+    const proc = Bun.spawn(["bun", "run", CLI_PATH, "list", "--workflow", "--json"], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+
+    expect(proc.exitCode).toBe(0);
+    const parsed = JSON.parse(out);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0].id).toBe("test-simple");
+    expect(parsed[0].stepsCount).toBe(3);
+    expect(parsed[0].path).toContain(path.join("test-simple", "index.ts"));
+  });
+
+  it("list --workflow --verbose で追加列を表示する", async () => {
+    setupWorkflow();
+    const proc = Bun.spawn(["bun", "run", CLI_PATH, "list", "--workflow", "--verbose"], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+
+    expect(proc.exitCode).toBe(0);
+    expect(out).toContain("STEPS");
+    expect(out).toContain("PATH");
+  });
+
+  it("list --workflow --json --verbose で全フィールドを出力する（verboseは無視）", async () => {
+    setupWorkflow();
+    const proc = Bun.spawn(["bun", "run", CLI_PATH, "list", "--workflow", "--json", "--verbose"], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+
+    expect(proc.exitCode).toBe(0);
+    const parsed = JSON.parse(out);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0].id).toBe("test-simple");
+  });
 });
