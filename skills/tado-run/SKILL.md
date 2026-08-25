@@ -11,17 +11,17 @@ description: ワークフローエンジン（tado）を起動し、init → nex
 
 ## ワークフロー解決
 
-ワークフローは `{TADO_HOME}/workflows/<name>/index.ts` に集約され、`--workflow <id>` の ID で解決される。`listWorkflows()` 相当の列挙は `src/engine/workflows.ts` の `getWorkflowsDir()` / `listWorkflows()` が担い、壊れたワークフローは warn ログを出してスキップする。
+ワークフローは `{TADO_HOME}/workflows/<name>/index.ts` に集約され、`--workflow <id>` の ID で解決される。
 
 ## 起動対象の決定
 
 ### 1. ワークフロー列挙
 
-`{TADO_HOME}/workflows/` 配下を `readdir` + `import` で列挙し、各ワークフローの `id` / `description` / `path` / `stepsCount` を取得する。列挙は都度行いキャッシュしない。
+ワークフロー一覧は `tado list --workflow` で取得する。機械可読に扱う場合は `tado list --workflow --json` を使う。
 
-- ワークフロー0件の場合: 「利用可能なワークフローがありません。ワークフローを作成してから実行してください」と案内して終了する。
-- description 未設定のワークフローは ID のみ表示で許容する。
-- ディレクトリ名と `def.id` が不一致の場合は警告（またはエラー）を出してスキップする。
+```bash
+tado list --workflow --json
+```
 
 ### 2. 推定とユーザー確認
 

@@ -1,7 +1,16 @@
 #!/usr/bin/env bun
 import * as fs from "node:fs";
 import { Command } from "commander";
-import { init, next, report, status, confirm, EngineError } from "../engine/index.ts";
+import {
+  init,
+  next,
+  report,
+  status,
+  confirm,
+  listWorkflows,
+  EngineError,
+} from "../engine/index.ts";
+import type { WorkflowSummary } from "../engine/workflows.ts";
 import type { ReportInput } from "../types/result.ts";
 import { installCommand } from "./install.ts";
 import { updateCommand } from "./update.ts";
@@ -31,6 +40,32 @@ function readStdin(): string {
 
 function output(result: unknown): void {
   process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+}
+
+function formatWorkflowTable(workflows: WorkflowSummary[], verbose: boolean): string {
+  if (workflows.length === 0) {
+    return "No workflows found.\n";
+  }
+  const rows: string[][] = workflows.map((w) => {
+    const desc = w.description ?? "-";
+    if (verbose) {
+      return [w.id, desc, String(w.stepsCount), w.path];
+    }
+    return [w.id, desc];
+  });
+  const headers = verbose ? ["ID", "DESCRIPTION", "STEPS", "PATH"] : ["ID", "DESCRIPTION"];
+  const allRows = [headers, ...rows];
+  const colWidths = headers.map((_, i) => Math.max(...allRows.map((r) => r[i].length)));
+  const formatRow = (cols: string[]): string =>
+    cols.map((c, i) => (i < cols.length - 1 ? c.padEnd(colWidths[i]) : c)).join("  ");
+  const lines = allRows.map((r) => formatRow(r));
+  return lines.join("\n") + "\n";
+}
+
+interface ListOpts {
+  workflow?: boolean;
+  json?: boolean;
+  verbose?: boolean;
 }
 
 function buildProgram(): Command {
@@ -100,6 +135,25 @@ function buildProgram(): Command {
     .action((opts: SessionOpts) => {
       const result = status(opts.session);
       output(result);
+    });
+
+  const listCommand = program
+    .command("list")
+    .description("List available workflows")
+    .option("--workflow", "List workflows")
+    .option("--json", "Output as JSON")
+    .option("--verbose", "Show additional columns (steps, path)")
+    .action(async (opts: ListOpts) => {
+      if (!opts.workflow) {
+        process.stdout.write(listCommand.helpInformation());
+        return;
+      }
+      const workflows = await listWorkflows();
+      if (opts.json) {
+        output(workflows);
+      } else {
+        process.stdout.write(formatWorkflowTable(workflows, Boolean(opts.verbose)));
+      }
     });
 
   program
