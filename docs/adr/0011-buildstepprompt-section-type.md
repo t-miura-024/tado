@@ -18,7 +18,7 @@ status: accepted
 
 `buildStepPrompt` に渡す各プロパティ配列で `string | Section` のユニオンを許容し、`Section` は `title: PromptString` と `content: (string | Section)[]` の再帰構造で見出しを表現する。
 
-- `PromptString<T extends string>` は `T extends \`#${string}\` ? never : T` で行頭 `#` を型レベルで拒否（`title` 含む）。動的 `string` 変数は許可。
+- `PromptString<T extends string>` は `T extends \`#${string}\` ? never : T`で行頭`#` を型レベルで拒否（`title`含む）。動的`string` 変数は許可。
 - `NextDepth<D extends 3|4|5|6>` は `3→4→5→6→6` で型レベル H6 キャップ。
 - `PromptSection<Depth>` は `{title: PromptString, content: PromptItem<NextDepth<Depth>>[]}`。
 - `PromptItem<Depth>` は `PromptString | PromptSection<Depth>`。
