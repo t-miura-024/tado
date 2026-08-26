@@ -3,8 +3,8 @@ import * as path from "node:path";
 import { eq } from "drizzle-orm";
 import type { InitResult } from "../types/result.ts";
 import {
-  EngineError,
   importWorkflowDef,
+  importWorkflowDefFromPath,
   isPathLike,
   migrateDb,
   openDb,
@@ -26,13 +26,15 @@ function generateSessionId(): string {
 }
 
 export async function init(workflowId: string, sessionId?: string): Promise<InitResult> {
+  let def: import("../types/workflow-def.ts").WorkflowDef;
+  let resolvedPath: string;
   if (isPathLike(workflowId)) {
-    throw new EngineError(
-      `Invalid workflow ID: ${workflowId} (must not contain path separators; use workflow ID like "mt-plan-create")`,
-    );
+    def = await importWorkflowDefFromPath(workflowId);
+    resolvedPath = path.resolve(workflowId);
+  } else {
+    def = await importWorkflowDef(workflowId);
+    resolvedPath = resolveWorkflowPath(workflowId);
   }
-  const def = await importWorkflowDef(workflowId);
-  const resolvedPath = resolveWorkflowPath(workflowId);
 
   const sid = sessionId ?? generateSessionId();
   const tadoHome = getTadoHome();

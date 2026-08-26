@@ -32,7 +32,7 @@ afterEach(cleanup);
 
 /** Create a fake installed tado package with SKILL.md files in TADO_HOME. */
 function fakePackageInTadoHome(): void {
-  for (const name of ["tado", "tado-run"]) {
+  for (const name of ["tado", "tado-run", "tado-create-workflow"]) {
     const dir = path.join(TEST_TADO_HOME, "node_modules", "tado", "skills", name);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, "SKILL.md"), `# ${name} skill\n`);
@@ -41,7 +41,7 @@ function fakePackageInTadoHome(): void {
 
 /** Legacy helper: create fake package in skillsDir for fallback tests (if needed). */
 function fakePackage(skillsDir: string): void {
-  for (const name of ["tado", "tado-run"]) {
+  for (const name of ["tado", "tado-run", "tado-create-workflow"]) {
     const dir = path.join(skillsDir, "node_modules", "tado", "skills", name);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, "SKILL.md"), `# ${name} skill\n`);
@@ -66,10 +66,15 @@ describe("copySkills", () => {
 
     const tadoSkill = path.join(skillsDir, "tado", "SKILL.md");
     const tadoRunSkill = path.join(skillsDir, "tado-run", "SKILL.md");
+    const tadoCreateWorkflowSkill = path.join(skillsDir, "tado-create-workflow", "SKILL.md");
     expect(fs.existsSync(tadoSkill)).toBe(true);
     expect(fs.existsSync(tadoRunSkill)).toBe(true);
+    expect(fs.existsSync(tadoCreateWorkflowSkill)).toBe(true);
     expect(fs.readFileSync(tadoSkill, "utf-8")).toBe("# tado skill\n");
     expect(fs.readFileSync(tadoRunSkill, "utf-8")).toBe("# tado-run skill\n");
+    expect(fs.readFileSync(tadoCreateWorkflowSkill, "utf-8")).toBe(
+      "# tado-create-workflow skill\n",
+    );
   });
 
   it("既存の SKILL.md を上書きする", () => {
@@ -107,7 +112,12 @@ describe("copySkills", () => {
     copySkills(skillsDir);
 
     const tadoSkill = path.join(skillsDir, "tado", "SKILL.md");
+    const tadoCreateWorkflowSkill = path.join(skillsDir, "tado-create-workflow", "SKILL.md");
     expect(fs.readFileSync(tadoSkill, "utf-8")).toBe("# tado skill\n");
+    expect(fs.existsSync(tadoCreateWorkflowSkill)).toBe(true);
+    expect(fs.readFileSync(tadoCreateWorkflowSkill, "utf-8")).toBe(
+      "# tado-create-workflow skill\n",
+    );
   });
 });
 

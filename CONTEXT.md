@@ -43,3 +43,19 @@ _Avoid_: tado home, ホームディレクトリ
 **description**:
 `WorkflowDef` に追加されるワークフローの人間可読な説明。tado-run がプロンプト内容から起動対象を推定する際の判断材料となる。
 _Avoid_: ディスクリプション（カタカナ）, 説明文
+
+**ワークフロー作成用Skill**:
+tadoのWorkflowDefを対話的に設計・生成するためのLLM向けSkill。`skills/tado-create-workflow/SKILL.md` としてライブラリに同梱し、`tado install`/`tado update` で配布される。
+_Avoid_: ワークフロー生成コマンド, workflow generator
+
+**スキャフォールド**:
+WorkflowDefの骨格（`id`/`steps`/各StepDefの `key`/`phase`/`type`/`maxRetries`/`onFail`/`task.buildPrompt`/`check` の雛形）。`buildStepPrompt` を用いたSection型対応のプロンプト雛形を含む。
+_Avoid_: テンプレート（単なる文字列置換の意味で使う場合）, ボイラープレート
+
+**検証**:
+生成した `workflow.ts` が即座に `tado init` で初期化できる状態にあることを機械的に確認する工程。`tsc --noEmit` / `oxlint` / `tado init --workflow` の3点を指す。
+_Avoid_: テスト（検証は生成直後の機械的チェックを指し、ユニットテスト全般を指さない）
+
+**ワークフローSkill**:
+tadoのワークフロー（`workflow.ts`）をLLMから呼び出し可能にするための薄いSkill。`SKILL.md` が `tado-run --workflow ./workflow.ts` への委譲を記述し、`resolveSkillsDir(tool, scope)/<skill-name>/` 配下に `SKILL.md` と `workflow.ts` を同居させる。
+_Avoid_: ワークフローファイル（Skill化されていない `workflow.ts` 単体）, プラグイン
