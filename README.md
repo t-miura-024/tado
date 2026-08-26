@@ -33,7 +33,7 @@ bun add github:t-miura-024/tado
 
 ```bash
 # セッション初期化（状態 DB: ~/.tado/workflow.db）
-tado init --workflow <id> [--session <id>]
+tado init --workflow <id> --title "<title>" [--session <id>]
 
 # 次のステップのプロンプト取得
 tado next --session <id> [--workflow <id>]
@@ -46,6 +46,9 @@ tado confirm --session <id>
 
 # 現在状態の確認
 tado status --session <id>
+
+# ダッシュボード（参照専用TUI）
+tado dashboard
 
 # ワークフロー一覧
 tado list --workflow [--json] [--verbose]
@@ -255,8 +258,26 @@ tado confirm --session <id>
 # 例: テンプレートをワークフローとして登録して起動
 mkdir -p ~/.tado/workflows/my-workflow
 cp examples/simple-workflow.ts ~/.tado/workflows/my-workflow/index.ts
-tado init --workflow my-workflow
+tado init --workflow my-workflow --title "My Workflow"
 ```
+
+## ダッシュボード
+
+`tado dashboard` で参照専用のTUIを同一ターミナルで起動します。セッション一覧と選択中セッションの進捗フロー図・履歴・成果物を一画面で確認できます。
+
+```bash
+tado dashboard
+```
+
+- 2カラム構成: 左サイドバー（垂直タブ）にセッション一覧、右メインコンテンツにフロー図・履歴・成果物
+- サイドバー各タブ: 起動ディレクトリ名 / 進捗率 `passed/total` / ステータス `●◐✔✘` / タイトル
+- 初期選択: 起動時CWDに前方一致するセッションのうち `updated_at` 最新、該当なしは全体最新
+- フロー図: ステップをボックス+矢印で縦積み、`phase/key/type` と `status` 色、`currentStep` は太線強調、 `skipped (condition false)` は灰色単線枠＋ラベル表示
+- 履歴: `step_attempts` + `gate_events` を時系列統合して最新20件
+- 成果物: `artifactKey: filePath (存在✓/欠損✗)` 一覧、`Enter` でプレビュー展開（対応拡張子のみ先頭 50 行 /8KB まで等幅表示、非対応やバイナリは `プレビュー非対応: <reason>` と表示）
+- 操作: `j/k` / `↑/↓` でセッション選択、 `Tab` でフォーカス切替、`Enter` で成果物プレビュー展開/折りたたみ、`r` で再読込、`q` / `Ctrl+C` で終了（ 1 秒自動ポーリング）
+- 参照専用: TUI から状態の作成・変更・削除は行いません
+- 警告: DB 不在・ 0 件・ `workflow file not found` は画面内に警告を表示
 
 ## 同梱 Skill
 

@@ -32,12 +32,14 @@ tado list --workflow --json
 
 ### 3. セッション初期化（init）
 
-ユーザー確認で確定した `<id>` を使ってセッションを初期化する:
+ユーザー確認で確定した `<id>` を使ってセッションを初期化する。`--title` は必須（1-100文字、改行不可）:
 
 ```bash
-tado init --workflow <id>
+tado init --workflow <id> --title "<title>"
 ```
 
+- `--title` はセッション一覧で表示される人間可読なタイトル。`sessions.title` に保存される。`WorkflowDef.id` とは別概念。
+- `sessions.cwd` に `process.cwd()` の絶対パスが自動保存される。
 - stdout にセッション情報（`sessionId` を含む JSON）が出力される。`sessionId` を控え、以降のコマンドの `<id>` に使う。
 - 状態は `{TADO_HOME}/workflow.db`（SQLite、デフォルトは `~/.tado/workflow.db`）で機械的に管理される。セッションの成果物は `{TADO_HOME}/{sessionId}/` に保存される。
 - ワークフローからの `import from "tado"` は `{TADO_HOME}/node_modules/tado` から解決される（`{TADO_HOME}/package.json` 管理）。CLI バイナリ自体はグローバルインストール（`~/.bun/bin/tado`）に準拠。
@@ -63,10 +65,19 @@ echo '{"stepKey":"...","status":"completed","subagentOutput":"..."}' | tado repo
 
 **例外（human_gate）**: 現在のステップが human_gate の場合、`report` では完了できない。ゲートプロンプトの指示に従い、ユーザー自身の端末で `tado confirm --session <id>` を実行してもらうこと（コマンド全文をそのまま提示する）。confirm は TTY 必須のためエージェントからは実行できず、人間が実行するまでワークフローは停止する。停止は正常な挙動であり、回答を捏造してはならない。
 
-### 5. 状態確認（status）
+### 5. 状態確認（status / dashboard）
 
 必要に応じて現在状態を確認できる。
 
 ```bash
 tado status --session <id>
 ```
+
+複数セッションを横断して進捗を俯瞰する場合はダッシュボードを起動する:
+
+```bash
+tado dashboard
+```
+
+- 参照専用TUI（2カラム: サイドバー + メイン）。`j/k`/`↑/↓` でセッション選択、`Enter` で成果物プレビュー、`r` で再読込、`q`/`Ctrl+C` で終了（1秒ポーリング）
+- フロー図・履歴（最新20件）・成果物（`artifactKey: filePath (存在✓/欠損✗)`）を一画面で確認できる
