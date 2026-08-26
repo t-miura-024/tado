@@ -7,3 +7,4 @@ export type { ArtifactRecord } from "./artifact.ts";
 export type { CheckCtx, ConditionCtx, InitCtx, PromptCtx } from "./context.ts";
 export type { CheckResult } from "./result.ts";
 export type { AfterInitResult, WorkflowDef } from "./workflow-def.ts";
+export type { PromptString, PromptSection, PromptItem, NextDepth } from "../prompt.ts";
