@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { Database } from "bun:sqlite";
 import { init, EngineError, getWorkflowDbPath, getWorkflowsDir } from "./index.ts";
+import { validateTitle } from "./session.ts";
 
 const TEST_TADO_HOME = path.join(__dirname, "__test_sessions_session__");
 process.env.TADO_HOME = TEST_TADO_HOME;
@@ -34,7 +35,7 @@ describe("セッション", () => {
   describe("init", () => {
     it("セッションディレクトリと単一workflow.dbを作成する", async () => {
       setupSimpleWorkflow();
-      const result = await init("test-simple");
+      const result = await init("test-simple", { title: "test-title" });
       expect(result.sessionId).toBeTruthy();
       expect(result.workflowId).toBe("test-simple");
       expect(fs.existsSync(path.join(TEST_TADO_HOME, result.sessionId))).toBe(true);
@@ -62,15 +63,15 @@ describe("セッション", () => {
 
     it("指定されたsessionIdを使用する", async () => {
       setupSimpleWorkflow();
-      const result = await init("test-simple", "my-custom-id");
+      const result = await init("test-simple", { title: "test-title", sessionId: "my-custom-id" });
       expect(result.sessionId).toBe("my-custom-id");
     });
 
     it("複数セッションを単一DBに共存させる", async () => {
       setupSimpleWorkflow();
-      const first = await init("test-simple", "session-one");
+      const first = await init("test-simple", { title: "test-title", sessionId: "session-one" });
       setupSimpleWorkflow();
-      const second = await init("test-simple", "session-two");
+      const second = await init("test-simple", { title: "test-title", sessionId: "session-two" });
       const db = new Database(getWorkflowDbPath());
       const sessions = db.query("SELECT id, session_dir FROM sessions ORDER BY id").all() as Record<
         string,
@@ -86,7 +87,7 @@ describe("セッション", () => {
 
     it("セッション行にworkflow_pathを保存する", async () => {
       setupSimpleWorkflow();
-      const result = await init("test-simple");
+      const result = await init("test-simple", { title: "test-title" });
       const db = new Database(getWorkflowDbPath());
       const session = db
         .query("SELECT workflow_path FROM sessions WHERE id = ?")
@@ -96,14 +97,16 @@ describe("セッション", () => {
     });
 
     it("存在しないワークフローファイルでEngineErrorをスローする", async () => {
-      await expect(init("/nonexistent/workflow.ts")).rejects.toThrow(EngineError);
+      await expect(init("/nonexistent/workflow.ts", { title: "test-title" })).rejects.toThrow(
+        EngineError,
+      );
     });
 
     it("IDでワークフローを解決してinitできる", async () => {
       const dir = path.join(getWorkflowsDir(), "test-simple");
       fs.mkdirSync(dir, { recursive: true });
       fs.copyFileSync(FIXTURE_WORKFLOW, path.join(dir, "index.ts"));
-      const result = await init("test-simple");
+      const result = await init("test-simple", { title: "test-title" });
       expect(result.workflowId).toBe("test-simple");
       const db = new Database(getWorkflowDbPath());
       const session = db
@@ -114,7 +117,9 @@ describe("セッション", () => {
     });
 
     it("存在しないIDで Workflow not found エラーになる", async () => {
-      await expect(init("nonexistent-id")).rejects.toThrow("Workflow not found: nonexistent-id");
+      await expect(init("nonexistent-id", { title: "test-title" })).rejects.toThrow(
+        "Workflow not found: nonexistent-id",
+      );
     });
   });
 
@@ -152,7 +157,7 @@ describe("セッション", () => {
       `;
       setupWorkflowFromFile("hook-test", hookWorkflowContent);
 
-      const result = await init("hook-test");
+      const result = await init("hook-test", { title: "test-title" });
 
       expect(fs.existsSync(path.join(TEST_TADO_HOME, result.sessionId, "_hook_before"))).toBe(true);
       expect(fs.existsSync(path.join(TEST_TADO_HOME, result.sessionId, "_hook_after"))).toBe(true);
@@ -189,7 +194,7 @@ describe("セッション", () => {
       `;
       setupWorkflowFromFile("no-hook-test", noHookWorkflowContent);
 
-      const result = await init("no-hook-test");
+      const result = await init("no-hook-test", { title: "test-title" });
       expect(result.sessionId).toBeTruthy();
     });
   });
@@ -222,7 +227,7 @@ describe("セッション", () => {
       `;
       setupWorkflowFromFile("artifact-hook-test", artifactHookWorkflowContent);
 
-      const { sessionId } = await init("artifact-hook-test");
+      const { sessionId } = await init("artifact-hook-test", { title: "test-title" });
 
       const db = new Database(getWorkflowDbPath());
       const rows = db
@@ -232,6 +237,102 @@ describe("セッション", () => {
       expect(rows[0].artifact_key).toBe("init-artifact.txt");
       expect(rows[0].step_key).toBe("step1");
       db.close();
+    });
+  });
+
+  describe("cwd/title保存", () => {
+    it("sessions.cwd に process.cwd() の絶対パスと sessions.title を保存する", async () => {
+      setupSimpleWorkflow();
+      const expectedCwd = process.cwd();
+      const result = await init("test-simple", { title: "my-title" });
+      const db = new Database(getWorkflowDbPath());
+      const row = db
+        .query("SELECT cwd, title FROM sessions WHERE id = ?")
+        .get(result.sessionId) as Record<string, unknown>;
+      expect(row.cwd).toBe(path.resolve(expectedCwd));
+      expect(row.title).toBe("my-title");
+      db.close();
+    });
+
+    it("明示的なcwdオプションが絶対パスとして保存される", async () => {
+      setupSimpleWorkflow();
+      const result = await init("test-simple", { title: "explicit-cwd", cwd: "/tmp/custom-cwd" });
+      const db = new Database(getWorkflowDbPath());
+      const row = db.query("SELECT cwd FROM sessions WHERE id = ?").get(result.sessionId) as Record<
+        string,
+        unknown
+      >;
+      expect(row.cwd).toBe(path.resolve("/tmp/custom-cwd"));
+      db.close();
+    });
+
+    it("相対cwdが絶対パスに解決されて保存される", async () => {
+      setupSimpleWorkflow();
+      const result = await init("test-simple", { title: "rel-cwd", cwd: "relative/path" });
+      const db = new Database(getWorkflowDbPath());
+      const row = db.query("SELECT cwd FROM sessions WHERE id = ?").get(result.sessionId) as Record<
+        string,
+        unknown
+      >;
+      expect(row.cwd).toBe(path.resolve("relative/path"));
+      db.close();
+    });
+  });
+
+  describe("titleバリデーション", () => {
+    it("validateTitle は 1-100文字の正常タイトルを通す", () => {
+      expect(() => validateTitle("a")).not.toThrow();
+      expect(() => validateTitle("x".repeat(100))).not.toThrow();
+      expect(() => validateTitle("hello world")).not.toThrow();
+    });
+
+    it("validateTitle は空文字でエラー", () => {
+      expect(() => validateTitle("")).toThrow("1-100");
+    });
+
+    it("validateTitle は101文字でエラー", () => {
+      expect(() => validateTitle("x".repeat(101))).toThrow("1-100");
+    });
+
+    it("validateTitle は改行 \\n を含むとエラー", () => {
+      expect(() => validateTitle("a\nb")).toThrow("newline");
+    });
+
+    it("validateTitle は復帰 \\r を含むとエラー", () => {
+      expect(() => validateTitle("a\rb")).toThrow("newline");
+    });
+
+    it("validateTitle は非文字列でエラー", () => {
+      expect(() => validateTitle(null as unknown as string)).toThrow("Invalid --title");
+      expect(() => validateTitle(undefined as unknown as string)).toThrow("Invalid --title");
+    });
+
+    it("init は --title なしでエラー", async () => {
+      setupSimpleWorkflow();
+      await expect(init("test-simple", undefined)).rejects.toThrow("Missing required --title");
+    });
+
+    it("init は空の --title でエラー", async () => {
+      setupSimpleWorkflow();
+      await expect(init("test-simple", { title: "" })).rejects.toThrow("1-100");
+    });
+
+    it("init は101文字の --title でエラー", async () => {
+      setupSimpleWorkflow();
+      await expect(init("test-simple", { title: "x".repeat(101) })).rejects.toThrow("1-100");
+    });
+
+    it("init は改行を含む --title でエラー", async () => {
+      setupSimpleWorkflow();
+      await expect(init("test-simple", { title: "a\nb" })).rejects.toThrow("newline");
+      await expect(init("test-simple", { title: "a\rb" })).rejects.toThrow("newline");
+    });
+
+    it("init はレガシーな文字列 sessionId 呼び出しで --title 必須エラー", async () => {
+      setupSimpleWorkflow();
+      await expect(
+        init("test-simple", "legacy-session-id" as unknown as { title: string }),
+      ).rejects.toThrow("Missing required --title");
     });
   });
 });

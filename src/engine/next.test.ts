@@ -43,7 +43,7 @@ function setupWorkflowFromContent(id: string, content: string): void {
 describe("next", () => {
   it("最初のステップのタスクプロンプトを返す", async () => {
     setupSimpleWorkflow();
-    const { sessionId } = await init("test-simple");
+    const { sessionId } = await init("test-simple", { title: "test-title" });
     const result = await next(sessionId);
 
     expect(result.stepKey).toBe("step1_task");
@@ -68,7 +68,7 @@ describe("next", () => {
 
   it("同一セッションへの同時実行で試行を二重に割り当てない", async () => {
     setupSimpleWorkflow();
-    const { sessionId } = await init("test-simple");
+    const { sessionId } = await init("test-simple", { title: "test-title" });
     const results = await Promise.allSettled([next(sessionId), next(sessionId)]);
 
     // A concurrent second call idempotently reissues the same prompt instead of
@@ -94,7 +94,7 @@ describe("next", () => {
 
   it("runningステップを新規アテンプトなしで冪等に再開する", async () => {
     setupSimpleWorkflow();
-    const { sessionId } = await init("test-simple");
+    const { sessionId } = await init("test-simple", { title: "test-title" });
     const first = await next(sessionId);
     expect(first.stepKey).toBe("step1_task");
     expect(first.context.attemptNumber).toBe(1);
@@ -130,7 +130,7 @@ describe("next", () => {
 
   it("リトライ後のrunningステップも冪等に再開する", async () => {
     setupSimpleWorkflow();
-    const { sessionId } = await init("test-simple");
+    const { sessionId } = await init("test-simple", { title: "test-title" });
     await next(sessionId);
     await report(sessionId, {
       stepKey: "step1_task",
@@ -164,7 +164,7 @@ describe("next", () => {
 
   it("human_gateのreviseで再実行されたステップでは pass 試行をリトライフィードバックに含めない", async () => {
     setupSimpleWorkflow();
-    const { sessionId } = await init("test-simple");
+    const { sessionId } = await init("test-simple", { title: "test-title" });
 
     // step1_task を成功させる（checkStatus='pass' の試行が残る）
     await next(sessionId);
@@ -188,7 +188,7 @@ describe("next", () => {
 
   it("human_gateのプロンプトを返す", async () => {
     setupSimpleWorkflow();
-    const { sessionId } = await init("test-simple");
+    const { sessionId } = await init("test-simple", { title: "test-title" });
 
     await next(sessionId);
 
@@ -213,7 +213,7 @@ describe("next", () => {
 
   it("並列サブタスクのプロンプトを返す", async () => {
     setupSimpleWorkflow();
-    const { sessionId } = await init("test-simple");
+    const { sessionId } = await init("test-simple", { title: "test-title" });
 
     await next(sessionId);
     await report(sessionId, {
@@ -263,7 +263,7 @@ describe("next", () => {
 
   it("完了済みセッションでEngineErrorをスローする", async () => {
     setupSimpleWorkflow();
-    const { sessionId } = await init("test-simple");
+    const { sessionId } = await init("test-simple", { title: "test-title" });
     const db = new Database(getWorkflowDbPath());
     db.run("UPDATE sessions SET status = ? WHERE id = ?", ["done", sessionId]);
     db.close();
@@ -273,7 +273,7 @@ describe("next", () => {
   describe("DBにworkflow_pathがないワークフロー", () => {
     it("nextとreportで--workflowフラグを受け付ける", async () => {
       setupSimpleWorkflow();
-      const { sessionId } = await init("test-simple");
+      const { sessionId } = await init("test-simple", { title: "test-title" });
 
       const result = await next(sessionId, FIXTURE_WORKFLOW);
       expect(result.stepKey).toBe("step1_task");
@@ -344,7 +344,7 @@ describe("next", () => {
             `;
       setupWorkflowFromContent("condition-skip-test", condition_skip_test_workflow_content);
 
-      const { sessionId } = await init("condition-skip-test");
+      const { sessionId } = await init("condition-skip-test", { title: "test-title" });
 
       // step1 executes normally
       const r1 = await next(sessionId);
@@ -389,7 +389,7 @@ describe("next", () => {
             `;
       setupWorkflowFromContent("condition-pass-test", condition_pass_test_workflow_content);
 
-      const { sessionId } = await init("condition-pass-test");
+      const { sessionId } = await init("condition-pass-test", { title: "test-title" });
       const r1 = await next(sessionId);
       expect(r1.stepKey).toBe("step1");
       expect(r1.prompt).toContain("step1 prompt");
@@ -397,7 +397,7 @@ describe("next", () => {
 
     it("conditionがundefinedのときにステップを実行する（後方互換）", async () => {
       setupSimpleWorkflow();
-      const { sessionId } = await init("test-simple");
+      const { sessionId } = await init("test-simple", { title: "test-title" });
       const r1 = await next(sessionId);
       expect(r1.stepKey).toBe("step1_task");
     });
@@ -467,7 +467,7 @@ describe("next", () => {
             `;
       setupWorkflowFromContent("multi-skip-test", multi_skip_test_workflow_content);
 
-      const { sessionId } = await init("multi-skip-test");
+      const { sessionId } = await init("multi-skip-test", { title: "test-title" });
 
       await next(sessionId);
       await report(sessionId, { stepKey: "step1", status: "completed", subagentOutput: "done" });
@@ -526,7 +526,7 @@ describe("next", () => {
             `;
       setupWorkflowFromContent("all-skip-test", all_skip_test_workflow_content);
 
-      const { sessionId } = await init("all-skip-test");
+      const { sessionId } = await init("all-skip-test", { title: "test-title" });
 
       await next(sessionId);
       await report(sessionId, { stepKey: "step1", status: "completed", subagentOutput: "done" });
@@ -601,7 +601,7 @@ describe("next", () => {
             `;
       setupWorkflowFromContent("gate-choices-test", gate_choices_test_workflow_content);
 
-      const { sessionId } = await init("gate-choices-test");
+      const { sessionId } = await init("gate-choices-test", { title: "test-title" });
 
       // Pass the gate with 'approve'
       await next(sessionId);
@@ -665,7 +665,7 @@ describe("next", () => {
             `;
       setupWorkflowFromContent("gate-execute-test", gate_execute_test_workflow_content);
 
-      const { sessionId } = await init("gate-execute-test");
+      const { sessionId } = await init("gate-execute-test", { title: "test-title" });
 
       // Gate approves → condition gateChoices['gate_step'] === 'approve' is true → step executes
       await next(sessionId);
@@ -729,7 +729,7 @@ describe("next", () => {
         condition_artifacts_test_workflow_content,
       );
 
-      const { sessionId } = await init("condition-artifacts-test");
+      const { sessionId } = await init("condition-artifacts-test", { title: "test-title" });
 
       // step1 completes WITHOUT producing the needed artifact
       await next(sessionId);
@@ -790,7 +790,7 @@ describe("next", () => {
             `;
       setupWorkflowFromContent("gate-present-test", gate_present_test_workflow_content);
 
-      const { sessionId } = await init("gate-present-test");
+      const { sessionId } = await init("gate-present-test", { title: "test-title" });
 
       // prepare step registers the issue-body.md artifact
       await next(sessionId);
@@ -811,7 +811,7 @@ describe("next", () => {
 
     it("アーティファクト未登録時に成果物なしを表示する", async () => {
       setupSimpleWorkflow();
-      const { sessionId } = await init("test-simple");
+      const { sessionId } = await init("test-simple", { title: "test-title" });
 
       await next(sessionId);
       await report(sessionId, {
@@ -857,7 +857,7 @@ describe("next", () => {
             `;
       setupWorkflowFromContent("before-step-test", before_step_test_workflow_content);
 
-      const { sessionId } = await init("before-step-test");
+      const { sessionId } = await init("before-step-test", { title: "test-title" });
       const result = await next(sessionId);
 
       expect(result.prompt).toContain("prep.md=/tmp/prep.md");
@@ -916,7 +916,7 @@ describe("next", () => {
         before_step_overwrite_test_workflow_content,
       );
 
-      const { sessionId } = await init("before-step-overwrite-test");
+      const { sessionId } = await init("before-step-overwrite-test", { title: "test-title" });
 
       // step1 registers shared.md with the OLD path
       await next(sessionId);
@@ -975,7 +975,7 @@ describe("next", () => {
             `;
       setupWorkflowFromContent("before-step-retry-test", before_step_retry_test_workflow_content);
 
-      const { sessionId } = await init("before-step-retry-test");
+      const { sessionId } = await init("before-step-retry-test", { title: "test-title" });
       const result = await next(sessionId);
       expect(result.stepKey).toBe("step1");
 
@@ -1018,7 +1018,7 @@ describe("next", () => {
         before_step_exhaust_test_workflow_content,
       );
 
-      const { sessionId } = await init("before-step-exhaust-test");
+      const { sessionId } = await init("before-step-exhaust-test", { title: "test-title" });
       await expect(next(sessionId)).rejects.toThrow(EngineError);
       await expect(next(sessionId)).rejects.toThrow("Session is aborted");
 
@@ -1065,7 +1065,9 @@ describe("next", () => {
             `;
       setupWorkflowFromContent("before-step-resume-test", before_step_resume_test_workflow_content);
 
-      const { sessionId, sessionDir } = await init("before-step-resume-test");
+      const { sessionId, sessionDir } = await init("before-step-resume-test", {
+        title: "test-title",
+      });
 
       // First next: hook runs once and registers its artifacts
       const first = await next(sessionId);
@@ -1123,7 +1125,7 @@ describe("next", () => {
         before_step_concurrent_test_workflow_content,
       );
 
-      const { sessionId } = await init("before-step-concurrent-test");
+      const { sessionId } = await init("before-step-concurrent-test", { title: "test-title" });
       const results = await Promise.allSettled([next(sessionId), next(sessionId)]);
 
       const fulfilled = results.filter((result) => result.status === "fulfilled");

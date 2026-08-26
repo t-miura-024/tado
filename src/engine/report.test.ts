@@ -43,7 +43,7 @@ function setupWorkflowFromContent(id: string, content: string): void {
 describe("レポート", () => {
   it("ステップを合格としてマークし次に進む", async () => {
     setupSimpleWorkflow();
-    const { sessionId } = await init("test-simple");
+    const { sessionId } = await init("test-simple", { title: "test-title" });
     await next(sessionId);
 
     const result = await report(sessionId, {
@@ -65,7 +65,7 @@ describe("レポート", () => {
 
   it("maxRetries内で失敗時にリトライする", async () => {
     setupSimpleWorkflow();
-    const { sessionId } = await init("test-simple");
+    const { sessionId } = await init("test-simple", { title: "test-title" });
     await next(sessionId);
 
     const result = await report(sessionId, {
@@ -88,7 +88,7 @@ describe("レポート", () => {
 
   it("maxRetries超過後にonFail abortを発動する", async () => {
     setupSimpleWorkflow();
-    const { sessionId } = await init("test-simple");
+    const { sessionId } = await init("test-simple", { title: "test-title" });
 
     for (let i = 0; i < 2; i++) {
       await next(sessionId);
@@ -119,7 +119,7 @@ describe("レポート", () => {
 
   it("human_gateのapproveをconfirmで処理する", async () => {
     setupSimpleWorkflow();
-    const { sessionId } = await init("test-simple");
+    const { sessionId } = await init("test-simple", { title: "test-title" });
 
     await next(sessionId);
     await report(sessionId, {
@@ -144,7 +144,7 @@ describe("レポート", () => {
 
   it("human_gateのreviseをconfirmで処理する", async () => {
     setupSimpleWorkflow();
-    const { sessionId } = await init("test-simple");
+    const { sessionId } = await init("test-simple", { title: "test-title" });
 
     await next(sessionId);
     await report(sessionId, {
@@ -162,7 +162,7 @@ describe("レポート", () => {
 
   it("human_gateのabortをconfirmで処理する", async () => {
     setupSimpleWorkflow();
-    const { sessionId } = await init("test-simple");
+    const { sessionId } = await init("test-simple", { title: "test-title" });
 
     await next(sessionId);
     await report(sessionId, {
@@ -179,7 +179,7 @@ describe("レポート", () => {
 
   it("human_gateへのreportを拒否する", async () => {
     setupSimpleWorkflow();
-    const { sessionId } = await init("test-simple");
+    const { sessionId } = await init("test-simple", { title: "test-title" });
 
     await next(sessionId);
     await report(sessionId, {
@@ -207,7 +207,7 @@ describe("レポート", () => {
 
   it("全ステップ完了時にセッションを完了する", async () => {
     setupSimpleWorkflow();
-    const { sessionId } = await init("test-simple");
+    const { sessionId } = await init("test-simple", { title: "test-title" });
 
     await next(sessionId);
     await report(sessionId, {
@@ -275,7 +275,7 @@ describe("レポート", () => {
             `;
       setupWorkflowFromContent("goto-test", goto_test_workflow_content);
 
-      const { sessionId } = await init("goto-test");
+      const { sessionId } = await init("goto-test", { title: "test-title" });
 
       await next(sessionId);
       const r1 = await report(sessionId, {
@@ -321,7 +321,7 @@ describe("レポート", () => {
             `;
       setupWorkflowFromContent("escalate-test", escalate_test_workflow_content);
 
-      const { sessionId } = await init("escalate-test");
+      const { sessionId } = await init("escalate-test", { title: "test-title" });
 
       await next(sessionId);
       const r1 = await report(sessionId, {
@@ -345,7 +345,7 @@ describe("レポート", () => {
   describe("アーティファクト", () => {
     it("レポート入力からアーティファクトを登録する", async () => {
       setupSimpleWorkflow();
-      const { sessionId } = await init("test-simple");
+      const { sessionId } = await init("test-simple", { title: "test-title" });
       await next(sessionId);
 
       await report(sessionId, {
@@ -399,7 +399,7 @@ describe("レポート", () => {
             `;
       setupWorkflowFromContent("after-step-test", after_step_test_workflow_content);
 
-      const { sessionId } = await init("after-step-test");
+      const { sessionId } = await init("after-step-test", { title: "test-title" });
       await next(sessionId);
       const r = await report(sessionId, {
         stepKey: "step1",
@@ -446,7 +446,7 @@ describe("レポート", () => {
             `;
       setupWorkflowFromContent("after-step-ctx-test", after_step_ctx_test_workflow_content);
 
-      const { sessionId } = await init("after-step-ctx-test");
+      const { sessionId } = await init("after-step-ctx-test", { title: "test-title" });
       await next(sessionId);
       await report(sessionId, { stepKey: "render", status: "completed", subagentOutput: "done" });
 
@@ -491,7 +491,7 @@ describe("レポート", () => {
             `;
       setupWorkflowFromContent("after-step-merge-test", after_step_merge_test_workflow_content);
 
-      const { sessionId } = await init("after-step-merge-test");
+      const { sessionId } = await init("after-step-merge-test", { title: "test-title" });
       await next(sessionId);
 
       // Report input registers out.md with the OLD path
@@ -542,7 +542,7 @@ describe("レポート", () => {
             `;
       setupWorkflowFromContent("after-step-failure-test", after_step_failure_test_workflow_content);
 
-      const { sessionId } = await init("after-step-failure-test");
+      const { sessionId } = await init("after-step-failure-test", { title: "test-title" });
       await next(sessionId);
 
       // afterStep の失敗は check には至らず、例外が report() から伝播する。
@@ -555,7 +555,7 @@ describe("レポート", () => {
   describe("subtaskResults付き並列レポート", () => {
     it("レポート時にサブタスク結果を保存する", async () => {
       setupSimpleWorkflow();
-      const { sessionId } = await init("test-simple");
+      const { sessionId } = await init("test-simple", { title: "test-title" });
 
       await next(sessionId);
       await report(sessionId, {
@@ -597,7 +597,7 @@ describe("レポート", () => {
 
     it("サブタスクの部分失敗を処理する", async () => {
       setupSimpleWorkflow();
-      const { sessionId } = await init("test-simple");
+      const { sessionId } = await init("test-simple", { title: "test-title" });
 
       await next(sessionId);
       await report(sessionId, {
@@ -662,7 +662,7 @@ describe("レポート", () => {
             `;
       setupWorkflowFromContent("check-exception-test", check_exception_test_workflow_content);
 
-      const { sessionId } = await init("check-exception-test");
+      const { sessionId } = await init("check-exception-test", { title: "test-title" });
       await next(sessionId);
 
       const r = await report(sessionId, {
@@ -744,7 +744,7 @@ describe("レポート", () => {
             `;
       setupWorkflowFromContent("revise-reset-test", revise_reset_test_workflow_content);
 
-      const { sessionId } = await init("revise-reset-test");
+      const { sessionId } = await init("revise-reset-test", { title: "test-title" });
 
       // Execute grill → prepare → gate
       await next(sessionId);
@@ -842,7 +842,7 @@ describe("レポート", () => {
             `;
       setupWorkflowFromContent("revise-full-test", revise_full_test_workflow_content);
 
-      const { sessionId } = await init("revise-full-test");
+      const { sessionId } = await init("revise-full-test", { title: "test-title" });
 
       // First pass: work → gate (revise)
       await next(sessionId);
@@ -934,7 +934,7 @@ describe("レポート", () => {
             `;
       setupWorkflowFromContent("requeue-test", requeue_test_workflow_content);
 
-      const { sessionId } = await init("requeue-test");
+      const { sessionId } = await init("requeue-test", { title: "test-title" });
 
       // execute → pass
       await next(sessionId);
@@ -987,7 +987,7 @@ describe("レポート", () => {
   describe("ステータス", () => {
     it("セッション情報を返す", async () => {
       setupSimpleWorkflow();
-      const { sessionId } = await init("test-simple");
+      const { sessionId } = await init("test-simple", { title: "test-title" });
 
       const result = status(sessionId);
 
@@ -1001,7 +1001,7 @@ describe("レポート", () => {
 
     it("進行後のステップステータスを表示する", async () => {
       setupSimpleWorkflow();
-      const { sessionId } = await init("test-simple");
+      const { sessionId } = await init("test-simple", { title: "test-title" });
 
       await next(sessionId);
       const s1 = status(sessionId);

@@ -36,7 +36,7 @@ function setupSimpleWorkflow(): void {
 
 async function reachGate(): Promise<string> {
   setupSimpleWorkflow();
-  const { sessionId } = await init("test-simple");
+  const { sessionId } = await init("test-simple", { title: "test-title" });
   await next(sessionId);
   await report(sessionId, {
     stepKey: "step1_task",
@@ -172,7 +172,7 @@ describe("confirm", () => {
 
   it("ゲート以外のステップが current の場合はEngineErrorをスローする", async () => {
     setupSimpleWorkflow();
-    const { sessionId } = await init("test-simple");
+    const { sessionId } = await init("test-simple", { title: "test-title" });
     await next(sessionId);
 
     await expect(confirm(sessionId, mockConfirmDeps("approve"))).rejects.toThrow(

@@ -27,6 +27,7 @@
   },
   "dependencies": {
     "@clack/prompts": "^1.7.0",
+    "@opentui/core": "^0.5.8",
     "commander": "^15.0.0",
     "drizzle-orm": "^0.45.2"
   },

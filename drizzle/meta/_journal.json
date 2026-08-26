@@ -15,6 +15,13 @@
       "when": 1787303169296,
       "tag": "0001_gate_events",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1787669330913,
+      "tag": "0002_sessions_cwd_title",
+      "breakpoints": true
     }
   ]
 }

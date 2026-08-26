@@ -14,6 +14,7 @@ import type { WorkflowSummary } from "../engine/workflows.ts";
 import type { ReportInput } from "../types/result.ts";
 import { installCommand } from "./install.ts";
 import { updateCommand } from "./update.ts";
+import { runDashboardCommand } from "./dashboard.ts";
 
 interface WorkflowOpts {
   workflow?: string;
@@ -21,6 +22,7 @@ interface WorkflowOpts {
 
 interface InitOpts extends WorkflowOpts {
   workflow: string;
+  title: string;
   session?: string;
 }
 
@@ -77,9 +79,14 @@ function buildProgram(): Command {
     .command("init")
     .description("Initialize a new workflow session from a workflow definition")
     .requiredOption("--workflow <id>", "Workflow ID (e.g. mt-plan-create)")
+    .requiredOption("--title <title>", "Session title (1-100 characters, no newline)")
     .option("--session <id>", "Session ID")
     .action(async (opts: InitOpts) => {
-      const result = await init(opts.workflow, opts.session);
+      const result = await init(opts.workflow, {
+        title: opts.title,
+        sessionId: opts.session,
+        cwd: process.cwd(),
+      });
       output(result);
     });
 
@@ -154,6 +161,13 @@ function buildProgram(): Command {
       } else {
         process.stdout.write(formatWorkflowTable(workflows, Boolean(opts.verbose)));
       }
+    });
+
+  program
+    .command("dashboard")
+    .description("Show workflow sessions dashboard (TUI)")
+    .action(async () => {
+      await runDashboardCommand();
     });
 
   program

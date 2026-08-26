@@ -36,9 +36,17 @@ _Avoid_: 見出し文字列を `string` に直書きすること
 _Avoid_: `string[]` のみに限定すること
 
 **PromptString**:
-行頭 `#` を含まない `string` リテラルを表す型。`T extends \`#${string}\` ? never : T` によりリテラル `"## 手順"` はコンパイルエラー、動的な `string` 変数は許可。
-_Avoid_: 行頭 `#` を含む文字列リテラル
+行頭 `#` を含まない `string` リテラルを表す型。`T extends \`#${string}\` ? never : T`によりリテラル`"## 手順"`はコンパイルエラー、動的な`string`変数は許可。
+_Avoid_: 行頭`#` を含む文字列リテラル
 
 **NextDepth**:
 `PromptSection` のネスト depth を `3→4→5→6→6` と遷移させる型レベル機構。H6でキャップする。
 _Avoid_: `depth` をランタイムのみで管理すること
+
+**起動ディレクトリ（cwd）**:
+`tado init` 実行時の `process.cwd()` を `sessions.cwd` に保存する絶対パス。既存セッションではNULLとなり、表示時に `workflowPath` の親ディレクトリで代替する。
+_Avoid_: 起動パス, 実行ディレクトリ（曖昧）
+
+**セッションタイトル**:
+`tado init --title` で人間（またはLLM）が付与する、サイドバー各タブに表示する人間可読なタイトル。`sessions.title` に保存。`WorkflowDef.id` とは別概念であり、機械的に決定しない。
+_Avoid_: ワークフロー名, workflowId（混同）
