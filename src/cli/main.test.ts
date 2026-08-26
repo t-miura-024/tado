@@ -28,11 +28,14 @@ afterEach(() => {
 describe("CLI統合", () => {
   it("init時にJSONを出力する（ID解決）", async () => {
     setupWorkflow();
-    const proc = Bun.spawn(["bun", "run", CLI_PATH, "init", "--workflow", "test-simple"], {
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
-    });
+    const proc = Bun.spawn(
+      ["bun", "run", CLI_PATH, "init", "--workflow", "test-simple", "--title", "test-title"],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
+      },
+    );
 
     const out = await new Response(proc.stdout).text();
     const err = await new Response(proc.stderr).text();
@@ -47,11 +50,14 @@ describe("CLI統合", () => {
 
   it("next時にJSONを出力する", async () => {
     setupWorkflow();
-    const initProc = Bun.spawn(["bun", "run", CLI_PATH, "init", "--workflow", "test-simple"], {
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
-    });
+    const initProc = Bun.spawn(
+      ["bun", "run", CLI_PATH, "init", "--workflow", "test-simple", "--title", "test-title"],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
+      },
+    );
     const initOut = await new Response(initProc.stdout).text();
     await initProc.exited;
     const { sessionId } = JSON.parse(initOut) as InitResult;
@@ -72,11 +78,14 @@ describe("CLI統合", () => {
 
   it("status時にJSONを出力する", async () => {
     setupWorkflow();
-    const initProc = Bun.spawn(["bun", "run", CLI_PATH, "init", "--workflow", "test-simple"], {
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
-    });
+    const initProc = Bun.spawn(
+      ["bun", "run", CLI_PATH, "init", "--workflow", "test-simple", "--title", "test-title"],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
+      },
+    );
     const initOut = await new Response(initProc.stdout).text();
     await initProc.exited;
     const { sessionId } = JSON.parse(initOut) as InitResult;
@@ -97,11 +106,14 @@ describe("CLI統合", () => {
 
   it("stdin経由でreportを処理する", async () => {
     setupWorkflow();
-    const initProc = Bun.spawn(["bun", "run", CLI_PATH, "init", "--workflow", "test-simple"], {
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
-    });
+    const initProc = Bun.spawn(
+      ["bun", "run", CLI_PATH, "init", "--workflow", "test-simple", "--title", "test-title"],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
+      },
+    );
     const initOut = await new Response(initProc.stdout).text();
     await initProc.exited;
     const { sessionId } = JSON.parse(initOut) as InitResult;
@@ -153,6 +165,177 @@ describe("CLI統合", () => {
     expect(err).toContain("--workflow");
   });
 
+  it("--title なしでエラーになる", async () => {
+    setupWorkflow();
+    const proc = Bun.spawn(["bun", "run", CLI_PATH, "init", "--workflow", "test-simple"], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
+    });
+    const err = await new Response(proc.stderr).text();
+    await proc.exited;
+
+    expect(proc.exitCode).toBe(1);
+    expect(err).toContain("--title");
+  });
+
+  it("--workflow ありで --title だけ欠けた場合も --title エラー", async () => {
+    const proc = Bun.spawn(["bun", "run", CLI_PATH, "init", "--workflow", "any"], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
+    });
+    const err = await new Response(proc.stderr).text();
+    await proc.exited;
+
+    expect(proc.exitCode).toBe(1);
+    expect(err).toContain("--title");
+  });
+
+  it("空の --title でエラーになる", async () => {
+    setupWorkflow();
+    const proc = Bun.spawn(
+      ["bun", "run", CLI_PATH, "init", "--workflow", "test-simple", "--title", ""],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
+      },
+    );
+    const err = await new Response(proc.stderr).text();
+    await proc.exited;
+
+    expect(proc.exitCode).toBe(1);
+    expect(err).toContain("Invalid --title");
+  });
+
+  it("101文字の --title でエラーになる", async () => {
+    setupWorkflow();
+    const longTitle = "x".repeat(101);
+    const proc = Bun.spawn(
+      ["bun", "run", CLI_PATH, "init", "--workflow", "test-simple", "--title", longTitle],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
+      },
+    );
+    const err = await new Response(proc.stderr).text();
+    await proc.exited;
+
+    expect(proc.exitCode).toBe(1);
+    expect(err).toContain("Invalid --title");
+  });
+
+  it("改行を含む --title でエラーになる", async () => {
+    setupWorkflow();
+    const proc = Bun.spawn(
+      ["bun", "run", CLI_PATH, "init", "--workflow", "test-simple", "--title", "a\nb"],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
+      },
+    );
+    const err = await new Response(proc.stderr).text();
+    await proc.exited;
+
+    expect(proc.exitCode).toBe(1);
+    expect(err).toContain("Invalid --title");
+  });
+
+  it("復帰を含む --title でエラーになる", async () => {
+    setupWorkflow();
+    const proc = Bun.spawn(
+      ["bun", "run", CLI_PATH, "init", "--workflow", "test-simple", "--title", "a\rb"],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
+      },
+    );
+    const err = await new Response(proc.stderr).text();
+    await proc.exited;
+
+    expect(proc.exitCode).toBe(1);
+    expect(err).toContain("Invalid --title");
+  });
+
+  it("--title 指定時に cwd と title が DB に保存される", async () => {
+    setupWorkflow();
+    const title = "my-cli-title";
+    const proc = Bun.spawn(
+      ["bun", "run", CLI_PATH, "init", "--workflow", "test-simple", "--title", title],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
+      },
+    );
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    expect(proc.exitCode).toBe(0);
+    const parsed = JSON.parse(out) as InitResult;
+    const { Database } = await import("bun:sqlite");
+    const db = new Database(`${TEST_BASE_DIR}/workflow.db`);
+    const row = db
+      .query("SELECT cwd, title FROM sessions WHERE id = ?")
+      .get(parsed.sessionId) as Record<string, unknown>;
+    expect(row.title).toBe(title);
+    expect(typeof row.cwd).toBe("string");
+    expect((row.cwd as string).length).toBeGreaterThan(0);
+    expect(path.isAbsolute(row.cwd as string)).toBe(true);
+    db.close();
+  });
+
+  it("--title と --session 同時指定で両方が保存される", async () => {
+    setupWorkflow();
+    const title = "custom-session-title";
+    const proc = Bun.spawn(
+      [
+        "bun",
+        "run",
+        CLI_PATH,
+        "init",
+        "--workflow",
+        "test-simple",
+        "--title",
+        title,
+        "--session",
+        "my-session-id",
+      ],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
+      },
+    );
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    expect(proc.exitCode).toBe(0);
+    const parsed = JSON.parse(out) as InitResult;
+    expect(parsed.sessionId).toBe("my-session-id");
+    const { Database } = await import("bun:sqlite");
+    const db = new Database(`${TEST_BASE_DIR}/workflow.db`);
+    const row = db.query("SELECT title FROM sessions WHERE id = ?").get("my-session-id") as Record<
+      string,
+      unknown
+    >;
+    expect(row.title).toBe(title);
+    db.close();
+  });
+
+  it("--title ヘルプが init --help に表示される", async () => {
+    const proc = Bun.spawn(["bun", "run", CLI_PATH, "init", "--help"], {
+      stdout: "pipe",
+      env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+
+    expect(out).toContain("--title");
+  });
+
   it("不明なコマンドでエラーになる", async () => {
     const proc = Bun.spawn(["bun", "run", CLI_PATH, "bogus"], {
       stdout: "pipe",
@@ -200,11 +383,14 @@ describe("CLI統合", () => {
 
   it("存在しないワークフローIDで Workflow not found エラーになる", async () => {
     setupWorkflow();
-    const proc = Bun.spawn(["bun", "run", CLI_PATH, "init", "--workflow", "nonexistent"], {
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
-    });
+    const proc = Bun.spawn(
+      ["bun", "run", CLI_PATH, "init", "--workflow", "nonexistent", "--title", "test-title"],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, TADO_HOME: TEST_BASE_DIR },
+      },
+    );
     const err = await new Response(proc.stderr).text();
     await proc.exited;
 

@@ -20,6 +20,8 @@ export const sessions = sqliteTable(
     workflowId: text("workflow_id").notNull(),
     workflowPath: text("workflow_path").notNull(),
     sessionDir: text("session_dir").notNull(),
+    cwd: text("cwd"),
+    title: text("title"),
     artifactDbPath: text("artifact_db_path"),
     currentStep: text("current_step"),
     status: text("status").notNull().default("running"),
