@@ -44,6 +44,18 @@ _Avoid_: tado home, ホームディレクトリ
 `WorkflowDef` に追加されるワークフローの人間可読な説明。tado-run がプロンプト内容から起動対象を推定する際の判断材料となる。
 _Avoid_: ディスクリプション（カタカナ）, 説明文
 
+**ワークフロー作成用Skill**:
+tadoのWorkflowDefを対話的に設計・生成するためのLLM向けSkill。`skills/tado-create-workflow/SKILL.md` としてライブラリに同梱し、`tado install`/`tado update` で配布される。
+_Avoid_: ワークフロー生成コマンド, workflow generator
+
+**スキャフォールド**:
+WorkflowDefの骨格（`id`/`steps`/各StepDefの `key`/`phase`/`type`/`maxRetries`/`onFail`/`task.buildPrompt`/`check` の雛形）。`buildStepPrompt` を用いたSection型対応のプロンプト雛形を含む。
+_Avoid_: テンプレート（単なる文字列置換の意味で使う場合）, ボイラープレート
+
+**検証**:
+生成したワークフローが `{TADO_HOME}/workflows/<workflow-id>/index.ts` に配置後、即座に `tado init --workflow <id> --title "<title>"` で初期化できる状態にあることを機械的に確認する工程。`tsc --noEmit` / `oxlint` / `tado init --workflow <id> --title` + `tado list --workflow --json` の3点を指す。
+_Avoid_: テスト（検証は生成直後の機械的チェックを指し、ユニットテスト全般を指さない）
+
 **ダッシュボード（TUI）**:
 `tado dashboard` で同一ターミナル内に立ち上がる、ワークフロー実行状態を視覚的に確認する参照専用のTUI画面。
 _Avoid_: Webダッシュボード, ブラウザUI

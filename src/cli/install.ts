@@ -14,7 +14,7 @@ import {
 } from "./paths.ts";
 
 const PACKAGE_SPEC = "github:t-miura-024/tado";
-const SKILL_NAMES = ["tado", "tado-run"] as const;
+const SKILL_NAMES = ["tado", "tado-run", "tado-create-workflow"] as const;
 
 /** Check that bun is available on PATH. */
 export function ensureBun(): void {
