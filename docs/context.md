@@ -26,3 +26,11 @@ _Avoid_: schema.sql
 
 **migrate()**:
 drizzle-orm のランタイム migration 適用 API。`tado init` 時に自動実行され、スキーマを最新化する。
+
+**起動ディレクトリ（cwd）**:
+`tado init` 実行時の `process.cwd()` を `sessions.cwd` に保存する絶対パス。既存セッションではNULLとなり、表示時に `workflowPath` の親ディレクトリで代替する。
+_Avoid_: 起動パス, 実行ディレクトリ（曖昧）
+
+**セッションタイトル**:
+`tado init --title` で人間（またはLLM）が付与する、サイドバー各タブに表示する人間可読なタイトル。`sessions.title` に保存。`WorkflowDef.id` とは別概念であり、機械的に決定しない。
+_Avoid_: ワークフロー名, workflowId（混同）

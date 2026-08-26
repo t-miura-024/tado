@@ -234,7 +234,18 @@ describe("ストア", () => {
       const migrations = afterRaw
         .query("SELECT COUNT(*) AS cnt FROM __drizzle_migrations")
         .get() as Record<string, unknown>;
-      expect(migrations.cnt).toBe(2);
+      expect(migrations.cnt).toBe(3);
+      const columns = afterRaw
+        .query("SELECT name FROM pragma_table_info('sessions') ORDER BY name")
+        .all() as { name: string }[];
+      const columnNames = columns.map((c) => c.name);
+      expect(columnNames).toContain("cwd");
+      expect(columnNames).toContain("title");
+      const migratedSession = afterRaw
+        .query("SELECT cwd, title FROM sessions WHERE id = ?")
+        .get("sid-existing") as Record<string, unknown>;
+      expect(migratedSession.cwd).toBeNull();
+      expect(migratedSession.title).toBeNull();
       afterRaw.close();
       db.$client.close();
     });

@@ -25,7 +25,45 @@ function generateSessionId(): string {
   return `${YYYY}${MM}${DD}-${HH}${mm}${ss}-${rand}`;
 }
 
-export async function init(workflowId: string, sessionId?: string): Promise<InitResult> {
+export interface InitOptions {
+  title: string;
+  sessionId?: string;
+  cwd?: string;
+}
+
+export function validateTitle(title: unknown): asserts title is string {
+  if (typeof title !== "string") {
+    throw new EngineError("Invalid --title: must be a string (1-100 characters, no newline)");
+  }
+  if (title.length < 1 || title.length > 100) {
+    throw new EngineError("Invalid --title: must be 1-100 characters");
+  }
+  if (title.includes("\n") || title.includes("\r")) {
+    throw new EngineError("Invalid --title: must not contain newline");
+  }
+}
+
+export async function init(
+  workflowId: string,
+  opts: InitOptions | string | undefined,
+): Promise<InitResult> {
+  // Normalize legacy string sessionId calls (pre-M1) to missing-title error
+  let title: string | undefined;
+  let sessionId: string | undefined;
+  let cwd: string | undefined;
+  if (typeof opts === "string") {
+    throw new EngineError("Missing required --title: 1-100 characters, no newline");
+  } else if (opts != null && typeof opts === "object") {
+    title = (opts as InitOptions).title;
+    sessionId = (opts as InitOptions).sessionId;
+    cwd = (opts as InitOptions).cwd;
+  } else if (opts === undefined) {
+    throw new EngineError("Missing required --title: 1-100 characters, no newline");
+  } else {
+    throw new EngineError("Invalid --title: must be a string (1-100 characters, no newline)");
+  }
+  validateTitle(title);
+
   if (isPathLike(workflowId)) {
     throw new EngineError(
       `Invalid workflow ID: ${workflowId} (must not contain path separators; use workflow ID like "mt-plan-create")`,
@@ -43,12 +81,16 @@ export async function init(workflowId: string, sessionId?: string): Promise<Init
   const db = openDb();
   migrateDb(db);
 
+  const resolvedCwd = path.resolve(cwd ?? process.cwd());
+
   db.insert(sessions)
     .values({
       id: sid,
       workflowId: def.id,
       workflowPath: resolvedPath,
       sessionDir,
+      cwd: resolvedCwd,
+      title,
       status: "running",
     })
     .run();

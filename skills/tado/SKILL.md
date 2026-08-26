@@ -25,14 +25,15 @@ tado (共有エンジン)        │
 ### init
 
 ```bash
-tado init --workflow <id> [--session <id>]
+tado init --workflow <id> --title "<title>" [--session <id>]
 ```
 
-`{TADO_HOME}/workflows/<id>/index.ts` からワークフロー定義を解決してセッションを初期化する。存在しない ID の場合は `Workflow not found: <id> (tried {TADO_HOME}/workflows/<id>/index.ts)` と利用可能ワークフロー一覧（ID + description）を併記してエラーになる。
+`{TADO_HOME}/workflows/<id>/index.ts` からワークフロー定義を解決してセッションを初期化する。`--title` は必須（1-100文字、改行不可）。存在しない ID の場合は `Workflow not found: <id> (tried {TADO_HOME}/workflows/<id>/index.ts)` と利用可能ワークフロー一覧（ID + description）を併記してエラーになる。
 
 - 単一の `workflow.db` を `{TADO_HOME}/` に作成（デフォルトは `~/.tado/`、`TADO_HOME` で変更可能）
 - セッションディレクトリ `{TADO_HOME}/{sessionId}/` を成果物置き場として作成
 - sessions/steps テーブルを初期化
+- `sessions.cwd` に `process.cwd()` の絶対パス、`sessions.title` に指定タイトルを保存
 - フック（beforeInit/afterInit）を実行
 - セッションIDを stdout に JSON で出力
 
@@ -152,6 +153,20 @@ tado status --session <id>
 ```
 
 セッションの現在状態を stdout に JSON で出力する。
+
+### dashboard
+
+```bash
+tado dashboard
+```
+
+同一ターミナルで参照専用のTUIを起動する。2カラム（サイドバー垂直タブ + メインコンテンツ）でセッション一覧と進捗フロー図・履歴・成果物を一画面で確認できる。
+
+- サイドバー: 起動ディレクトリbasename / 進捗率 `passed/total` / ステータス色（running=青● / paused=黄◐ / done=緑✔ / aborted=赤✘）/ タイトル
+- メイン: フロー図（`phase/key/type`、status色、currentStep太線、`skipped (condition false)` 灰色単線枠＋ラベル）、履歴（`step_attempts`+`gate_events` 最新20件）、成果物（`artifactKey: filePath (存在✓/欠損✗)`）
+- 成果物プレビュー: `Enter` で展開、`.md/.txt/.json/.yaml/.yml/.toml/.ts/.js/.tsx/.jsx/.sql/.css/.html` の13種のみ先頭50行/8KBまで等幅表示、非対応やバイナリ（先頭1KBに0x00含む）は `プレビュー非対応: <reason>` と表示
+- 操作: `j/k` / `↑/↓` でセッション選択、`Tab` でフォーカス切替、`Enter` でプレビュー、`r` で再読込、`q` / `Ctrl+C` で終了（1秒ポーリング）
+- 警告: DB不在・0件・`workflow file not found` は画面内に警告を表示
 
 ## ワークフロー定義の作成
 
