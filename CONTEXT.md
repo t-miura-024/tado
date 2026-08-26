@@ -53,12 +53,8 @@ WorkflowDefの骨格（`id`/`steps`/各StepDefの `key`/`phase`/`type`/`maxRetri
 _Avoid_: テンプレート（単なる文字列置換の意味で使う場合）, ボイラープレート
 
 **検証**:
-生成した `workflow.ts` が即座に `tado init` で初期化できる状態にあることを機械的に確認する工程。`tsc --noEmit` / `oxlint` / `tado init --workflow` の3点を指す。
+生成したワークフローが `{TADO_HOME}/workflows/<workflow-id>/index.ts` に配置後、即座に `tado init --workflow <id> --title "<title>"` で初期化できる状態にあることを機械的に確認する工程。`tsc --noEmit` / `oxlint` / `tado init --workflow <id> --title` + `tado list --workflow --json` の3点を指す。
 _Avoid_: テスト（検証は生成直後の機械的チェックを指し、ユニットテスト全般を指さない）
-
-**ワークフローSkill**:
-tadoのワークフロー（`workflow.ts`）をLLMから呼び出し可能にするための薄いSkill。`SKILL.md` が `tado-run --workflow ./workflow.ts` への委譲を記述し、`resolveSkillsDir(tool, scope)/<skill-name>/` 配下に `SKILL.md` と `workflow.ts` を同居させる。
-_Avoid_: ワークフローファイル（Skill化されていない `workflow.ts` 単体）, プラグイン
 
 **ダッシュボード（TUI）**:
 `tado dashboard` で同一ターミナル内に立ち上がる、ワークフロー実行状態を視覚的に確認する参照専用のTUI画面。

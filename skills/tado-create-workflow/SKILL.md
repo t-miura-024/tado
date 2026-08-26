@@ -1,13 +1,13 @@
 ---
 name: tado-create-workflow
-description: tadoのWorkflowDefを対話的に設計・生成するためのLLM向けSkill。grill思想のラウンド制ヒアリングでワークフローをスキャフォールドし、workflow.ts + SKILL.md の2ファイルセットを生成する。
+description: tadoのWorkflowDefを対話的に設計し、{TADO_HOME}/workflows/<name>/index.ts へ単体配置としてスキャフォールドする軽量Skill。grill思想のラウンド制ヒアリングでワークフローを生成する。
 ---
 
 # tado-create-workflow
 
-tado の `WorkflowDef` を対話的に設計し、`workflow.ts` + `SKILL.md` の2ファイルセットとしてスキャフォールドする軽量 Skill です。
+tado の `WorkflowDef` を対話的に設計し、`{TADO_HOME}/workflows/<workflow-id>/index.ts` へ単体配置としてスキャフォールドする軽量 Skill です。
 
-本 Skill は LLM オーケストレーション型であり、tado エンジン駆動（`workflow.ts` を持つワークフロー）は持たない。ワークフローを作るためにワークフローを走らせる循環を避けるためである。生成されたワークフローは `tado-run` 経由で即座に実行可能になる。
+本 Skill は LLM オーケストレーション型であり、tado エンジン駆動（`workflow.ts` を持つワークフロー）は持たない。ワークフローを作るためにワークフローを走らせる循環を避けるためである。生成されたワークフローはレジストリ配置後に `tado init --workflow <id> --title` で即座に初期化できる。
 
 ## 前提
 
@@ -15,31 +15,29 @@ tado の `WorkflowDef` を対話的に設計し、`workflow.ts` + `SKILL.md` の
 - 既存の `string[]` 呼び出しは後方互換で動作することを担保する。
 - 生成される雛形の唯一の参照は `examples/simple-workflow.ts` とする。`docs/adr` の解説は本 Skill に重複させない。
 - 型は `src/types/workflow-def.ts`、`prompt` は `src/prompt.ts` を正とする。
+- 生成物は Skill化しない。ワークフローの集約場所は `{TADO_HOME}/workflows/<name>/index.ts`（`src/engine/store.ts:48 getWorkflowsDir` / `src/engine/store.ts:52 resolveWorkflowPath`）が正で、`skills` 配下への Skill 分散配置は行わない。
 
 ## 参照ファイル
 
-- `examples/simple-workflow.ts` — 唯一の雛形参照。`WorkflowDef` の最小構成（`task` → `human_gate`）を示す。
+- `examples/simple-workflow.ts` — 唯一の雛形参照。`WorkflowDef` の最小構成（`task` → `human_gate`）を示す。コメントの `tado init` 例は本Skillの前提（ID解決）に合わせて読み替える。
 - `src/types/workflow-def.ts` — `WorkflowDef` / `StepDef` / `TaskStepDef` / `HumanGateStepDef` / `ParallelStepDef` / `SubtaskDef` / `OnFailStrategy` の型定義。
 - `src/prompt.ts` — `buildStepPrompt` / `PromptString` / `PromptSection` / `PromptItem` / `StepPromptSpec` の定義とレンダラー。
-- `src/cli/paths.ts` — `TOOLS` / `SCOPES` / `resolveSkillsDir` / `findInstalledLocations` の配布機構。
+- `src/engine/store.ts` — `getTadoHome` / `getWorkflowsDir` / `resolveWorkflowPath` の集約機構。
 
 ## 出力先解決
 
-生成成果物の出力先は必ずツール + スコープ + Skill 名の3要素で解決し、デフォルトパスや分離型配置は用いない。
+生成成果物の出力先は `{TADO_HOME}/workflows/<workflow-id>/index.ts` への単体配置とし、旧来の `resolveSkillsDir(tool, scope)/<skill-name>/` への Skill 同居配置は用いない。
 
 ### 解決手順
 
-1. **ツール選択**: `findInstalledLocations(cwd, home)` を呼び出し、インストール済みの `InstallLocation[]`（各要素は `tool` / `scope` / `dir`）を列挙する。`src/cli/paths.ts` の `TOOLS`（`claude-code` / `opencode` / `codex` / `cursor` の4ツール）と `SCOPES`（`user` / `project`）の8パターンが対象。インストール済みの中からユーザーに選択させる。未インストールのツールは選択肢に含めない。
-
-2. **スコープ選択**: `user` / `project` のいずれかを必ず選択させる。デフォルト値は設けない。`src/cli/paths.ts` の `SCOPES` を参照する。
-
-3. **Skill 名決定**:
+1. **workflow id 決定**:
    - ケバブケース（`^[a-z0-9-]+$`）で検証する。不正な場合はエラー表示し再入力を求める。
-   - 既存チェック: `resolveSkillsDir(tool, scope)/<skill-name>` が既に存在する場合は重複エラーとして表示し、再入力を求める。
+   - `WorkflowDef.id` とディレクトリ名（`<workflow-id>`）が一致することを検証する。不一致は `listWorkflows()` で警告・スキップされ一覧に現れない。
+   - 既存チェック: `{TADO_HOME}/workflows/<workflow-id>` が既に存在する場合は重複エラーとして表示し、再入力を求める。
    - LLM からワークフロー目的に基づく具体的な候補3案を提案する。例: ワークフロー目的が「コードレビュー自動化」なら `code-review-flow` / `review-pipeline` / `auto-review-workflow` のように目的に即した3案を提示する。ユーザーは候補から選ぶか、独自の名前を入力できる。
-   - 既存ディレクトリが存在する場合（`resolveSkillsDir(...) + "/" + skillName` が存在する場合）は上書き確認を挟む。上書きする場合は明示的に確認を取る。
+   - 既存ディレクトリが存在する場合は上書き確認を挟む。
 
-4. **出力先確定**: `resolveSkillsDir(tool, scope)/<skill-name>/` の同居型とする。同ディレクトリ配下に `SKILL.md` と `workflow.ts` を同居させ、`SKILL.md` からは `./workflow.ts` の相対参照とする。`src/cli/paths.ts` の `resolveSkillsDir` を使用する。
+2. **出力先確定**: `{TADO_HOME}/workflows/<workflow-id>/index.ts`（`getWorkflowsDir()` 解決）へ単一ファイルを生成する。`src/engine/store.ts` の `getWorkflowsDir` / `getTadoHome` を使用する。補助ファイルが必要な場合は同ディレクトリ配下に配置し `index.ts` から相対 import で参照する。
 
 ## 手順（grill 思想のラウンド制）
 
@@ -84,15 +82,15 @@ tado の `WorkflowDef` を対話的に設計し、`workflow.ts` + `SKILL.md` の
 
 ## スキャフォールド生成
 
-上記3ラウンドのヒアリング結果に基づき、以下の骨格を持つ `WorkflowDef` を生成する。
+上記3ラウンドのヒアリング結果に基づき、以下の骨格を持つ `WorkflowDef` を `{TADO_HOME}/workflows/<workflow-id>/index.ts` へ生成する。
 
 ### WorkflowDef の骨格
 
 ```typescript
-import { buildStepPrompt } from "../src/prompt.ts"; // または適切な相対パス
-import type { WorkflowDef } from "../src/types/workflow-def.ts";
-import type { CheckCtx, PromptCtx } from "../src/types/context.ts";
-import type { CheckResult } from "../src/types/result.ts";
+import { buildStepPrompt } from "tado/prompt";
+import type { WorkflowDef } from "tado";
+import type { CheckCtx, PromptCtx } from "tado";
+import type { CheckResult } from "tado";
 
 const def: WorkflowDef = {
   id: "<workflow-id>",
@@ -116,6 +114,7 @@ export default def;
 - `human_gate` 雛形: `presentArtifacts` / `choices`（`value` / `label` / `desc`）/ `reviseTargetStep` を含む。
 - `parallel` の `subtasks` 雛形: 各 subtask の `key` / `subagentType` / `buildPrompt` を含む。
 - `condition` / `beforeStep` / `afterStep` は Round 3 で「有り」とされた場合のみ雛形を含め、「無し」の場合はコメントで利用例を示す程度に留める。
+- `import from "tado"` 解決は `{TADO_HOME}/node_modules/tado`（`getTadoHome()` 配下）を前提とし、相対パス `../src/prompt.ts` は用いない。
 - 参照は `examples/simple-workflow.ts` と `src/types/workflow-def.ts` / `src/prompt.ts` のみとする。`docs/adr` の解説は重複させない。
 
 ### 型とプロンプトの正
@@ -125,50 +124,23 @@ export default def;
 
 ## 生成成果物
 
-出力先 `resolveSkillsDir(tool, scope)/<skill-name>/` 配下に以下の2ファイルセットを生成する（同居型）:
+`{TADO_HOME}/workflows/<workflow-id>/index.ts` へ単一ファイルを生成する。旧来の `resolveSkillsDir(tool,scope)/<skill-name>/` への `workflow.ts + SKILL.md` 同居は行わない。
 
-### 1. `workflow.ts`
+生成後は `tado list --workflow --json` で一覧に現れることを確認し、起動は `tado init --workflow <workflow-id> --title "<title>"` で行う（`--title` は 1-100文字、改行不可で必須）。
 
-上記スキャフォールド生成で作成した `WorkflowDef` の実装ファイル。`export default def` でワークフロー定義をエクスポートする。
+```bash
+tado list --workflow --json
+# → [{"id":"<workflow-id>","description":"...","path":"..."}]
 
-### 2. `SKILL.md`
+tado init --workflow <workflow-id> --title "<title>"
+# → {"sessionId":"...","workflowId":"<id>"}
 
-`tado-run --workflow ./workflow.ts` への薄い委譲として機能する Skill 定義ファイル。
-
-```markdown
----
-name: <skill-name>
-description: <Round 1 で確定したワークフロー目的>
----
-
-# <skill-name>
-
-<ワークフローの目的と利用シナリオの説明>
-
-## 起動手順
-
-\`\`\`bash
-tado init --workflow ./workflow.ts
-\`\`\`
-
-\`\`\`bash
 tado next --session <id>
-
 # → プロンプトに従いステップを実行
 
 echo '{"stepKey":"...","status":"completed","subagentOutput":"..."}' | tado report --session <id>
-
 # → 次のステップへ（human_gate の場合は tado confirm --session <id> を人間に依頼）
-
-\`\`\`
-
-ワークフロー本体は同ディレクトリの \`./workflow.ts\` を参照する。
 ```
-
-- frontmatter に `name` / `description` を含める。
-- 起動手順として `tado init --workflow ./workflow.ts` → `tado next` / `report` サイクルを明記する。
-- `workflow.ts` への相対参照は `./workflow.ts` とする。
-- 本 Skill は `tado-run` の汎用ランナー機構に委譲する薄いラッパーであり、ワークフロー固有のロジックは `workflow.ts` に集約する。`tado-run` の詳細は `skills/tado-run/SKILL.md` を参照。
 
 ## 検証手順
 
@@ -191,24 +163,25 @@ oxfmt --check
 
 Lint エラー・Format 差分が0件であることを確認する。エラーがある場合はエラー内容を報告する。
 
-### 3. `tado init --workflow <生成ファイル>`（初期化可能であることを確認）
+### 3. `tado list` と `tado init`（レジストリ登録と初期化の検証）
 
 ```bash
-tado init --workflow <resolveSkillsDir(tool, scope)/<skill-name>/workflow.ts>
+tado list --workflow --json | grep <workflow-id>
+tado init --workflow <workflow-id> --title "<title>"
 ```
 
-ワークフローが正常に初期化できることを確認する。セッションIDが返却されれば成功。
+`list` で生成ワークフローが一覧に含まれ、`init` でセッションIDが返却されれば成功。`tado dashboard` で視覚的に進捗が確認できることを補足してもよい。
 
 ### 失敗時の対応
 
 - いずれかの検証が失敗した場合は、失敗内容と修正案を提示すること。
 - LLM が勝手に修正ループに入り自動リトライしないこと。修正案を提示した上で、ユーザーに修正の判断を委ねる。
-- 既存の配布機構（`paths.ts:TOOLS` / `SCOPES` / `resolveSkillsDir` / `findInstalledLocations`）と検証コマンド（`tsc --noEmit` / `oxlint` / `tado init`）を再利用し、新たな抽象化や汎用ユーティリティ（`withPrefix` 等）は追加しない。
+- 既存の検証コマンド（`tsc --noEmit` / `oxlint` / `tado list` / `tado init`）を再利用し、新たな抽象化や汎用ユーティリティ（`withPrefix` 等）は追加しない。
 
 ## 注意事項
 
 - 本 Skill は軽量な LLM オーケストレーション型とし、tado エンジン駆動のワークフローは持たない。
 - 生成される雛形は `examples/simple-workflow.ts` を唯一の参照とし、`docs/adr` の解説は重複させない。
 - Section 型を前提とし、`string` に行頭 `#` を含む記法は生成しない。既存の `string[]` 呼び出しは後方互換で動作することを担保する。
-- 出力先は必ずツール + スコープ + Skill 名の3要素で解決し、デフォルトパスや分離型配置は用いない。
-- 新たな抽象化や汎用ユーティリティは追加せず、既存の `src/cli/paths.ts` と検証コマンドを再利用する。
+- 出力先は `{TADO_HOME}/workflows/<workflow-id>/index.ts` への単体配置とし、旧来のデフォルトパスや分離型配置、`resolveSkillsDir` による Skill 分散配置は用いない。
+- 新たな抽象化や汎用ユーティリティは追加せず、既存の `src/engine/store.ts`（`getWorkflowsDir`/`resolveWorkflowPath`）と検証コマンドを再利用する。

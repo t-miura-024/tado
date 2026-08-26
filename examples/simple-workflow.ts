@@ -5,11 +5,15 @@
  * このファイルを雛形にして、steps を追加・編集してください。
  *
  * 使い方:
- *   tado init --workflow examples/simple-workflow.ts
+ *   # レジストリへ配置（初回のみ）: {TADO_HOME}/workflows/simple-workflow/index.ts にコピー
+ *   tado list --workflow --json   # 一覧に simple-workflow が現れることを確認
+ *   tado init --workflow simple-workflow --title "example"
  *   tado next --session <id>
  *
  * step2_approve（human_gate）に到達したら、ユーザー自身の端末で次を実行する:
  *   tado confirm --session <id>
+ *
+ * 生成ワークフロー（本Skillが生成する雛形）は `import from "tado"`（`{TADO_HOME}/node_modules/tado` 解決）を使用します。本 example は開発用のため `../src/prompt.ts` の相対 import のままです。
  */
 import { buildStepPrompt } from "../src/prompt.ts";
 import type { WorkflowDef } from "../src/types/workflow-def.ts";
