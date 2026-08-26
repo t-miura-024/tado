@@ -101,37 +101,50 @@ describe("buildStepPrompt", () => {
     expect(prompt.indexOf("## 方針")).toBeLessThan(prompt.indexOf("## 出力"));
   });
 
-  // --- Section型 追加テスト ---
+  // --- Section型 追加ケース ---
 
-  it("ネスト Section が ###→#### と正しくレンダリングされる", () => {
+  it("ネスト Section が ### → #### とレンダリングされる（完了条件1）", () => {
     const prompt = buildStepPrompt({
-      purpose: [
-        "概要",
-        { title: "背景", content: ["背景の説明", { title: "詳細", content: ["詳細の説明"] }] },
+      purpose: ["p"],
+      criteria: ["c"],
+      approach: [
+        {
+          title: "修正ソース",
+          content: ["1. must指摘", { title: "存在確認", content: ["- agent-review.json"] }],
+        },
       ],
-      criteria: ["条件"],
-      approach: ["方針"],
-      output: ["出力"],
+      output: ["o"],
     });
 
-    expect(prompt).toContain("## 目的\n\n概要\n### 背景\n背景の説明\n#### 詳細\n詳細の説明");
+    expect(prompt).toContain("### 修正ソース");
+    expect(prompt).toContain("#### 存在確認");
+    expect(prompt).toContain("- agent-review.json");
+    // 深さ検証: 修正ソースの直後に #### 存在確認が来る
+    expect(prompt.indexOf("### 修正ソース")).toBeLessThan(prompt.indexOf("#### 存在確認"));
   });
 
-  it("H6キャップ: 6階層超で ###### 止まり", () => {
-    const prompt = buildStepPrompt({
-      purpose: [
+  it("H6キャップで ####### が出ない（完了条件4）", () => {
+    // L1(###) → L2(####) → L3(#####) → L4(######) → L5(######) → L6(######) → L7(######)
+    const deep: any = {
+      title: "L1",
+      content: [
         {
-          title: "L3",
+          title: "L2",
           content: [
             {
-              title: "L4",
+              title: "L3",
               content: [
                 {
-                  title: "L5",
+                  title: "L4",
                   content: [
                     {
-                      title: "L6",
-                      content: [{ title: "L7cap", content: ["深い内容"] }],
+                      title: "L5",
+                      content: [
+                        {
+                          title: "L6",
+                          content: [{ title: "L7", content: ["leaf"] }],
+                        },
+                      ],
                     },
                   ],
                 },
@@ -140,60 +153,149 @@ describe("buildStepPrompt", () => {
           ],
         },
       ],
-      criteria: ["条件"],
-      approach: ["方針"],
-      output: ["出力"],
+    };
+    const prompt = buildStepPrompt({
+      purpose: [deep],
+      criteria: ["c"],
+      approach: ["a"],
+      output: ["o"],
     });
 
-    // H2(##) → H3(###) → H4(####) → H5(#####) → H6(######) → H6(###### cap)
-    expect(prompt).toContain("### L3");
-    expect(prompt).toContain("#### L4");
-    expect(prompt).toContain("##### L5");
-    expect(prompt).toContain("###### L6");
-    expect(prompt).toContain("###### L7cap");
     expect(prompt).not.toContain("#######");
+    expect(prompt).toContain("### L1");
+    expect(prompt).toContain("#### L2");
+    expect(prompt).toContain("##### L3");
+    expect(prompt).toContain("###### L4");
+    expect(prompt).toContain("###### L5");
+    expect(prompt).toContain("###### L6");
+    expect(prompt).toContain("###### L7");
+    expect(prompt).toContain("leaf");
   });
 
   it("空 content は見出しのみ出力する", () => {
     const prompt = buildStepPrompt({
-      purpose: ["概要", { title: "空セクション", content: [] }],
-      criteria: ["条件"],
-      approach: ["方針"],
-      output: ["出力"],
+      purpose: [{ title: "見出し", content: [] }],
+      criteria: ["c"],
+      approach: ["a"],
+      output: ["o"],
     });
 
-    expect(prompt).toContain("### 空セクション");
-    // 見出しの直後に余分なエラーや空行の異常がないこと
-    expect(prompt).toContain("## 目的\n\n概要\n### 空セクション");
+    expect(prompt).toContain("### 見出し");
+    // content が空なので見出し直後に別セクションが続く（leaf等の余計な出力なし）
+    expect(prompt).toContain("### 見出し\n\n## 完了条件");
   });
 
-  it("既存 string[] 呼び出しの後方互換: string のみでも正しくレンダリングされる", () => {
+  it("手動 ### の string が素通しされる（完了条件6）", () => {
+    // 行頭 # のリテラルは PromptString で型エラーになるため、動的 string として検証（ランタイムは素通し）
+    const manual: string = "### 手動見出し";
     const prompt = buildStepPrompt({
-      purpose: ["タスクを実行する", "2行目"],
-      criteria: ["条件1", "条件2"],
-      approach: ["手順1"],
-      output: ["出力1"],
-      policy: ["注意"],
+      purpose: [manual, "- item"],
+      criteria: ["c"],
+      approach: ["a"],
+      output: ["o"],
     });
 
-    expect(prompt).toContain("## 目的\n\nタスクを実行する\n2行目");
-    expect(prompt).toContain("## 完了条件\n\n条件1\n条件2");
-    expect(prompt).not.toContain("###");
+    expect(prompt).toContain("### 手動見出し");
+    expect(prompt).toContain("- item");
   });
 
-  it("Section 内の Markdown 素通し: Section content の string も raw で出力される", () => {
+  it("動的 string 変数が許可され正しくレンダリングされる（後方互換）", () => {
+    const s: string = "dynamic";
     const prompt = buildStepPrompt({
-      purpose: [
+      purpose: [s],
+      criteria: ["c"],
+      approach: ["a"],
+      output: ["o"],
+    });
+
+    expect(prompt).toContain("dynamic");
+  });
+
+  // --- スナップショットテスト: レンダリング結果全体の一括網羅 ---
+
+  it("全セクション・記法・ネスト・H6キャップを含むレンダリング全体をスナップショット化する", () => {
+    // 動的 string 変数（リテラル型ではないため行頭 # 制約を型レベルでは検査できない = 許可）
+    const dynamicItem: string = "- dynamic: 実行時に入れ替わる値";
+    const dynamicSectionTitle: string = "動的見出し";
+    // H6キャップ検証用: 動的 any で L1(###)〜L7 までネストさせる
+    const deepChain: any = {
+      title: "階層 L1",
+      content: [
         {
-          title: "手順",
-          content: ["1. 最初に確認する", "", "```bash", "ls -la", "```", "- 箇条書き"],
+          title: "階層 L2",
+          content: [
+            {
+              title: "階層 L3",
+              content: [
+                {
+                  title: "階層 L4",
+                  content: [
+                    {
+                      title: "階層 L5",
+                      content: [
+                        {
+                          title: "階層 L6",
+                          content: [{ title: "階層 L7", content: ["最深部の本文"] }],
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
         },
       ],
-      criteria: ["条件"],
-      approach: ["方針"],
-      output: ["出力"],
+    };
+
+    const prompt = buildStepPrompt({
+      purpose: [
+        "計画 Issue の残ステップを順に完了させる。",
+        "",
+        "1. tado status でセッション状態を確認",
+        "2. 未完了ステップを report 付きで進める",
+        "",
+        "- 判断に迷ったら plan Issue にコメントする",
+        dynamicItem,
+      ],
+      criteria: [
+        {
+          title: "ゲート条件",
+          content: [
+            "全ステップの履歴が completed",
+            {
+              title: "チェック内容",
+              content: ["bun test が通る", { title: "静的解析", content: ["tsc --noEmit"] }],
+            },
+          ],
+        },
+      ],
+      approach: [
+        deepChain,
+        { title: "見出しのみのセクション", content: [] },
+        "```bash",
+        "tado next --session <id>",
+        "```",
+      ],
+      output: [{ title: dynamicSectionTitle, content: ["生成物のパスを報告する"] }],
+      policy: ["スコープ外のファイルは変更しない", "既存テストを壊さない"],
+      input: ["plan Issue 本文", "hunk コメント一覧"],
     });
 
-    expect(prompt).toContain("### 手順\n1. 最初に確認する\n\n```bash\nls -la\n```\n- 箇条書き");
+    expect(prompt).toMatchSnapshot();
   });
 });
+
+// --- 型テスト: 行頭 # は型で拒否されることを検証（@ts-expect-error は直後の行にエラーを要求するため1行で記述） ---
+// @ts-expect-error 行頭 # を含む string リテラルは拒否
+buildStepPrompt({ purpose: ["## 手順"], criteria: ["c"], approach: ["a"], output: ["o"] });
+// prettier-ignore
+// @ts-expect-error title も行頭 # は拒否
+// （折り返すと @ts-expect-error の効く行がずれるため1行を維持）
+buildStepPrompt({ purpose: [{ title: "## 手順", content: [] }], criteria: ["c"], approach: ["a"], output: ["o"] });
+// @ts-expect-error string で見出しを書くのは拒否（Section で書くことを強制）
+buildStepPrompt({ purpose: ["#### 深い"], criteria: ["c"], approach: ["a"], output: ["o"] });
+
+// 動的 string は許可（エラーにならないことの明示）:
+const _dynamicString: string = "dynamic-allowed";
+buildStepPrompt({ purpose: [_dynamicString], criteria: ["c"], approach: ["a"], output: ["o"] });
