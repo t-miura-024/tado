@@ -3,7 +3,12 @@ import * as path from "node:path";
 import { createCliRenderer } from "@opentui/core";
 import type { SessionRow } from "../engine/schema.ts";
 import { getWorkflowDbPath } from "../engine/store.ts";
-import { checkWorkflowFileExists, loadDashboardSnapshot } from "./store.ts";
+import {
+  checkWorkflowFileExists,
+  DEFAULT_SESSION_LIMIT,
+  MAX_SESSION_LIMIT,
+  loadDashboardSnapshot,
+} from "./store.ts";
 import { renderDashboard, type DashboardViewState } from "./ui.ts";
 import { selectInitialSession, buildExistsMap, ARTIFACT_FOLD_THRESHOLD } from "./logic.ts";
 import { logDebug, logError, logInfo, logWarn } from "./logger.ts";
@@ -11,7 +16,8 @@ import { logDebug, logError, logInfo, logWarn } from "./logger.ts";
 export async function runDashboard(): Promise<void> {
   const launchCwd = process.cwd();
   logInfo("dashboard_started", { detail: { launchCwd } });
-  const snapshot = loadDashboardSnapshot(launchCwd);
+  let displayCount = DEFAULT_SESSION_LIMIT;
+  const snapshot = loadDashboardSnapshot(launchCwd, undefined, { limit: displayCount });
 
   let selectedIndex = 0;
   if (snapshot.sessions.length > 0) {
@@ -132,6 +138,7 @@ export async function runDashboard(): Promise<void> {
     }
     return {
       sessions: currentSnapshot.sessions,
+      totalSessions: currentSnapshot.totalSessions,
       stepsBySession: currentSnapshot.stepsBySession,
       selectedIndex: clampIndex(currentSelectedIndex, currentSnapshot.sessions.length),
       dbMissing: currentSnapshot.dbMissing,
@@ -225,9 +232,12 @@ export async function runDashboard(): Promise<void> {
     try {
       const prevId = currentSnapshot.sessions[currentSelectedIndex]?.id;
       const focusId = prevId;
-      const nextSnap = loadDashboardSnapshot(launchCwd, focusId ?? undefined);
+      const nextSnap = loadDashboardSnapshot(launchCwd, focusId ?? undefined, {
+        limit: displayCount,
+      });
       logDebug("snapshot_loaded", {
         sessionsCount: nextSnap.sessions.length,
+        totalSessions: nextSnap.totalSessions,
         dbMissing: nextSnap.dbMissing,
         error: nextSnap.error,
       });
@@ -285,6 +295,36 @@ export async function runDashboard(): Promise<void> {
         // fallback also failed; already logged above
       }
     }
+  };
+
+  const tryExpandDisplay = (): boolean => {
+    if (
+      currentSnapshot.totalSessions > currentSnapshot.sessions.length &&
+      displayCount < MAX_SESSION_LIMIT
+    ) {
+      const prev = displayCount;
+      displayCount = Math.min(displayCount + DEFAULT_SESSION_LIMIT, MAX_SESSION_LIMIT);
+      logInfo("display_count_expanded", {
+        detail: { from: prev, to: displayCount, totalSessions: currentSnapshot.totalSessions },
+      });
+      const focusId = currentSnapshot.sessions[currentSelectedIndex]?.id;
+      const nextSnap = loadDashboardSnapshot(launchCwd, focusId ?? undefined, {
+        limit: displayCount,
+      });
+      const newIdx = focusId ? nextSnap.sessions.findIndex((s) => s.id === focusId) : -1;
+      currentSnapshot = nextSnap;
+      if (newIdx >= 0) currentSelectedIndex = newIdx;
+      return true;
+    }
+    if (
+      currentSnapshot.totalSessions > currentSnapshot.sessions.length &&
+      displayCount >= MAX_SESSION_LIMIT
+    ) {
+      logInfo("display_limit_reached", {
+        detail: { displayCount, totalSessions: currentSnapshot.totalSessions },
+      });
+    }
+    return false;
   };
 
   rerender();
@@ -367,6 +407,8 @@ export async function runDashboard(): Promise<void> {
           } else {
             // no artifacts -> move session selection
             if (currentSnapshot.sessions.length > 0) {
+              const atBottom = currentSelectedIndex >= currentSnapshot.sessions.length - 1;
+              if (atBottom) tryExpandDisplay();
               const prevIdx = currentSelectedIndex;
               currentSelectedIndex = clampIndex(
                 currentSelectedIndex + 1,
@@ -388,6 +430,8 @@ export async function runDashboard(): Promise<void> {
           }
         } else {
           if (currentSnapshot.sessions.length > 0) {
+            const atBottom = currentSelectedIndex >= currentSnapshot.sessions.length - 1;
+            if (atBottom) tryExpandDisplay();
             const prevIdx = currentSelectedIndex;
             currentSelectedIndex = clampIndex(
               currentSelectedIndex + 1,
