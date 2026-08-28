@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import { artifacts, gateEvents, sessions, stepAttempts, steps } from "../engine/schema.ts";
 import { getWorkflowDbPath, openDb } from "../engine/store.ts";
+import { logWarn } from "./logger.ts";
 import type {
   ArtifactRow,
   GateEventRow,
@@ -31,6 +32,7 @@ export function loadDashboardSnapshot(
 ): DashboardSnapshot {
   const dbPath = getWorkflowDbPath();
   if (!fs.existsSync(dbPath)) {
+    logWarn("db_missing", { message: `DB not found: ${dbPath}`, detail: { dbPath } });
     return {
       dbMissing: true,
       sessions: [],
@@ -141,6 +143,8 @@ export function loadDashboardSnapshot(
     };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    const stack = e instanceof Error ? e.stack : undefined;
+    logWarn("snapshot_error", { message: msg, detail: { stack } });
     return {
       dbMissing: false,
       sessions: [],
