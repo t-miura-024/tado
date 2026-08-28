@@ -276,6 +276,60 @@ export function checkArtifactExists(filePath: string): boolean {
   }
 }
 
+export const ARTIFACT_FOLD_THRESHOLD = 10;
+
+export function resolveArtifactPath(
+  filePath: string,
+  session: Pick<SessionRow, "cwd" | "workflowPath" | "sessionDir">,
+): string {
+  if (path.isAbsolute(filePath)) return filePath;
+  const bases: string[] = [];
+  if (session.cwd) bases.push(session.cwd);
+  if (session.sessionDir) bases.push(session.sessionDir);
+  if (session.workflowPath) bases.push(path.dirname(session.workflowPath));
+  for (const base of bases) {
+    const candidate = path.join(base, filePath);
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch {
+      // ignore
+    }
+  }
+  if (bases.length > 0) return path.join(bases[0], filePath);
+  return filePath;
+}
+
+export function checkArtifactExistsResolved(
+  filePath: string,
+  session: Pick<SessionRow, "cwd" | "workflowPath" | "sessionDir">,
+): boolean {
+  const resolved = resolveArtifactPath(filePath, session);
+  try {
+    return fs.existsSync(resolved);
+  } catch {
+    return false;
+  }
+}
+
+export function getPreviewResultResolved(
+  filePath: string,
+  session?: Pick<SessionRow, "cwd" | "workflowPath" | "sessionDir">,
+): PreviewResult {
+  const resolved = session ? resolveArtifactPath(filePath, session) : filePath;
+  return getPreviewResult(resolved);
+}
+
+export function buildExistsMap(
+  artifacts: Pick<ArtifactRow, "filePath">[],
+  session: Pick<SessionRow, "cwd" | "workflowPath" | "sessionDir">,
+): Map<string, boolean> {
+  const m = new Map<string, boolean>();
+  for (const a of artifacts) {
+    m.set(a.filePath, checkArtifactExistsResolved(a.filePath, session));
+  }
+  return m;
+}
+
 // ---------------------------------------------------------------------------
 // History merging
 // ---------------------------------------------------------------------------
