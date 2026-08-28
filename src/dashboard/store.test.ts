@@ -230,4 +230,87 @@ describe("dashboard store", () => {
   it("TADO_HOME はテストごとに隔離される", () => {
     expect(getTadoHome()).toBe(path.resolve(TEST_BASE));
   });
+
+  it("limit指定で最新N件のみ返す（totalSessionsは全件数）", () => {
+    const db = setupDb();
+    const raw = new Database(getWorkflowDbPath());
+    for (let i = 0; i < 5; i++) {
+      raw.run(
+        `INSERT INTO sessions (id, workflow_id, workflow_path, session_dir, cwd, title, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          `s${i}`,
+          "wf1",
+          "/tmp/wf/wf1/index.ts",
+          path.join(TEST_BASE, `s${i}`),
+          "/tmp/proj",
+          `t${i}`,
+          "running",
+          `2026-01-01 0${i}:00:00`,
+        ],
+      );
+    }
+    raw.close();
+    db.$client.close();
+    const snap = loadDashboardSnapshot("/tmp/proj", undefined, { limit: 2 });
+    expect(snap.sessions).toHaveLength(2);
+    expect(snap.totalSessions).toBe(5);
+    // 最新2件（s4, s3）が updatedAt降順で返る
+    expect(snap.sessions[0].id).toBe("s4");
+    expect(snap.sessions[1].id).toBe("s3");
+  });
+
+  it("limit時も選択中セッションが上限外なら必ず含める", () => {
+    const db = setupDb();
+    const raw = new Database(getWorkflowDbPath());
+    // s0が最も古いが、focusで指定
+    for (let i = 0; i < 5; i++) {
+      raw.run(
+        `INSERT INTO sessions (id, workflow_id, workflow_path, session_dir, cwd, title, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          `s${i}`,
+          "wf1",
+          "/tmp/wf/wf1/index.ts",
+          path.join(TEST_BASE, `s${i}`),
+          "/tmp/proj",
+          `t${i}`,
+          "running",
+          `2026-01-01 0${i}:00:00`,
+        ],
+      );
+    }
+    raw.close();
+    db.$client.close();
+    // 最新2件は s4,s3だが、s0をfocus指定すると s4+s0 の2件になる（最新1件＋選択中1件）
+    const snap = loadDashboardSnapshot("/tmp/proj", "s0", { limit: 2 });
+    expect(snap.sessions).toHaveLength(2);
+    expect(snap.totalSessions).toBe(5);
+    const ids = snap.sessions.map((s) => s.id);
+    expect(ids).toContain("s0");
+    expect(ids).toContain("s4");
+  });
+
+  it("limitなしなら全件返す", () => {
+    const db = setupDb();
+    const raw = new Database(getWorkflowDbPath());
+    for (let i = 0; i < 3; i++) {
+      raw.run(
+        `INSERT INTO sessions (id, workflow_id, workflow_path, session_dir, cwd, title, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          `s${i}`,
+          "wf1",
+          "/tmp/wf/wf1/index.ts",
+          path.join(TEST_BASE, `s${i}`),
+          "/tmp/proj",
+          `t${i}`,
+          "running",
+          `2026-01-01 0${i}:00:00`,
+        ],
+      );
+    }
+    raw.close();
+    db.$client.close();
+    const snap = loadDashboardSnapshot("/tmp/proj");
+    expect(snap.sessions).toHaveLength(3);
+    expect(snap.totalSessions).toBe(3);
+  });
 });

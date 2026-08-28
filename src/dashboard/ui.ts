@@ -100,6 +100,7 @@ function padDisplayWidth(s: string, maxWidth: number): string {
 
 export interface DashboardViewState {
   sessions: SessionRow[];
+  totalSessions: number;
   stepsBySession: Map<string, StepRow[]>;
   selectedIndex: number;
   dbMissing: boolean;
@@ -349,6 +350,19 @@ export function renderDashboard(
       });
       item.add(content);
       sidebar.add(item);
+    }
+    // 超過メッセージ
+    if (viewState.totalSessions > viewState.sessions.length) {
+      const remaining = viewState.totalSessions - viewState.sessions.length;
+      const isAtLimit = viewState.sessions.length >= 200;
+      const msg = isAtLimit
+        ? `… 他${remaining}件（上限200件表示中）`
+        : `… 他${remaining}件（jで続きを読む）`;
+      const moreText = new TextRenderable(renderer, {
+        id: "sidebar-more",
+        content: t`${dim(msg)}`,
+      });
+      sidebar.add(moreText);
     }
   }
 
