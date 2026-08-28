@@ -6,9 +6,11 @@ import { getWorkflowDbPath } from "../engine/store.ts";
 import { checkWorkflowFileExists, loadDashboardSnapshot } from "./store.ts";
 import { renderDashboard, type DashboardViewState } from "./ui.ts";
 import { selectInitialSession, buildExistsMap, ARTIFACT_FOLD_THRESHOLD } from "./logic.ts";
+import { logDebug, logError, logInfo, logWarn } from "./logger.ts";
 
 export async function runDashboard(): Promise<void> {
   const launchCwd = process.cwd();
+  logInfo("dashboard_started", { detail: { launchCwd } });
   const snapshot = loadDashboardSnapshot(launchCwd);
 
   let selectedIndex = 0;
@@ -28,8 +30,10 @@ export async function runDashboard(): Promise<void> {
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    logError("renderer_create_error", e, { detail: { message: msg } });
     if (msg.includes("Failed to create optimized buffer") || msg.includes("optimized buffer")) {
       lastRenderError = msg;
+      logWarn("renderer_retry", { message: msg, detail: { width: 80, height: 24 } });
       // retry with conservative size
       renderer = await createCliRenderer({
         exitOnCtrlC: true,
@@ -161,12 +165,17 @@ export async function runDashboard(): Promise<void> {
           rerender();
         },
       });
+      logDebug("render_success", {
+        sessionsCount: currentSnapshot.sessions.length,
+        selectedIndex: currentSelectedIndex,
+      });
       // success: clear render error
       if (lastRenderError) {
         lastRenderError = null;
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      logError("render_error", e, { detail: { message: msg } });
       // Detect buffer error specifically
       if (msg.includes("Failed to create optimized buffer") || msg.includes("optimized buffer")) {
         lastRenderError = msg;
@@ -185,8 +194,8 @@ export async function runDashboard(): Promise<void> {
           },
         });
       } catch {
-        // If even fallback fails, log to console and keep polling
-        console.error("[tado dashboard] render failed:", msg);
+        // If even fallback fails, keep polling
+        logError("render_fallback_failed", e, { detail: { message: msg } });
       }
     }
   };
@@ -196,6 +205,9 @@ export async function runDashboard(): Promise<void> {
     "render:error" as never,
     ((evt: { error: Error }) => {
       const msg = evt?.error?.message ?? String(evt?.error ?? "render error");
+      logError("render_error", evt?.error ?? msg, {
+        detail: { message: msg, source: "render:error event" },
+      });
       lastRenderError = msg;
       setTimeout(() => {
         if (!isDestroyed) {
@@ -209,10 +221,16 @@ export async function runDashboard(): Promise<void> {
 
   const reload = (): void => {
     if (isDestroyed) return;
+    logDebug("poll_tick");
     try {
       const prevId = currentSnapshot.sessions[currentSelectedIndex]?.id;
       const focusId = prevId;
       const nextSnap = loadDashboardSnapshot(launchCwd, focusId ?? undefined);
+      logDebug("snapshot_loaded", {
+        sessionsCount: nextSnap.sessions.length,
+        dbMissing: nextSnap.dbMissing,
+        error: nextSnap.error,
+      });
       // If focusId still exists, preserve it; otherwise re-select initial
       if (focusId && nextSnap.sessions.some((s) => s.id === focusId)) {
         const newIdx = nextSnap.sessions.findIndex((s) => s.id === focusId);
@@ -259,11 +277,12 @@ export async function runDashboard(): Promise<void> {
       rerender();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      logError("reload_error", e, { detail: { message: msg } });
       lastRenderError = msg;
       try {
         rerender();
       } catch {
-        console.error("[tado dashboard] reload failed:", msg);
+        // fallback also failed; already logged above
       }
     }
   };
@@ -272,14 +291,17 @@ export async function runDashboard(): Promise<void> {
 
   const onKeypress = (key: { name: string; ctrl?: boolean; sequence?: string }): void => {
     if (key.ctrl && key.name === "c") {
+      logInfo("key_action", { detail: { key: "ctrl+c", focusedPane } });
       cleanupAndExit();
       return;
     }
     switch (key.name) {
       case "q":
+        logInfo("key_action", { detail: { key: "q", action: "quit", focusedPane } });
         cleanupAndExit();
         break;
       case "r":
+        logInfo("key_action", { detail: { key: "r", action: "reload", focusedPane } });
         lastRenderError = null;
         reload();
         break;
@@ -288,13 +310,20 @@ export async function runDashboard(): Promise<void> {
           const arts = getSelectedArtifacts();
           if (arts.length > ARTIFACT_FOLD_THRESHOLD) {
             artifactsExpanded = !artifactsExpanded;
+            logInfo("artifact_fold_toggled", {
+              detail: { expanded: artifactsExpanded, totalArtifacts: arts.length, focusedPane },
+            });
             rerender();
           }
         }
         break;
       case "tab":
-        focusedPane = focusedPane === "sessions" ? "artifacts" : "sessions";
-        rerender();
+        {
+          const prev = focusedPane;
+          focusedPane = focusedPane === "sessions" ? "artifacts" : "sessions";
+          logInfo("focus_switched", { detail: { from: prev, to: focusedPane } });
+          rerender();
+        }
         break;
       case "return":
       case "enter":
@@ -303,6 +332,15 @@ export async function runDashboard(): Promise<void> {
           if (arts.length > 0) {
             // If focus is on artifacts or any, toggle preview
             previewExpanded = !previewExpanded;
+            const selArt = arts[artifactSelectedIndex];
+            logInfo("artifact_preview", {
+              detail: {
+                expanded: previewExpanded,
+                artifactKey: selArt?.artifactKey,
+                artifactIndex: artifactSelectedIndex,
+                focusedPane,
+              },
+            });
             rerender();
           }
         }
@@ -312,30 +350,60 @@ export async function runDashboard(): Promise<void> {
         if (focusedPane === "artifacts") {
           const arts = getSelectedArtifacts();
           if (arts.length > 0) {
+            const prevIdx = artifactSelectedIndex;
             artifactSelectedIndex = clampIndex(artifactSelectedIndex + 1, arts.length);
             maybeAutoExpandArtifacts();
+            logInfo("artifact_selected", {
+              detail: {
+                key: key.name,
+                from: prevIdx,
+                to: artifactSelectedIndex,
+                focusedPane,
+                artifactKey: arts[artifactSelectedIndex]?.artifactKey,
+              },
+            });
             // keep preview open if it was expanded
             rerender();
           } else {
             // no artifacts -> move session selection
             if (currentSnapshot.sessions.length > 0) {
+              const prevIdx = currentSelectedIndex;
               currentSelectedIndex = clampIndex(
                 currentSelectedIndex + 1,
                 currentSnapshot.sessions.length,
               );
               artifactSelectedIndex = 0;
               previewExpanded = false;
+              logInfo("session_selected", {
+                detail: {
+                  key: key.name,
+                  from: prevIdx,
+                  to: currentSelectedIndex,
+                  focusedPane,
+                  sessionId: currentSnapshot.sessions[currentSelectedIndex]?.id,
+                },
+              });
               rerender();
             }
           }
         } else {
           if (currentSnapshot.sessions.length > 0) {
+            const prevIdx = currentSelectedIndex;
             currentSelectedIndex = clampIndex(
               currentSelectedIndex + 1,
               currentSnapshot.sessions.length,
             );
             artifactSelectedIndex = 0;
             previewExpanded = false;
+            logInfo("session_selected", {
+              detail: {
+                key: key.name,
+                from: prevIdx,
+                to: currentSelectedIndex,
+                focusedPane,
+                sessionId: currentSnapshot.sessions[currentSelectedIndex]?.id,
+              },
+            });
             rerender();
           }
         }
@@ -345,32 +413,63 @@ export async function runDashboard(): Promise<void> {
         if (focusedPane === "artifacts") {
           const arts = getSelectedArtifacts();
           if (arts.length > 0) {
+            const prevIdx = artifactSelectedIndex;
             artifactSelectedIndex = clampIndex(artifactSelectedIndex - 1, arts.length);
+            logInfo("artifact_selected", {
+              detail: {
+                key: key.name,
+                from: prevIdx,
+                to: artifactSelectedIndex,
+                focusedPane,
+                artifactKey: arts[artifactSelectedIndex]?.artifactKey,
+              },
+            });
             rerender();
           } else {
             if (currentSnapshot.sessions.length > 0) {
+              const prevIdx = currentSelectedIndex;
               currentSelectedIndex = clampIndex(
                 currentSelectedIndex - 1,
                 currentSnapshot.sessions.length,
               );
               artifactSelectedIndex = 0;
               previewExpanded = false;
+              logInfo("session_selected", {
+                detail: {
+                  key: key.name,
+                  from: prevIdx,
+                  to: currentSelectedIndex,
+                  focusedPane,
+                  sessionId: currentSnapshot.sessions[currentSelectedIndex]?.id,
+                },
+              });
               rerender();
             }
           }
         } else {
           if (currentSnapshot.sessions.length > 0) {
+            const prevIdx = currentSelectedIndex;
             currentSelectedIndex = clampIndex(
               currentSelectedIndex - 1,
               currentSnapshot.sessions.length,
             );
             artifactSelectedIndex = 0;
             previewExpanded = false;
+            logInfo("session_selected", {
+              detail: {
+                key: key.name,
+                from: prevIdx,
+                to: currentSelectedIndex,
+                focusedPane,
+                sessionId: currentSnapshot.sessions[currentSelectedIndex]?.id,
+              },
+            });
             rerender();
           }
         }
         break;
       default:
+        logDebug("key_ignored", { key: key.name, focusedPane });
         break;
     }
   };
@@ -391,6 +490,7 @@ export async function runDashboard(): Promise<void> {
   const cleanupAndExit = (): void => {
     if (isDestroyed) return;
     isDestroyed = true;
+    logInfo("dashboard_stopped");
     if (pollTimer) clearInterval(pollTimer);
     try {
       renderer.keyInput.off("keypress", onKeypress as never);
