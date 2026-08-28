@@ -8,6 +8,8 @@ export {
   getTadoHome,
   getWorkflowDbPath,
   getWorkflowsDir,
+  getSessionsDir,
+  getSessionDir,
   resolveWorkflowPath,
 } from "./store.ts";
 export { listWorkflows } from "./workflows.ts";

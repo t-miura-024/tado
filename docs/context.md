@@ -12,7 +12,7 @@ _Avoid_: ルート index、値も含む barrel
 tado のデータ置き場ルート。デフォルトは `~/.tado`、環境変数で上書き可能。
 
 **セッションディレクトリ**:
-1 セッションの成果物・artifact DB を置くディレクトリ。`{TADO_HOME}/{sessionId}/`。
+1 セッションの成果物・artifact DB を置くディレクトリ。`{TADO_HOME}/sessions/{sessionId}/`。
 
 **単一 DB**:
 全セッションの状態を保持する SQLite ファイル。`{TADO_HOME}/workflow.db`。

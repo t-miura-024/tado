@@ -31,7 +31,7 @@ tado init --workflow <id> --title "<title>" [--session <id>]
 `{TADO_HOME}/workflows/<id>/index.ts` からワークフロー定義を解決してセッションを初期化する。`--title` は必須（1-100文字、改行不可）。存在しない ID の場合は `Workflow not found: <id> (tried {TADO_HOME}/workflows/<id>/index.ts)` と利用可能ワークフロー一覧（ID + description）を併記してエラーになる。
 
 - 単一の `workflow.db` を `{TADO_HOME}/` に作成（デフォルトは `~/.tado/`、`TADO_HOME` で変更可能）
-- セッションディレクトリ `{TADO_HOME}/{sessionId}/` を成果物置き場として作成
+- セッションディレクトリ `{TADO_HOME}/sessions/{sessionId}/` を成果物置き場として作成
 - sessions/steps テーブルを初期化
 - `sessions.cwd` に `process.cwd()` の絶対パス、`sessions.title` に指定タイトルを保存
 - フック（beforeInit/afterInit）を実行

@@ -8,7 +8,7 @@ import {
   isPathLike,
   migrateDb,
   openDb,
-  getTadoHome,
+  getSessionDir,
   resolveWorkflowPath,
 } from "./store.ts";
 import { artifacts, sessions, steps } from "./schema.ts";
@@ -73,9 +73,7 @@ export async function init(
   const resolvedPath = resolveWorkflowPath(workflowId);
 
   const sid = sessionId ?? generateSessionId();
-  const tadoHome = getTadoHome();
-  fs.mkdirSync(tadoHome, { recursive: true });
-  const sessionDir = path.join(tadoHome, sid);
+  const sessionDir = getSessionDir(sid);
   fs.mkdirSync(sessionDir, { recursive: true });
 
   const db = openDb();

@@ -49,6 +49,14 @@ export function getWorkflowsDir(): string {
   return path.join(getTadoHome(), "workflows");
 }
 
+export function getSessionsDir(): string {
+  return path.join(getTadoHome(), "sessions");
+}
+
+export function getSessionDir(sessionId: string): string {
+  return path.join(getSessionsDir(), sessionId);
+}
+
 export function resolveWorkflowPath(workflowId: string): string {
   return path.join(getWorkflowsDir(), workflowId, "index.ts");
 }

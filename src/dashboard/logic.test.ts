@@ -35,7 +35,7 @@ function makeSession(overrides: Partial<SessionRow> & Pick<SessionRow, "id">): S
     id: overrides.id,
     workflowId: overrides.workflowId ?? "wf-test",
     workflowPath: overrides.workflowPath ?? "/tmp/workflows/wf-test/index.ts",
-    sessionDir: overrides.sessionDir ?? `/tmp/.tado/${overrides.id}`,
+    sessionDir: overrides.sessionDir ?? `/tmp/.tado/sessions/${overrides.id}`,
     cwd: overrides.cwd ?? null,
     title: overrides.title ?? null,
     artifactDbPath: overrides.artifactDbPath ?? null,
