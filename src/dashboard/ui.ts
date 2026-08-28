@@ -30,6 +30,8 @@ import {
   getStepBorderStyle,
   checkArtifactExists,
   mergeHistory,
+  ARTIFACT_FOLD_THRESHOLD,
+  resolveArtifactPath,
 } from "./logic.ts";
 
 function stepStatusColor(status: string): string {
@@ -102,12 +104,79 @@ export interface DashboardViewState {
   selectedIndex: number;
   dbMissing: boolean;
   error?: string;
+  renderError?: string;
   selectedArtifacts: ArtifactRow[];
   selectedAttempts: StepAttemptRow[];
   selectedGateEvents: GateEventRow[];
   selectedSteps: StepRow[];
   artifactSelectedIndex: number;
   previewExpanded: boolean;
+  artifactsExpanded?: boolean;
+  existsMap?: Map<string, boolean>;
+  selectedSession?: SessionRow;
+}
+
+type CachedNodes = {
+  container: BoxRenderable;
+  body: BoxRenderable;
+  sidebar: BoxRenderable;
+  mainBox: ScrollBoxRenderable;
+  footer: TextRenderable;
+};
+
+const dashboardCache = new WeakMap<CliRenderer, CachedNodes>();
+
+function clearChildren(renderable: BoxRenderable | ScrollBoxRenderable): void {
+  const children = [...renderable.getChildren()];
+  for (const c of children) {
+    try {
+      renderable.remove(c as never);
+    } catch {
+      // ignore
+    }
+  }
+}
+
+function getExists(art: ArtifactRow, viewState: DashboardViewState): boolean {
+  if (viewState.existsMap?.has(art.filePath)) {
+    return viewState.existsMap.get(art.filePath) ?? false;
+  }
+  if (viewState.selectedSession) {
+    try {
+      const resolved = resolveArtifactPath(art.filePath, viewState.selectedSession);
+      return fs.existsSync(resolved);
+    } catch {
+      return false;
+    }
+  }
+  return checkArtifactExists(art.filePath);
+}
+
+function getPreviewResultWithSession(
+  art: ArtifactRow,
+  viewState: DashboardViewState,
+): ReturnType<typeof getPreviewResult> {
+  if (viewState.selectedSession) {
+    const resolved = resolveArtifactPath(art.filePath, viewState.selectedSession);
+    // Try resolved path first; fallback to original if resolved doesn't exist but original might be absolute
+    if (fs.existsSync(resolved)) {
+      return getPreviewResult(resolved);
+    }
+    // If filePath was absolute, resolved === filePath, so this is same
+    // If relative and not found at resolved, still try original for backwards compat
+    if (resolved !== art.filePath) {
+      const origExists = (() => {
+        try {
+          return fs.existsSync(art.filePath);
+        } catch {
+          return false;
+        }
+      })();
+      if (origExists) return getPreviewResult(art.filePath);
+    }
+    return getPreviewResult(resolved);
+  }
+  return getPreviewResult(art.filePath);
 }
 
 export function renderDashboard(
@@ -123,54 +192,107 @@ export function renderDashboard(
   destroy: () => void;
 } {
   const root = renderer.root;
-  for (const child of root.getChildren()) {
-    root.remove(child);
+  let cached = dashboardCache.get(renderer);
+  let container: BoxRenderable;
+  let body: BoxRenderable;
+  let sidebar: BoxRenderable;
+  let mainBox: ScrollBoxRenderable;
+  let footer: TextRenderable;
+  let savedScrollTop: number | null = null;
+  let savedScrollLeft: number | null = null;
+  let isFirst = !cached;
+
+  if (isFirst) {
+    for (const child of root.getChildren()) {
+      root.remove(child);
+    }
+
+    container = new BoxRenderable(renderer, {
+      id: "dashboard-container",
+      flexDirection: "column",
+      width: "100%",
+      height: "100%",
+    });
+
+    body = new BoxRenderable(renderer, {
+      id: "dashboard-body",
+      flexDirection: "row",
+      flexGrow: 1,
+      width: "100%",
+    });
+
+    const sidebarWidth = 36;
+
+    sidebar = new BoxRenderable(renderer, {
+      id: "sidebar",
+      width: sidebarWidth,
+      height: "100%",
+      border: true,
+      borderStyle: "single",
+      borderColor: "#444444",
+      title: " Sessions ",
+      titleAlignment: "left",
+      flexDirection: "column",
+      padding: 0,
+    });
+
+    mainBox = new ScrollBoxRenderable(renderer, {
+      id: "main",
+      flexGrow: 1,
+      height: "100%",
+      border: true,
+      borderStyle: "single",
+      borderColor: "#444444",
+      title: " Details ",
+      titleAlignment: "left",
+      stickyScroll: false,
+    });
+
+    footer = new TextRenderable(renderer, {
+      id: "footer",
+      content: t`${dim("j/k or ↑/↓: session  Tab: focus  Enter: preview  r: reload  q: quit")}`,
+    });
+
+    cached = { container, body, sidebar, mainBox, footer };
+    dashboardCache.set(renderer, cached);
+    container.add(body);
+    body.add(sidebar);
+    body.add(mainBox);
+    container.add(footer);
+    root.add(container);
+  } else {
+    container = cached!.container;
+    body = cached!.body;
+    sidebar = cached!.sidebar;
+    mainBox = cached!.mainBox;
+    footer = cached!.footer;
+    try {
+      savedScrollTop = mainBox.scrollTop;
+      savedScrollLeft = mainBox.scrollLeft;
+      // disable sticky to prevent auto jump
+      (mainBox as unknown as { stickyScroll: boolean }).stickyScroll = false;
+    } catch {
+      // ignore
+    }
+    clearChildren(sidebar);
+    clearChildren(mainBox);
+    // update footer content
+    const needExpandHint =
+      viewState.selectedArtifacts.length > ARTIFACT_FOLD_THRESHOLD && !viewState.artifactsExpanded;
+    const footerText = needExpandHint
+      ? t`${dim("j/k or ↑/↓: session  Tab: focus  Enter: preview  a: expand  r: reload  q: quit")}`
+      : t`${dim("j/k or ↑/↓: session  Tab: focus  Enter: preview  r: reload  q: quit")}`;
+    footer.content = footerText;
   }
 
-  const container = new BoxRenderable(renderer, {
-    id: "dashboard-container",
-    flexDirection: "column",
-    width: "100%",
-    height: "100%",
-  });
-
-  const body = new BoxRenderable(renderer, {
-    id: "dashboard-body",
-    flexDirection: "row",
-    flexGrow: 1,
-    width: "100%",
-  });
-
-  const sidebarWidth = 36;
-
-  const sidebar = new BoxRenderable(renderer, {
-    id: "sidebar",
-    width: sidebarWidth,
-    height: "100%",
-    border: true,
-    borderStyle: "single",
-    borderColor: "#444444",
-    title: " Sessions ",
-    titleAlignment: "left",
-    flexDirection: "column",
-    padding: 0,
-  });
-
-  const mainBox = new ScrollBoxRenderable(renderer, {
-    id: "main",
-    flexGrow: 1,
-    height: "100%",
-    border: true,
-    borderStyle: "single",
-    borderColor: "#444444",
-    title: " Details ",
-    titleAlignment: "left",
-  });
-
-  const footer = new TextRenderable(renderer, {
-    id: "footer",
-    content: t`${dim("j/k or ↑/↓: session  Tab: focus  Enter: preview  r: reload  q: quit")}`,
-  });
+  // For first render, ensure footer is correct
+  if (isFirst) {
+    const needExpandHint =
+      viewState.selectedArtifacts.length > ARTIFACT_FOLD_THRESHOLD && !viewState.artifactsExpanded;
+    if (needExpandHint) {
+      footer.content = t`${dim("j/k or ↑/↓: session  Tab: focus  Enter: preview  a: expand  r: reload  q: quit")}`;
+    }
+  }
 
   if (viewState.dbMissing || viewState.sessions.length === 0) {
     const emptyMsg = viewState.dbMissing
@@ -191,6 +313,7 @@ export function renderDashboard(
     }
   } else {
     // サイドバー行の利用可能幅 = sidebarWidth(36) − 枠(2) − item padding(2) = 32列
+    const sidebarWidth = 36;
     const sidebarContentWidth = sidebarWidth - 4;
     // 固定消費 = prefix+space(2) + basename(12) + space(1) + progress(5) + space(1) + symbol(1) + space(1) = 23列
     const basenameWidth = 12;
@@ -227,6 +350,15 @@ export function renderDashboard(
       item.add(content);
       sidebar.add(item);
     }
+  }
+
+  // renderError banner always visible at top of main
+  if (viewState.renderError) {
+    const banner = new TextRenderable(renderer, {
+      id: "main-render-error",
+      content: t`${fg("#FF4444")(bold("⚠ 描画エラー: "))}${fg("#FFCC66")(viewState.renderError)} ${dim("rで再試行 / ターミナルを狭めてください")}`,
+    });
+    mainBox.add(banner);
   }
 
   const selected = viewState.sessions[viewState.selectedIndex];
@@ -366,23 +498,41 @@ export function renderDashboard(
       }
     }
 
-    // Artifacts section
+    // Artifacts section with folding and summary
+    const totalArts = viewState.selectedArtifacts.length;
+    let existsCount = 0;
+    let missingCount = 0;
+    for (const art of viewState.selectedArtifacts) {
+      const ex = getExists(art, viewState);
+      if (ex) existsCount++;
+      else missingCount++;
+    }
+    const summary =
+      totalArts === 0 ? "" : ` ${dim(`— 存在 ${existsCount} / 欠損 ${missingCount}`)}`;
+    const foldHint =
+      totalArts > ARTIFACT_FOLD_THRESHOLD && !viewState.artifactsExpanded
+        ? dim(" a: expand")
+        : viewState.artifactsExpanded && totalArts > ARTIFACT_FOLD_THRESHOLD
+          ? dim(" a: collapse")
+          : "";
     const artifactsTitle = new TextRenderable(renderer, {
       id: "artifacts-title",
-      content: t`${bold("Artifacts")} ${dim(`(${viewState.selectedArtifacts.length})`)} ${dim("Enter: preview")}`,
+      content: t`${bold("Artifacts")} ${dim(`(${totalArts})`)}${summary} ${foldHint} ${dim("Enter: preview")}`,
     });
     mainBox.add(artifactsTitle);
 
-    if (viewState.selectedArtifacts.length === 0) {
+    if (totalArts === 0) {
       const noArt = new TextRenderable(renderer, {
         id: "artifacts-empty",
         content: t`${dim("(no artifacts)")}`,
       });
       mainBox.add(noArt);
     } else {
-      for (let i = 0; i < viewState.selectedArtifacts.length; i++) {
+      const shouldFold = totalArts > ARTIFACT_FOLD_THRESHOLD && !viewState.artifactsExpanded;
+      const visibleCount = shouldFold ? ARTIFACT_FOLD_THRESHOLD : totalArts;
+      for (let i = 0; i < visibleCount; i++) {
         const art = viewState.selectedArtifacts[i];
-        const exists = checkArtifactExists(art.filePath);
+        const exists = getExists(art, viewState);
         const line = formatArtifact(art, exists);
         const isArtSelected = i === viewState.artifactSelectedIndex;
         const item = new BoxRenderable(renderer, {
@@ -403,6 +553,38 @@ export function renderDashboard(
         item.add(content);
         mainBox.add(item);
       }
+      if (shouldFold) {
+        const remaining = totalArts - ARTIFACT_FOLD_THRESHOLD;
+        const missingInHidden = (() => {
+          let c = 0;
+          for (let i = ARTIFACT_FOLD_THRESHOLD; i < totalArts; i++) {
+            if (!getExists(viewState.selectedArtifacts[i]!, viewState)) c++;
+          }
+          return c;
+        })();
+        const hiddenMsg =
+          missingInHidden === remaining
+            ? `... 他 ${remaining}件は欠損 (aで展開)`
+            : `... 他 ${remaining}件 (欠損 ${missingInHidden}) (aで展開)`;
+        const moreText = new TextRenderable(renderer, {
+          id: "artifacts-more",
+          content: t`${dim(hiddenMsg)}`,
+        });
+        mainBox.add(moreText);
+        // If selected artifact is in hidden region, show indicator
+        if (viewState.artifactSelectedIndex >= ARTIFACT_FOLD_THRESHOLD) {
+          const selArt = viewState.selectedArtifacts[viewState.artifactSelectedIndex];
+          if (selArt) {
+            const exists = getExists(selArt, viewState);
+            const line = formatArtifact(selArt, exists);
+            const hint = new TextRenderable(renderer, {
+              id: "artifacts-selected-hidden",
+              content: t`${fg("#FFCC00")(`▸ 選択中 [${viewState.artifactSelectedIndex}]: ${line} (aで展開して表示)`)}`,
+            });
+            mainBox.add(hint);
+          }
+        }
+      }
 
       // Preview area
       if (viewState.previewExpanded) {
@@ -420,7 +602,7 @@ export function renderDashboard(
             padding: 1,
           });
 
-          const result = getPreviewResult(selArt.filePath);
+          const result = getPreviewResultWithSession(selArt, viewState);
           if (result.ok) {
             const content = result.content ?? "";
             const lines = content.split("\n");
@@ -460,21 +642,29 @@ export function renderDashboard(
         if (selArt) {
           const result = (() => {
             try {
-              return getPreviewResult(selArt.filePath);
+              return getPreviewResultWithSession(selArt, viewState);
             } catch {
               return { ok: false as const, reason: "read error" };
             }
           })();
           if (!result.ok) {
-            const errLine = new TextRenderable(renderer, {
-              id: "preview-collapsed-error",
-              content: t`${fg("#FFCC00")(formatPreviewError(result.reason ?? "unknown"))}`,
-            });
-            mainBox.add(errLine);
+            // Only show collapsed error if not folding or if selected is visible
+            const isVisible =
+              !shouldFold || viewState.artifactSelectedIndex < ARTIFACT_FOLD_THRESHOLD;
+            if (isVisible) {
+              const errLine = new TextRenderable(renderer, {
+                id: "preview-collapsed-error",
+                content: t`${fg("#FFCC00")(formatPreviewError(result.reason ?? "unknown"))}`,
+              });
+              mainBox.add(errLine);
+            }
           } else {
+            const resolvedPath = viewState.selectedSession
+              ? resolveArtifactPath(selArt.filePath, viewState.selectedSession)
+              : selArt.filePath;
             const hint = new TextRenderable(renderer, {
               id: "preview-collapsed-hint",
-              content: t`${dim(`Press Enter to preview ${selArt.filePath}`)}`,
+              content: t`${dim(`Press Enter to preview ${resolvedPath}`)}`,
             });
             mainBox.add(hint);
           }
@@ -491,17 +681,35 @@ export function renderDashboard(
     mainBox.add(errText);
   }
 
-  body.add(sidebar);
-  body.add(mainBox);
-  container.add(body);
-  container.add(footer);
-  root.add(container);
+  if (savedScrollTop !== null) {
+    try {
+      mainBox.scrollTop = savedScrollTop;
+    } catch {}
+    try {
+      if (savedScrollLeft !== null) mainBox.scrollLeft = savedScrollLeft;
+    } catch {}
+    // layout may update scrollHeight asynchronously; restore again on next tick
+    const toRestoreTop = savedScrollTop;
+    const toRestoreLeft = savedScrollLeft;
+    setTimeout(() => {
+      try {
+        if (!mainBox.isDestroyed) {
+          mainBox.scrollTop = toRestoreTop;
+          if (toRestoreLeft !== null) mainBox.scrollLeft = toRestoreLeft;
+        }
+      } catch {}
+    }, 0);
+  }
 
   const destroy = (): void => {
-    // no-op
+    dashboardCache.delete(renderer);
   };
 
   void handlers;
 
   return { sidebar, main: mainBox, footer, destroy };
+}
+
+export function clearDashboardCache(renderer: CliRenderer): void {
+  dashboardCache.delete(renderer);
 }

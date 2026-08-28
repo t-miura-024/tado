@@ -5,7 +5,7 @@ import type { SessionRow } from "../engine/schema.ts";
 import { getWorkflowDbPath } from "../engine/store.ts";
 import { checkWorkflowFileExists, loadDashboardSnapshot } from "./store.ts";
 import { renderDashboard, type DashboardViewState } from "./ui.ts";
-import { selectInitialSession } from "./logic.ts";
+import { selectInitialSession, buildExistsMap, ARTIFACT_FOLD_THRESHOLD } from "./logic.ts";
 
 export async function runDashboard(): Promise<void> {
   const launchCwd = process.cwd();
@@ -20,14 +20,32 @@ export async function runDashboard(): Promise<void> {
     }
   }
 
-  const renderer = await createCliRenderer({
-    exitOnCtrlC: true,
-  });
+  let renderer: Awaited<ReturnType<typeof createCliRenderer>>;
+  let lastRenderError: string | null = null;
+  try {
+    renderer = await createCliRenderer({
+      exitOnCtrlC: true,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes("Failed to create optimized buffer") || msg.includes("optimized buffer")) {
+      lastRenderError = msg;
+      // retry with conservative size
+      renderer = await createCliRenderer({
+        exitOnCtrlC: true,
+        width: 80,
+        height: 24,
+      });
+    } else {
+      throw e;
+    }
+  }
 
   let currentSnapshot = snapshot;
   let currentSelectedIndex = selectedIndex;
   let artifactSelectedIndex = 0;
   let previewExpanded = false;
+  let artifactsExpanded = false;
   let focusedPane: "sessions" | "artifacts" = "sessions";
   let pollTimer: ReturnType<typeof setInterval> | undefined;
   let isDestroyed = false;
@@ -61,6 +79,14 @@ export async function runDashboard(): Promise<void> {
     );
   };
 
+  const maybeAutoExpandArtifacts = (): void => {
+    if (artifactsExpanded) return;
+    const arts = getSelectedArtifacts();
+    if (arts.length > ARTIFACT_FOLD_THRESHOLD && artifactSelectedIndex >= ARTIFACT_FOLD_THRESHOLD) {
+      artifactsExpanded = true;
+    }
+  };
+
   const buildViewState = (): DashboardViewState => {
     const selectedId = currentSnapshot.sessions[currentSelectedIndex]?.id;
     let selectedArtifacts: typeof currentSnapshot.selectedArtifacts = [];
@@ -91,85 +117,155 @@ export async function runDashboard(): Promise<void> {
         (currentSnapshot.selectedSession?.id === selectedId ? currentSnapshot.selectedSteps : []) ??
         [];
     }
+    const selectedSession = currentSnapshot.sessions[currentSelectedIndex];
+    let existsMap: Map<string, boolean> | undefined;
+    if (selectedSession && selectedArtifacts.length > 0) {
+      try {
+        existsMap = buildExistsMap(selectedArtifacts, selectedSession);
+      } catch {
+        existsMap = undefined;
+      }
+    }
     return {
       sessions: currentSnapshot.sessions,
       stepsBySession: currentSnapshot.stepsBySession,
       selectedIndex: clampIndex(currentSelectedIndex, currentSnapshot.sessions.length),
       dbMissing: currentSnapshot.dbMissing,
       error: currentSnapshot.error,
+      renderError: lastRenderError ?? undefined,
       selectedArtifacts,
       selectedAttempts,
       selectedGateEvents,
       selectedSteps,
       artifactSelectedIndex,
       previewExpanded,
+      artifactsExpanded,
+      existsMap,
+      selectedSession,
     };
   };
 
   const rerender = (): void => {
-    const viewState = buildViewState();
-    currentSelectedIndex = viewState.selectedIndex;
-    clampArtifactIndex();
-    // Rebuild after clamp may have adjusted artifact index
-    const finalState = buildViewState();
-    renderDashboard(renderer, finalState, {
-      onSelect: (idx) => {
-        currentSelectedIndex = clampIndex(idx, currentSnapshot.sessions.length);
-        artifactSelectedIndex = 0;
-        previewExpanded = false;
-        rerender();
-      },
-    });
+    try {
+      maybeAutoExpandArtifacts();
+      const viewState = buildViewState();
+      currentSelectedIndex = viewState.selectedIndex;
+      clampArtifactIndex();
+      // Rebuild after clamp may have adjusted artifact index
+      const finalState = buildViewState();
+      renderDashboard(renderer, finalState, {
+        onSelect: (idx) => {
+          currentSelectedIndex = clampIndex(idx, currentSnapshot.sessions.length);
+          artifactSelectedIndex = 0;
+          previewExpanded = false;
+          rerender();
+        },
+      });
+      // success: clear render error
+      if (lastRenderError) {
+        lastRenderError = null;
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      // Detect buffer error specifically
+      if (msg.includes("Failed to create optimized buffer") || msg.includes("optimized buffer")) {
+        lastRenderError = msg;
+      } else {
+        lastRenderError = msg;
+      }
+      // Try to render error banner even after failure
+      try {
+        const fallbackState = buildViewState();
+        renderDashboard(renderer, fallbackState, {
+          onSelect: (idx) => {
+            currentSelectedIndex = clampIndex(idx, currentSnapshot.sessions.length);
+            artifactSelectedIndex = 0;
+            previewExpanded = false;
+            rerender();
+          },
+        });
+      } catch {
+        // If even fallback fails, log to console and keep polling
+        console.error("[tado dashboard] render failed:", msg);
+      }
+    }
   };
+
+  // Async render errors from @opentui (e.g. Failed to create optimized buffer: 212x19)
+  renderer.on(
+    "render:error" as never,
+    ((evt: { error: Error }) => {
+      const msg = evt?.error?.message ?? String(evt?.error ?? "render error");
+      lastRenderError = msg;
+      setTimeout(() => {
+        if (!isDestroyed) {
+          try {
+            rerender();
+          } catch {}
+        }
+      }, 0);
+    }) as never,
+  );
 
   const reload = (): void => {
     if (isDestroyed) return;
-    const prevId = currentSnapshot.sessions[currentSelectedIndex]?.id;
-    const focusId = prevId;
-    const nextSnap = loadDashboardSnapshot(launchCwd, focusId ?? undefined);
-    // If focusId still exists, preserve it; otherwise re-select initial
-    if (focusId && nextSnap.sessions.some((s) => s.id === focusId)) {
-      const newIdx = nextSnap.sessions.findIndex((s) => s.id === focusId);
-      currentSnapshot = nextSnap;
-      currentSelectedIndex = newIdx >= 0 ? newIdx : 0;
-    } else if (nextSnap.sessions.length === 0) {
-      currentSnapshot = nextSnap;
-      currentSelectedIndex = 0;
-      artifactSelectedIndex = 0;
-      previewExpanded = false;
-    } else if (prevId) {
-      const newIdx = nextSnap.sessions.findIndex((s) => s.id === prevId);
-      currentSnapshot = nextSnap;
-      if (newIdx >= 0) {
-        currentSelectedIndex = newIdx;
+    try {
+      const prevId = currentSnapshot.sessions[currentSelectedIndex]?.id;
+      const focusId = prevId;
+      const nextSnap = loadDashboardSnapshot(launchCwd, focusId ?? undefined);
+      // If focusId still exists, preserve it; otherwise re-select initial
+      if (focusId && nextSnap.sessions.some((s) => s.id === focusId)) {
+        const newIdx = nextSnap.sessions.findIndex((s) => s.id === focusId);
+        currentSnapshot = nextSnap;
+        currentSelectedIndex = newIdx >= 0 ? newIdx : 0;
+      } else if (nextSnap.sessions.length === 0) {
+        currentSnapshot = nextSnap;
+        currentSelectedIndex = 0;
+        artifactSelectedIndex = 0;
+        previewExpanded = false;
+      } else if (prevId) {
+        const newIdx = nextSnap.sessions.findIndex((s) => s.id === prevId);
+        currentSnapshot = nextSnap;
+        if (newIdx >= 0) {
+          currentSelectedIndex = newIdx;
+        } else {
+          const sel = selectInitialSession(nextSnap.sessions, launchCwd);
+          if (sel) {
+            const idx = nextSnap.sessions.findIndex((s) => s.id === sel.id);
+            currentSelectedIndex = idx >= 0 ? idx : 0;
+          } else {
+            currentSelectedIndex = 0;
+          }
+          artifactSelectedIndex = 0;
+          previewExpanded = false;
+        }
       } else {
         const sel = selectInitialSession(nextSnap.sessions, launchCwd);
+        currentSnapshot = nextSnap;
         if (sel) {
           const idx = nextSnap.sessions.findIndex((s) => s.id === sel.id);
           currentSelectedIndex = idx >= 0 ? idx : 0;
         } else {
           currentSelectedIndex = 0;
         }
-        artifactSelectedIndex = 0;
+      }
+      clampArtifactIndex();
+      // If artifacts changed and preview was expanded but index now invalid, collapse
+      const arts = getSelectedArtifacts();
+      if (previewExpanded && (arts.length === 0 || artifactSelectedIndex >= arts.length)) {
         previewExpanded = false;
       }
-    } else {
-      const sel = selectInitialSession(nextSnap.sessions, launchCwd);
-      currentSnapshot = nextSnap;
-      if (sel) {
-        const idx = nextSnap.sessions.findIndex((s) => s.id === sel.id);
-        currentSelectedIndex = idx >= 0 ? idx : 0;
-      } else {
-        currentSelectedIndex = 0;
+      // If artifacts collapsed but length now <= threshold, keep expanded state (no auto collapse)
+      rerender();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      lastRenderError = msg;
+      try {
+        rerender();
+      } catch {
+        console.error("[tado dashboard] reload failed:", msg);
       }
     }
-    clampArtifactIndex();
-    // If artifacts changed and preview was expanded but index now invalid, collapse
-    const arts = getSelectedArtifacts();
-    if (previewExpanded && (arts.length === 0 || artifactSelectedIndex >= arts.length)) {
-      previewExpanded = false;
-    }
-    rerender();
   };
 
   rerender();
@@ -184,7 +280,17 @@ export async function runDashboard(): Promise<void> {
         cleanupAndExit();
         break;
       case "r":
+        lastRenderError = null;
         reload();
+        break;
+      case "a":
+        {
+          const arts = getSelectedArtifacts();
+          if (arts.length > ARTIFACT_FOLD_THRESHOLD) {
+            artifactsExpanded = !artifactsExpanded;
+            rerender();
+          }
+        }
         break;
       case "tab":
         focusedPane = focusedPane === "sessions" ? "artifacts" : "sessions";
@@ -207,6 +313,7 @@ export async function runDashboard(): Promise<void> {
           const arts = getSelectedArtifacts();
           if (arts.length > 0) {
             artifactSelectedIndex = clampIndex(artifactSelectedIndex + 1, arts.length);
+            maybeAutoExpandArtifacts();
             // keep preview open if it was expanded
             rerender();
           } else {
