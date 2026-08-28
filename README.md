@@ -59,7 +59,7 @@ tado list --workflow [--json] [--verbose]
 `next` が返すプロンプトは完全で、LLM が手順を再構築する余地はありません。ワークフローが完了するまでサイクルを繰り返します。
 human_gate ステップだけは例外で、`report` では回答できず、人間が自分の端末から `tado confirm` を実行します（後述）。
 
-状態 DB は全セッションで共有される `~/.tado/workflow.db` に、成果物は `~/.tado/<sessionId>/` に、ワークフロー定義は `~/.tado/workflows/<name>/index.ts` に保存されます。
+状態 DB は全セッションで共有される `~/.tado/workflow.db` に、成果物は `~/.tado/sessions/<sessionId>/` に、ワークフロー定義は `~/.tado/workflows/<name>/index.ts` に保存されます。
 `TADO_HOME` 環境変数を設定すると保存先を変更できます。中断したセッションは、同じ `--session <id>` を指定すれば再開できます。
 
 `next` が成功しコミットされた後、`report` を送信する前にプロセスが中断した場合も、同じ `--session <id>` で `next` を再実行してください。そのステップは実行中（running）状態のままですが、`next` は新しい試行（アテンプト）を割り当てずに同じプロンプトを再発行するため、そのまま作業を続けて `report` を送信できます。

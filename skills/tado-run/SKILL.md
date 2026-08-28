@@ -41,7 +41,7 @@ tado init --workflow <id> --title "<title>"
 - `--title` はセッション一覧で表示される人間可読なタイトル。`sessions.title` に保存される。`WorkflowDef.id` とは別概念。
 - `sessions.cwd` に `process.cwd()` の絶対パスが自動保存される。
 - stdout にセッション情報（`sessionId` を含む JSON）が出力される。`sessionId` を控え、以降のコマンドの `<id>` に使う。
-- 状態は `{TADO_HOME}/workflow.db`（SQLite、デフォルトは `~/.tado/workflow.db`）で機械的に管理される。セッションの成果物は `{TADO_HOME}/{sessionId}/` に保存される。
+- 状態は `{TADO_HOME}/workflow.db`（SQLite、デフォルトは `~/.tado/workflow.db`）で機械的に管理される。セッションの成果物は `{TADO_HOME}/sessions/{sessionId}/` に保存される。
 - ワークフローからの `import from "tado"` は `{TADO_HOME}/node_modules/tado` から解決される（`{TADO_HOME}/package.json` 管理）。CLI バイナリ自体はグローバルインストール（`~/.bun/bin/tado`）に準拠。
 
 ### 4. next / report サイクル

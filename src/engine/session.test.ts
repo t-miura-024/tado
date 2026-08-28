@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Database } from "bun:sqlite";
-import { init, EngineError, getWorkflowDbPath, getWorkflowsDir } from "./index.ts";
+import { init, EngineError, getWorkflowDbPath, getWorkflowsDir, getSessionDir } from "./index.ts";
 import { validateTitle } from "./session.ts";
 
 const TEST_TADO_HOME = path.join(__dirname, "__test_sessions_session__");
@@ -38,8 +38,8 @@ describe("セッション", () => {
       const result = await init("test-simple", { title: "test-title" });
       expect(result.sessionId).toBeTruthy();
       expect(result.workflowId).toBe("test-simple");
-      expect(fs.existsSync(path.join(TEST_TADO_HOME, result.sessionId))).toBe(true);
-      expect(fs.existsSync(path.join(TEST_TADO_HOME, result.sessionId, "workflow.db"))).toBe(false);
+      expect(fs.existsSync(getSessionDir(result.sessionId))).toBe(true);
+      expect(fs.existsSync(path.join(getSessionDir(result.sessionId), "workflow.db"))).toBe(false);
       expect(fs.existsSync(getWorkflowDbPath())).toBe(true);
 
       const db = new Database(getWorkflowDbPath());
@@ -48,7 +48,7 @@ describe("セッション", () => {
         .get(result.sessionId) as Record<string, unknown>;
       expect(session).toBeTruthy();
       expect(session.status).toBe("running");
-      expect(session.session_dir).toBe(path.join(TEST_TADO_HOME, result.sessionId));
+      expect(session.session_dir).toBe(getSessionDir(result.sessionId));
 
       const steps = db
         .query("SELECT * FROM steps WHERE session_id = ? ORDER BY step_index")
@@ -159,8 +159,8 @@ describe("セッション", () => {
 
       const result = await init("hook-test", { title: "test-title" });
 
-      expect(fs.existsSync(path.join(TEST_TADO_HOME, result.sessionId, "_hook_before"))).toBe(true);
-      expect(fs.existsSync(path.join(TEST_TADO_HOME, result.sessionId, "_hook_after"))).toBe(true);
+      expect(fs.existsSync(path.join(getSessionDir(result.sessionId), "_hook_before"))).toBe(true);
+      expect(fs.existsSync(path.join(getSessionDir(result.sessionId), "_hook_after"))).toBe(true);
 
       const db = new Database(getWorkflowDbPath());
       const session = db
