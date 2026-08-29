@@ -559,7 +559,7 @@ describe("dashboard logic", () => {
         stepKey: overrides.stepKey ?? "gate1",
         attemptNumber: overrides.attemptNumber ?? null,
         event: overrides.event ?? "confirmed",
-        choice: overrides.choice ?? "approve",
+        answersJson: overrides.answersJson ?? JSON.stringify({ decision: { value: "approve" } }),
         ttyName: overrides.ttyName ?? null,
         createdAt: overrides.createdAt ?? "2026-01-01 10:00:00",
       };
@@ -637,7 +637,7 @@ describe("dashboard logic", () => {
       };
       expect(formatHistoryEntry(entry)).toBe("2026-01-01 10:00:00 [attempt] k1 #2 check:pass");
     });
-    it("gate は [gate] stepKey event choice 形式", () => {
+    it("gate は [gate] stepKey event answers 形式", () => {
       const entry = {
         kind: "gate_event" as const,
         timestamp: "2026-01-01 11:00:00",
@@ -647,12 +647,54 @@ describe("dashboard logic", () => {
           stepKey: "gate1",
           attemptNumber: null,
           event: "rejected",
-          choice: null,
+          answersJson: null,
           ttyName: null,
           createdAt: "2026-01-01 11:00:00",
         } as GateEventRow,
       };
-      expect(formatHistoryEntry(entry)).toBe("2026-01-01 11:00:00 [gate] gate1 rejected choice:-");
+      expect(formatHistoryEntry(entry)).toBe("2026-01-01 11:00:00 [gate] gate1 rejected answers:-");
+    });
+    it("gate は設問ごとの回答を展開表示する", () => {
+      const entry = {
+        kind: "gate_event" as const,
+        timestamp: "2026-01-01 11:00:00",
+        gateEvent: {
+          id: 6,
+          sessionId: "s1",
+          stepKey: "gate1",
+          attemptNumber: 1,
+          event: "confirmed",
+          answersJson: JSON.stringify({
+            decision: { value: "revise", input: "要修正" },
+            comment: "任意コメント",
+          }),
+          ttyName: "/dev/tty",
+          createdAt: "2026-01-01 11:00:00",
+        } as GateEventRow,
+      };
+      const line = formatHistoryEntry(entry);
+      expect(line).toContain("decision: revise (要修正)");
+      expect(line).toContain("comment: 任意コメント");
+      expect(line).toContain("answers:");
+    });
+    it("gate の単一選択は value のみ表示する", () => {
+      const entry = {
+        kind: "gate_event" as const,
+        timestamp: "2026-01-01 11:00:00",
+        gateEvent: {
+          id: 7,
+          sessionId: "s1",
+          stepKey: "gate1",
+          attemptNumber: 1,
+          event: "confirmed",
+          answersJson: JSON.stringify({ decision: { value: "approve" } }),
+          ttyName: "/dev/tty",
+          createdAt: "2026-01-01 11:00:00",
+        } as GateEventRow,
+      };
+      expect(formatHistoryEntry(entry)).toBe(
+        "2026-01-01 11:00:00 [gate] gate1 confirmed answers: decision: approve",
+      );
     });
   });
 });

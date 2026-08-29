@@ -105,21 +105,51 @@ function buildNextResult(
       .map((k) => artifacts.find((a) => a.artifactKey === k))
       .filter(Boolean) as ArtifactRecord[];
 
-    const choicesText = hg.choices
-      .map((c) => `- **${c.value}**: ${c.label}${c.desc ? ` (${c.desc})` : ""}`)
-      .join("\n");
     const artifactsSection =
       artifactList.length > 0
         ? artifactList.map((a) => `- ${a.artifactKey}: ${a.filePath}`).join("\n")
         : "(成果物なし)";
+    const questionsText = hg.questions
+      .map((q, idx) => {
+        const lines: string[] = [];
+        lines.push(
+          `#### Q${idx + 1}/${hg.questions.length}: ${q.key} - ${q.title} (type: ${q.type}${q.required ? ", 必須" : ""})`,
+        );
+        if (q.description) lines.push(`- 説明: ${q.description}`);
+        lines.push(`- key: \`${q.key}\``);
+        lines.push(`- title: "${q.title}"`);
+        lines.push(`- type: \`${q.type}\``);
+        lines.push(`- required: ${q.required ? "true" : "false"}`);
+        if (q.placeholder) lines.push(`- placeholder: "${q.placeholder}"`);
+        if (q.maxLength !== undefined) lines.push(`- maxLength: ${q.maxLength}`);
+        if (q.choices && q.choices.length > 0) {
+          lines.push(`- choices:`);
+          for (const c of q.choices) {
+            let line = `  - \`${c.value}\`: ${c.label}${c.desc ? ` (${c.desc})` : ""}`;
+            if (c.input) {
+              const parts: string[] = [];
+              if (c.input.title) parts.push(`title: "${c.input.title}"`);
+              if (c.input.placeholder) parts.push(`placeholder: "${c.input.placeholder}"`);
+              parts.push(`required: ${c.input.required ? "true" : "false"}`);
+              if (c.input.maxLength !== undefined) parts.push(`maxLength: ${c.input.maxLength}`);
+              line += ` [input: ${parts.join(", ")}]`;
+            }
+            lines.push(line);
+          }
+        }
+        return lines.join("\n");
+      })
+      .join("\n\n");
     const prompt = [
       `## Human Gate: ${stepDef.phase}`,
       "",
       "### 確認する成果物",
       artifactsSection,
       "",
-      "### 選択肢",
-      choicesText,
+      `### 設問一覧 (${hg.questions.length}件 判定設問: \`${hg.outcomeQuestionKey}\`)`,
+      `- 判定設問: \`${hg.outcomeQuestionKey}\``,
+      "",
+      questionsText,
       "",
       "### 人間の確認が必要です",
       "このステップはあなた自身では完了できません。report でゲートに回答することもできません。",
@@ -129,7 +159,7 @@ function buildNextResult(
       `    tado confirm --session ${sessionId}`,
       "",
       "- confirm は TTY 付き端末専用で、エージェントからは実行できません",
-      "- ユーザーが実行すると、成果物と選択肢がその端末に表示され、選択が記録されます",
+      "- ユーザーが実行すると、成果物と設問一覧がその端末に表示され、回答が記録されます",
       "- 承認が済むまでワークフローは停止します。next を再実行するとこのプロンプトが再表示されます",
     ].join("\n");
 

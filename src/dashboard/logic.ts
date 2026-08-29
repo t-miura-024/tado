@@ -374,6 +374,33 @@ export function mergeHistory(
   return entries.slice(0, 20);
 }
 
+export function formatGateAnswers(answersJson: string | null): string {
+  if (!answersJson) return "-";
+  try {
+    const parsed = JSON.parse(answersJson);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return String(answersJson);
+    const obj = parsed as Record<string, unknown>;
+    const parts: string[] = [];
+    for (const [k, v] of Object.entries(obj)) {
+      if (typeof v === "string") {
+        parts.push(`${k}: ${v}`);
+      } else if (v && typeof v === "object" && "value" in (v as Record<string, unknown>)) {
+        const gv = v as { value: string; input?: string };
+        if (gv.input != null && gv.input !== "") {
+          parts.push(`${k}: ${gv.value} (${gv.input})`);
+        } else {
+          parts.push(`${k}: ${gv.value}`);
+        }
+      } else {
+        parts.push(`${k}: ${JSON.stringify(v)}`);
+      }
+    }
+    return parts.length > 0 ? parts.join(", ") : "-";
+  } catch {
+    return String(answersJson);
+  }
+}
+
 export function formatHistoryEntry(entry: HistoryEntry): string {
   if (entry.kind === "attempt") {
     const a = entry.attempt;
@@ -382,8 +409,8 @@ export function formatHistoryEntry(entry: HistoryEntry): string {
     return `${entry.timestamp} [attempt] ${key} #${a.attemptNumber} check:${status}`;
   }
   const g = entry.gateEvent;
-  const choice = g.choice ?? "-";
-  return `${entry.timestamp} [gate] ${g.stepKey} ${g.event} choice:${choice}`;
+  const answersText = formatGateAnswers(g.answersJson ?? null);
+  return `${entry.timestamp} [gate] ${g.stepKey} ${g.event} answers:${answersText === "-" ? "-" : " " + answersText}`;
 }
 
 // For testing prefix match directly

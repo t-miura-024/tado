@@ -68,12 +68,12 @@ tado next --session <id>
   "stepKey": "approve",
   "stepType": "human_gate",
   "action": "human_gate",
-  "prompt": "## Human Gate: 仕様確認\n\n### 確認する成果物\n...\n\n### 選択肢\n- **approve**: 承認\n- **revise**: 修正\n- **abort**: 中断\n\n### 人間の確認が必要です\n...",
+  "prompt": "## Human Gate: 仕様確認\n\n### 確認する成果物\n...\n\n### 設問一覧 (1件 判定設問: `decision`)\n- 判定設問: `decision`\n\n#### Q1/1: decision - 判定 (type: choice_with_input, 必須)\n- key: `decision`\n- title: \"判定\"\n- type: `choice_with_input`\n- choices:\n  - `approve`: 承認\n  - `revise`: 修正が必要 [input: required: true, placeholder: \"修正理由...\", maxLength: 500]\n  - `abort`: 中断\n\n### 人間の確認が必要です\n...",
   "constraints": { "mustCallTaskTool": false, "readonly": true, "reportAfterCompletion": false }
 }
 ```
 
-human_gate ステップは LLM 自身では完了できません。プロンプトの指示に従い、ユーザーに `tado confirm` の実行を促してください（下記「confirm」参照）。`report` で human_gate に回答することはできません。
+human_gate ステップは LLM 自身では完了できません。プロンプトには設問一覧（`key/title/type/choices/input`）と成果物パス、`tado confirm --session <id>` 案内が含まれます。ユーザーに `tado confirm` の実行を促してください（下記「confirm」参照）。`report` で human_gate に回答することはできません。
 
 **parallel:**
 
@@ -136,15 +136,16 @@ human_gate への回答は `report` では受け付けません。人間が自�
 tado confirm --session <id>
 ```
 
-human_gate の回答を人間から直接受け付ける対話コマンドです。
+human_gate の回答を人間から直接受け付ける対話コマンドです。1ゲートで複数設問を一括回答します。
 
 - stdin が TTY の場合のみ実行できるため、エージェントの Bash ツールからは構造的に実行できない
 - 現在のステップが human_gate でない場合はエラーになる
 - TTY なしでの実行試行も `gate_events` テーブルに監査記録として残る
-- fzf 風の TUI（入力で絞り込み、↑↓で選択、Enter で確定）で選択させ、選択に応じて状態遷移する:
-  - `approve`: ゲート通過。次のステップへ
-  - `revise`: `reviseTargetStep` 以降を pending に戻して巻き戻す
-  - `abort`: セッションを中断する
+- 各設問を `clack.select/autocomplete` → 条件付き `clack.text` で順次提示し、進捗 `Qn/M` と設問タイトル・説明を表示する。付帯入力 `input` がある選択肢を選んだ場合は追加入力を求め、必須・文字数バリデーションが即時に行われ未達なら再入力を求める。途中キャンセルは原子的に全破棄して `running` のまま再試行可能
+- 判定設問（`outcomeQuestionKey` で指名）の値で状態遷移する:
+  - `approve` 相当（例: `approve`）: ゲート通過。次のステップへ
+  - `revise` 相当（例: `revise`）: `reviseTargetStep` 以降を pending に戻して巻き戻す
+  - `abort` 相当（例: `abort`）: セッションを中断する
 
 ### status
 
@@ -210,10 +211,26 @@ const def: WorkflowDef = {
       onFail: { action: "escalate" },
       humanGate: {
         presentArtifacts: ["plan.md"],
-        choices: [
-          { value: "approve", label: "承認" },
-          { value: "revise", label: "修正が必要" },
-          { value: "abort", label: "中断" },
+        outcomeQuestionKey: "decision",
+        questions: [
+          {
+            key: "decision",
+            title: "判定",
+            type: "choice_with_input",
+            choices: [
+              { value: "approve", label: "承認" },
+              {
+                value: "revise",
+                label: "修正が必要",
+                input: {
+                  required: true,
+                  placeholder: "修正理由を入力してください",
+                  maxLength: 500,
+                },
+              },
+              { value: "abort", label: "中断" },
+            ],
+          },
         ],
         reviseTargetStep: "phase1_planner",
       },

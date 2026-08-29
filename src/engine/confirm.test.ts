@@ -12,7 +12,7 @@ import {
   getWorkflowsDir,
 } from "./index.ts";
 import type { ConfirmDeps } from "./confirm.ts";
-import { mockConfirmDeps } from "./__fixtures__/confirm-helper.ts";
+import { mockConfirmDeps, mockConfirmAnswers } from "./__fixtures__/confirm-helper.ts";
 
 const TEST_TADO_HOME = path.join(__dirname, "__test_sessions_confirm__");
 process.env.TADO_HOME = TEST_TADO_HOME;
@@ -59,7 +59,7 @@ function gateEvents(sessionId: string): Record<string, unknown>[] {
   const db = new Database(getWorkflowDbPath());
   const rows = db
     .query(
-      "SELECT step_key, attempt_number, event, choice, tty_name FROM gate_events WHERE session_id = ? ORDER BY id",
+      "SELECT step_key, attempt_number, event, answers_json, tty_name FROM gate_events WHERE session_id = ? ORDER BY id",
     )
     .all(sessionId) as Record<string, unknown>[];
   db.close();
@@ -75,7 +75,7 @@ describe("confirm", () => {
     const events = gateEvents(sessionId);
     expect(events).toHaveLength(1);
     expect(events[0].event).toBe("rejected");
-    expect(events[0].choice).toBeNull();
+    expect(events[0].answers_json).toBeNull();
     expect(events[0].tty_name).toBeNull();
 
     const db = new Database(getWorkflowDbPath());
@@ -103,13 +103,15 @@ describe("confirm", () => {
 
     const result = await confirm(sessionId, mockConfirmDeps("approve"));
 
-    expect(result.choice).toBe("approve");
+    expect(result.answers).toEqual({ decision: { value: "approve" } });
     expect(result.nextAction).toBe("continue");
 
     const events = gateEvents(sessionId);
     expect(events).toHaveLength(1);
     expect(events[0].event).toBe("confirmed");
-    expect(events[0].choice).toBe("approve");
+    expect(JSON.parse(events[0].answers_json as string)).toEqual({
+      decision: { value: "approve" },
+    });
     expect(events[0].tty_name).toBe("/dev/test-tty");
 
     const db = new Database(getWorkflowDbPath());
@@ -118,7 +120,7 @@ describe("confirm", () => {
         "SELECT result_json, check_status FROM step_attempts WHERE step_id = (SELECT id FROM steps WHERE session_id = ? AND step_key = ?) ORDER BY attempt_number DESC LIMIT 1",
       )
       .get(sessionId, "step2_human_gate") as Record<string, unknown>;
-    expect(attempt.result_json).toBe("approve");
+    expect(JSON.parse(attempt.result_json as string)).toEqual({ decision: { value: "approve" } });
     expect(attempt.check_status).toBe("pass");
     db.close();
   });
@@ -128,7 +130,8 @@ describe("confirm", () => {
 
     const result = await confirm(sessionId, mockConfirmDeps("revise"));
 
-    expect(result.choice).toBe("revise");
+    const ans = result.answers.decision as { value: string; input?: string };
+    expect(ans.value).toBe("revise");
     expect(result.nextAction).toBe("goto");
     expect(result.targetStep).toBe("step1_task");
 
@@ -184,5 +187,105 @@ describe("confirm", () => {
     await expect(confirm("nonexistent-session", mockConfirmDeps("approve"))).rejects.toThrow(
       EngineError,
     );
+  });
+
+  it("reviseで必須入力がない場合はバリデーションエラーになる", async () => {
+    const sessionId = await reachGate();
+    const badDeps: ConfirmDeps = {
+      isTTY: () => true,
+      ttyName: () => "/dev/test-tty",
+      presentGate: async () => ({ decision: { value: "revise" } }),
+    };
+    await expect(confirm(sessionId, badDeps)).rejects.toThrow("Invalid gate answers");
+    const events = gateEvents(sessionId);
+    expect(events).toHaveLength(0);
+  });
+
+  it("maxLength超過ではバリデーションエラーになる", async () => {
+    const sessionId = await reachGate();
+    const longInput = "x".repeat(501);
+    const badDeps: ConfirmDeps = {
+      isTTY: () => true,
+      ttyName: () => "/dev/test-tty",
+      presentGate: async () => ({ decision: { value: "revise", input: longInput } }),
+    };
+    await expect(confirm(sessionId, badDeps)).rejects.toThrow("Invalid gate answers");
+  });
+
+  it("複数設問の回答がanswersとgateEventsに保存される", async () => {
+    // Prepare a workflow with decision + comment free_text
+    const dir = path.join(getWorkflowsDir(), "multi-question");
+    fs.mkdirSync(dir, { recursive: true });
+    const content = `
+      const def = {
+        id: 'multi-question',
+        steps: [
+          {
+            key: 'gate',
+            phase: 'Gate',
+            type: 'human_gate',
+            maxRetries: 1,
+            onFail: { action: 'escalate' },
+            humanGate: {
+              presentArtifacts: [],
+              outcomeQuestionKey: 'decision',
+              questions: [
+                {
+                  key: 'decision',
+                  title: '判定',
+                  type: 'choice_with_input',
+                  choices: [
+                    { value: 'approve', label: '承認' },
+                    { value: 'revise', label: '差戻し', input: { required: true, placeholder: '理由', maxLength: 500 } },
+                  ],
+                },
+                { key: 'comment', title: 'コメント', type: 'free_text', required: false, maxLength: 100 },
+              ],
+            },
+            check: () => ({ status: 'pass', reasons: [] }),
+          },
+        ],
+      };
+      export default def;
+    `;
+    fs.writeFileSync(path.join(dir, "index.ts"), content);
+    const { sessionId } = await init("multi-question", { title: "test-title" });
+    await next(sessionId);
+    const result = await confirm(
+      sessionId,
+      mockConfirmAnswers({ decision: { value: "approve" }, comment: "任意コメント" }),
+    );
+    expect(result.answers).toEqual({ decision: { value: "approve" }, comment: "任意コメント" });
+    const events = gateEvents(sessionId);
+    expect(JSON.parse(events[0].answers_json as string)).toEqual({
+      decision: { value: "approve" },
+      comment: "任意コメント",
+    });
+  });
+
+  it("途中キャンセルは原子的に全破棄してrunningのまま", async () => {
+    const sessionId = await reachGate();
+    let callCount = 0;
+    const cancelDeps: ConfirmDeps = {
+      isTTY: () => true,
+      ttyName: () => "/dev/test-tty",
+      presentGate: async () => {
+        callCount++;
+        return null;
+      },
+    };
+    await expect(confirm(sessionId, cancelDeps)).rejects.toThrow("confirm canceled");
+    expect(callCount).toBe(1);
+    const events = gateEvents(sessionId);
+    expect(events).toHaveLength(0);
+    const db = new Database(getWorkflowDbPath());
+    const step = db
+      .query("SELECT status FROM steps WHERE session_id = ? AND step_key = ?")
+      .get(sessionId, "step2_human_gate") as Record<string, unknown>;
+    expect(step.status).toBe("running");
+    db.close();
+    // retry with valid answer should succeed
+    const retry = await confirm(sessionId, mockConfirmDeps("approve"));
+    expect(retry.nextAction).toBe("continue");
   });
 });

@@ -75,10 +75,27 @@ const def: WorkflowDef = {
       onFail: { action: "escalate" },
       humanGate: {
         presentArtifacts: [],
-        choices: [
-          { value: "approve", label: "公開", desc: "記事を公開してワークフローを完了する" },
-          { value: "revise", label: "修正指示", desc: "校正ステップをやり直す" },
-          { value: "abort", label: "中断" },
+        outcomeQuestionKey: "decision",
+        questions: [
+          {
+            key: "decision",
+            title: "判定",
+            type: "choice_with_input",
+            choices: [
+              { value: "approve", label: "公開", desc: "記事を公開してワークフローを完了する" },
+              {
+                value: "revise",
+                label: "修正指示",
+                desc: "校正ステップをやり直す",
+                input: {
+                  required: true,
+                  placeholder: "修正理由を入力してください",
+                  maxLength: 500,
+                },
+              },
+              { value: "abort", label: "中断" },
+            ],
+          },
         ],
         reviseTargetStep: "composed_proofread",
       },

@@ -117,7 +117,7 @@ export const gateEvents = sqliteTable(
     stepKey: text("step_key").notNull(),
     attemptNumber: integer("attempt_number"),
     event: text("event").notNull(),
-    choice: text("choice"),
+    answersJson: text("answers_json"),
     ttyName: text("tty_name"),
     createdAt: text("created_at")
       .notNull()
