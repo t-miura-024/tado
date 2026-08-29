@@ -1,0 +1,58 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 240 21% 15%;
+    --foreground: 226 64% 88%;
+    --card: 240 21% 15%;
+    --card-foreground: 226 64% 88%;
+    --primary: 232 97% 85%;
+    --primary-foreground: 240 21% 15%;
+    --secondary: 240 13% 31%;
+    --secondary-foreground: 226 64% 88%;
+    --muted: 240 13% 31%;
+    --muted-foreground: 228 11% 65%;
+    --accent: 240 13% 31%;
+    --accent-foreground: 226 64% 88%;
+    --border: 240 13% 31%;
+    --input: 240 13% 31%;
+    --ring: 267 84% 81%;
+    --radius: 0.5rem;
+  }
+}
+
+@layer base {
+  html {
+    background: radial-gradient(ellipse at top, #313244 0%, #1e1e2e 50%, #11111b 100%);
+    background-attachment: fixed;
+  }
+  body {
+    @apply text-catppuccin-text;
+    background: radial-gradient(ellipse at top, #313244 0%, #1e1e2e 50%, #11111b 100%);
+    background-attachment: fixed;
+    font-family:
+      ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New",
+      monospace;
+    min-height: 100vh;
+  }
+  #root {
+    background: transparent;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #181825;
+}
+::-webkit-scrollbar-thumb {
+  background: #45475a;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #585b70;
+}

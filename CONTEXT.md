@@ -56,9 +56,9 @@ _Avoid_: テンプレート（単なる文字列置換の意味で使う場合�
 生成したワークフローが `{TADO_HOME}/workflows/<workflow-id>/index.ts` に配置後、即座に `tado init --workflow <id> --title "<title>"` で初期化できる状態にあることを機械的に確認する工程。`tsc --noEmit` / `oxlint` / `tado init --workflow <id> --title` + `tado list --workflow --json` の3点を指す。
 _Avoid_: テスト（検証は生成直後の機械的チェックを指し、ユニットテスト全般を指さない）
 
-**ダッシュボード（TUI）**:
-`tado dashboard` で同一ターミナル内に立ち上がる、ワークフロー実行状態を視覚的に確認する参照専用のTUI画面。
-_Avoid_: Webダッシュボード, ブラウザUI
+**ダッシュボード（GUI）**:
+`tado dashboard` でローカルHTTPサーバーを起動しブラウザで表示する、ワークフロー実行状態を視覚的に確認する参照専用のGUI画面。React + Vite + Tailwind CSS + shadcn/ui + Three.js で実装し、Catppuccin Mocha配色で統一する。2カラム（サイドバー垂直タブ + メインコンテンツ）レイアウトと進捗フロー図を継承する。
+_Avoid_: TUIダッシュボード, Webダッシュボード（リモート公開の意味で使う場合）
 
 **サイドバー**:
 画面左側の垂直タブ領域。セッションをタブとして縦に並べ、選択操作を受け付ける。
