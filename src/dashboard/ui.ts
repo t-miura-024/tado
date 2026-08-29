@@ -115,6 +115,7 @@ export interface DashboardViewState {
   artifactsExpanded?: boolean;
   existsMap?: Map<string, boolean>;
   selectedSession?: SessionRow;
+  focusedPane: "sessions" | "artifacts";
 }
 
 type CachedNodes = {
@@ -230,7 +231,7 @@ export function renderDashboard(
       height: "100%",
       border: true,
       borderStyle: "single",
-      borderColor: "#444444",
+      borderColor: viewState.focusedPane === "sessions" ? "#FFCC00" : "#444444",
       title: " Sessions ",
       titleAlignment: "left",
       flexDirection: "column",
@@ -243,7 +244,7 @@ export function renderDashboard(
       height: "100%",
       border: true,
       borderStyle: "single",
-      borderColor: "#444444",
+      borderColor: viewState.focusedPane === "artifacts" ? "#FFCC00" : "#444444",
       title: " Details ",
       titleAlignment: "left",
       stickyScroll: false,
@@ -277,6 +278,11 @@ export function renderDashboard(
     }
     clearChildren(sidebar);
     clearChildren(mainBox);
+    // update borderColor/title to reflect focused pane
+    const focusedColor = "#FFCC00";
+    const unfocusedColor = "#444444";
+    sidebar.borderColor = viewState.focusedPane === "sessions" ? focusedColor : unfocusedColor;
+    mainBox.borderColor = viewState.focusedPane === "artifacts" ? focusedColor : unfocusedColor;
     // update footer content
     const needExpandHint =
       viewState.selectedArtifacts.length > ARTIFACT_FOLD_THRESHOLD && !viewState.artifactsExpanded;

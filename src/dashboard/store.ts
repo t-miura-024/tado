@@ -99,16 +99,18 @@ export function loadDashboardSnapshot(
       allSessions = allSessionsRaw;
     }
 
+    const displayedIds = new Set(allSessions.map((s) => s.id));
+
     const allSteps = db.select().from(steps).all() as StepRow[];
-    // group by sessionId, sort by stepIndex within each group
+    // group by sessionId, sort by stepIndex within each group — 表示中のみに統一
     const stepsBySession = new Map<string, StepRow[]>();
     for (const s of allSessions) {
       stepsBySession.set(s.id, []);
     }
     for (const st of allSteps) {
+      if (!displayedIds.has(st.sessionId)) continue;
       const arr = stepsBySession.get(st.sessionId);
       if (arr) arr.push(st);
-      else stepsBySession.set(st.sessionId, [st]);
     }
     for (const [, arr] of stepsBySession) {
       arr.sort((a, b) => a.stepIndex - b.stepIndex);
@@ -125,26 +127,32 @@ export function loadDashboardSnapshot(
     const artifactsBySession = new Map<string, ArtifactRow[]>();
     const gateEventsBySession = new Map<string, GateEventRow[]>();
     const attemptsBySession = new Map<string, StepAttemptRow[]>();
+    for (const s of allSessions) {
+      artifactsBySession.set(s.id, []);
+      gateEventsBySession.set(s.id, []);
+      attemptsBySession.set(s.id, []);
+    }
 
-    // Load artifacts/gateEvents/attempts for all sessions efficiently via single queries
+    // Load artifacts/gateEvents/attempts — 表示中のみに統一
     const allArtifacts = db.select().from(artifacts).all() as ArtifactRow[];
     for (const a of allArtifacts) {
+      if (!displayedIds.has(a.sessionId)) continue;
       const arr = artifactsBySession.get(a.sessionId);
       if (arr) arr.push(a);
-      else artifactsBySession.set(a.sessionId, [a]);
     }
 
     const allGateEvents = db.select().from(gateEvents).all() as GateEventRow[];
     for (const g of allGateEvents) {
+      if (!displayedIds.has(g.sessionId)) continue;
       const arr = gateEventsBySession.get(g.sessionId);
       if (arr) arr.push(g);
-      else gateEventsBySession.set(g.sessionId, [g]);
     }
 
     const allAttempts = db.select().from(stepAttempts).all() as StepAttemptRow[];
-    // Map stepId -> sessionId for attempt grouping
+    // Map stepId -> sessionId for attempt grouping — 表示中のみ
     const stepIdToSession = new Map<number, string>();
     for (const st of allSteps) {
+      if (!displayedIds.has(st.sessionId)) continue;
       stepIdToSession.set(st.id, st.sessionId);
     }
     for (const at of allAttempts) {
@@ -152,7 +160,6 @@ export function loadDashboardSnapshot(
       if (!sid) continue;
       const arr = attemptsBySession.get(sid);
       if (arr) arr.push(at);
-      else attemptsBySession.set(sid, [at]);
     }
 
     let selectedSteps: StepRow[] = [];

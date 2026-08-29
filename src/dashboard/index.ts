@@ -104,28 +104,10 @@ export async function runDashboard(): Promise<void> {
     let selectedGateEvents: typeof currentSnapshot.selectedGateEvents = [];
     let selectedSteps: typeof currentSnapshot.selectedSteps = [];
     if (selectedId) {
-      selectedArtifacts =
-        currentSnapshot.artifactsBySession.get(selectedId) ??
-        (currentSnapshot.selectedSession?.id === selectedId
-          ? currentSnapshot.selectedArtifacts
-          : []) ??
-        [];
-      selectedAttempts =
-        currentSnapshot.attemptsBySession.get(selectedId) ??
-        (currentSnapshot.selectedSession?.id === selectedId
-          ? currentSnapshot.selectedAttempts
-          : []) ??
-        [];
-      selectedGateEvents =
-        currentSnapshot.gateEventsBySession.get(selectedId) ??
-        (currentSnapshot.selectedSession?.id === selectedId
-          ? currentSnapshot.selectedGateEvents
-          : []) ??
-        [];
-      selectedSteps =
-        currentSnapshot.stepsBySession.get(selectedId) ??
-        (currentSnapshot.selectedSession?.id === selectedId ? currentSnapshot.selectedSteps : []) ??
-        [];
+      selectedArtifacts = currentSnapshot.artifactsBySession.get(selectedId) ?? [];
+      selectedAttempts = currentSnapshot.attemptsBySession.get(selectedId) ?? [];
+      selectedGateEvents = currentSnapshot.gateEventsBySession.get(selectedId) ?? [];
+      selectedSteps = currentSnapshot.stepsBySession.get(selectedId) ?? [];
     }
     const selectedSession = currentSnapshot.sessions[currentSelectedIndex];
     let existsMap: Map<string, boolean> | undefined;
@@ -153,6 +135,7 @@ export async function runDashboard(): Promise<void> {
       artifactsExpanded,
       existsMap,
       selectedSession,
+      focusedPane,
     };
   };
 

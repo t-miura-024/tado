@@ -313,4 +313,42 @@ describe("dashboard store", () => {
     expect(snap.sessions).toHaveLength(3);
     expect(snap.totalSessions).toBe(3);
   });
+
+  it("limit時に選択中セッションのsteps/artifactsが取得できる", () => {
+    const db = setupDb();
+    const raw = new Database(getWorkflowDbPath());
+    for (let i = 0; i < 5; i++) {
+      raw.run(
+        `INSERT INTO sessions (id, workflow_id, workflow_path, session_dir, cwd, title, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          `s${i}`,
+          "wf1",
+          "/tmp/wf/wf1/index.ts",
+          path.join(TEST_BASE, `s${i}`),
+          "/tmp/proj",
+          `t${i}`,
+          "running",
+          `2026-01-01 0${i}:00:00`,
+        ],
+      );
+    }
+    // s0（古い）にsteps/artifactsを紐付け
+    raw.run(
+      `INSERT INTO steps (session_id, step_key, step_index, type, status, max_retries) VALUES (?, ?, ?, ?, ?, ?)`,
+      ["s0", "step1", 0, "task", "passed", 3],
+    );
+    raw.run(
+      `INSERT INTO artifacts (session_id, step_key, artifact_key, file_path) VALUES (?, ?, ?, ?)`,
+      ["s0", "step1", "out.md", "/tmp/out.md"],
+    );
+    raw.close();
+    db.$client.close();
+    const snap = loadDashboardSnapshot("/tmp/proj", "s0", { limit: 2 });
+    expect(snap.sessions.map((s) => s.id)).toContain("s0");
+    expect(snap.stepsBySession.get("s0")).toHaveLength(1);
+    expect(snap.stepsBySession.get("s0")![0].stepKey).toBe("step1");
+    expect(snap.artifactsBySession.get("s0")).toHaveLength(1);
+    // hiddenセッション（s1）は表示されないのでmapに含めない（空表示の原因だった不統一を解消）
+    expect(snap.stepsBySession.has("s1")).toBe(false);
+  });
 });
