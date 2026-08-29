@@ -1,7 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
+import { catppuccinNumber } from "@/lib/catppuccin";
 
-const CATPPUCCIN_COLORS = [0xcba6f7, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xb4befe, 0x74c7ec];
+const CATPPUCCIN_COLORS = [
+  catppuccinNumber.mauve,
+  catppuccinNumber.blue,
+  catppuccinNumber.pink,
+  catppuccinNumber.teal,
+  catppuccinNumber.lavender,
+  catppuccinNumber.sapphire,
+];
 
 function hexToRgb(hex: number): [number, number, number] {
   return [(hex >> 16) & 0xff, (hex >> 8) & 0xff, hex & 0xff].map((v) => v / 255) as [
@@ -38,7 +46,7 @@ export default function ThreeBackground() {
       renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: true });
       renderer.setSize(window.innerWidth, window.innerHeight);
       renderer.setPixelRatio(1);
-      renderer.setClearColor(0x1e1e2e, 0);
+      renderer.setClearColor(catppuccinNumber.base, 0);
 
       const count = 60;
       const geometry = new THREE.BufferGeometry();

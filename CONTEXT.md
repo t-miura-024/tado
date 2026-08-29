@@ -5,39 +5,15 @@
 ## Language
 
 **ヒューマンゲート（human_gate）**:
-ワークフロー中、人間だけが下せる判断を差し挟むステップ型。1ステップ内に複数のゲート設問を持ち、`tado confirm` の一括回答で通過する。エンジンは人間の関与なしには通過できないことを保証する。
+ワークフロー中、人間だけが下せる判断を差し挟むステップ型。エンジンは人間の関与なしには通過できないことを保証する。
 _Avoid_: 承認ステップ, approval step, チェックポイント
 
-**ゲート設問（GateQuestion）**:
-human_gate ステップ内で人間に提示する1つの問い。`key` / `title` / `type` / `choices` / `required` 等で構成される。
-_Avoid_: 質問（汎用的）, 設問項目
-
-**設問型（QuestionType）**:
-GateQuestion の種別。`single_choice`（選択のみ）/ `free_text`（自由記述のみ）/ `choice_with_input`（選択＋条件付き入力）の3種。
-_Avoid_: タイプ（カタカナ汎用）
-
-**ゲート回答（GateAnswer）**:
-GateQuestion に対する人間の回答値。`single_choice` は選択値文字列、`free_text` は自由記述文字列、`choice_with_input` は `{ value, input? }` 構造。
-_Avoid_: subagentOutput（ゲート文脈での転記値）, ユーザー入力（汎用的）
-
-**ゲート回答集合（GateAnswers）**:
-1つの human_gate ステップに対する全設問の回答の集合。`Record<questionKey, GateAnswer>` 形式で永続化され、`ConditionCtx.gateAnswers[stepKey][questionKey]` で参照される。
-_Avoid_: gateChoices（旧単一値）, ゲート回答（単数と混同する用法）
-
-**判定設問（OutcomeQuestion）**:
-ゲート内で全体判定（continue/goto/abort）を決めるために `HumanGateStepDef.outcomeQuestionKey` で指名された設問。通常は `single_choice` / `choice_with_input` で `approve/revise/abort` を値に含む。
-_Avoid_: 承認設問（汎用的）
-
-**選択肢付帯入力（ChoiceInput）**:
-GateChoice に紐づく自由入力欄の定義。`required` / `placeholder` / `maxLength` / `title` 等を持つ。選択肢の値に応じて入力の要否が決まる。
-_Avoid_: コメント欄（汎用的）, 追加入力（汎用的）
-
-**ゲート回答集合の参照（gateAnswers）**:
-`ConditionCtx.gateAnswers[stepKey][questionKey]` で設問単位の回答を参照する仕組み。旧 `gateChoices[stepKey]`（単一文字列）は廃止。
-_Avoid_: gateChoices
+**ゲート回答**:
+ヒューマンゲートにおける人間の選択（approve / revise / abort）。confirm を通じてのみエンジンに記録され、LLM が代答することはない。本設計では単一選択のみを扱い、旧来の GateQuestion / QuestionType / ChoiceInput / GateAnswers / OutcomeQuestion 等による複数設問・条件付き入力はゼロベース再設計により廃止し、縮退範囲と移行は ADR 0017 系に記録する。
+_Avoid_: subagentOutput（ゲート文脈での転記値）, ユーザー入力
 
 **confirm（承認サブコマンド）**:
-人間が自分の端末（TTY 付き）で実行し、ゲート回答集合を記録して状態遷移まで行う CLI 操作。複数設問を順次対話で回収し、途中キャンセルは原子的に全破棄する。エージェントの Bash ツールからは TTY がないため構造的に実行できない。
+人間が自分の端末（TTY 付き）で実行し、ゲート回答を記録して状態遷移まで行う CLI 操作。エージェントの Bash ツールからは TTY がないため構造的に実行できない。単一選択のため複数設問の順次回収や途中キャンセルの原子性は不要であり、旧来の原子性保証は廃止した。
 _Avoid_: approve コマンド, 承認 API
 
 **無視型スキップ**:
@@ -81,37 +57,45 @@ _Avoid_: テンプレート（単なる文字列置換の意味で使う場合�
 _Avoid_: テスト（検証は生成直後の機械的チェックを指し、ユニットテスト全般を指さない）
 
 **ダッシュボード（GUI）**:
-`tado dashboard` でローカルHTTPサーバーを起動しブラウザで表示する、ワークフロー実行状態を視覚的に確認する参照専用のGUI画面。React + Vite + Tailwind CSS + shadcn/ui + Three.js で実装し、Catppuccin Mocha配色で統一する。2カラム（サイドバー垂直タブ + メインコンテンツ）レイアウトと進捗フロー図を継承する。
-_Avoid_: TUIダッシュボード, Webダッシュボード（リモート公開の意味で使う場合）
+`tado dashboard` でローカルHTTPサーバーを起動しブラウザで表示する、ワークフロー定義を主役に進捗を重ねて参照する参照専用GUI。React+Vite+Tailwind+shadcn/ui+Three.js/fiber/drei+Catppuccin Mochaで構築し、3ペイン（左 定義ブラウザ / 中 定義キャンバス / 右 詳細ペイン）とノードグラフ+三層オーバーレイで構成する。配信は Bun.serve のランダムポートで `src/dashboard/client/dist` を配信し `DIST_DIR` 未存在時はフォールバックHTML、1秒ポーリングで更新し、軽量化（60 Points/BufferGeometry）と `prefers-reduced-motion` / `visibilitychange` / CSSフォールバックで完了条件4を担保する。`@opentui/core` は撤去済み。
+_Avoid_: TUIダッシュボード, 2カラム垂直タブ, 進捗フロー図（旧）
 
-**サイドバー**:
-画面左側の垂直タブ領域。セッションをタブとして縦に並べ、選択操作を受け付ける。
-_Avoid_: サイドパネル, ナビゲーション
+**定義ブラウザ**:
+画面左側のワークフロー→セッション選択領域。ワークフロー定義一覧と、そのワークフローに紐づくセッション一覧を階層で示し、単一アクティブセッションの選択を受け付ける。ワークフロー0件 / セッション0件 / 取得失敗時は空状態・エラー表示を行い、検索/フィルタ（id/説明・title/id 部分一致）を備える。完了条件8の操作・空・エラー表示に対応する。
+_Avoid_: サイドバー, 垂直タブ, サイドパネル
 
-**垂直タブ**:
-サイドバー内で1セッションを1タブとして縦積みするUI単位。選択中タブに対応するセッション詳細がメインコンテンツに表示される。
-_Avoid_: 詳細パネル, コンテンツエリア
+**定義キャンバス**:
+画面中央の主役領域。ワークフロー定義をノードグラフ（ステップ=ノード、遷移=エッジ、横=進行・縦=並列、Phase=深度レイヤー）として描画する。エッジ/深度/発光は Three.js/R3F で構造表現し、パン/ズーム/ミニマップは DOM で制御して俯瞰⇔詳細を往復する。Three 失敗時は CSS グラデーションフォールバックし、`prefers-reduced-motion` / `visibilitychange` でアニメを停止する。
+_Avoid_: メインコンテンツ, フロー図（旧縦方向ボックス）, キャンバス（汎用）
 
-**メインコンテンツ**:
-画面右側の詳細領域。選択中セッションの進捗フロー図（定義兼用）と進行履歴・成果物一覧を表示する。
-_Avoid_: 詳細パネル, コンテンツエリア
+**詳細ペイン**:
+画面右側の選択中ノード詳細領域。上段にステップ定義（type/phase/prompt）、中段に進捗（status/attempt/checkResult）、下段に成果物（artifactKey: filePath、存在✓/欠損✗、プレビュー）を表示する。上段は type/phase/prompt、中段は status/attempt/checkResult、下段は artifact 存在判定とプレビュー（上限 50行/8KB/18拡張子）に分離し、欠損時は「欠損✗」、非対応時は理由を表示してフォールバックする。
+_Avoid_: メインコンテンツ, 詳細パネル, コンテンツエリア
+
+**ノードグラフ**:
+ワークフロー定義を有向グラフとして表現する形式。1ステップ=1ノードで `phase/key/type` を示し、遷移をエッジで結ぶ。
+_Avoid_: 進捗フロー図（旧）, ステッパー, ガントチャート
+
+**三層オーバーレイ**:
+定義キャンバス上に進捗を重ねる三層表現。ノード色/発光で現在ステップ、エッジのアニメーションで遷移履歴、右詳細ペインで成果物/アーティファクトを参照する。Three 失敗時は CSS グラデーションフォールバックで代替し、`prefers-reduced-motion` / `visibilitychange` ではアニメを停止して 60 Points/BufferGeometry 程度に軽量化する。
+_Avoid_: 進捗ハイライト（単層）, オーバーレイ（汎用）
+
+**単一アクティブセッション**:
+定義キャンバスに重ねる進捗の選択モデル。左の定義ブラウザで選択された1セッションの進捗のみをオーバーレイし、未選択時は定義のみを表示するブラウズモードとなる。未選択時はブラウズモード、選択でオーバーレイ、再選択で切替、ワークフロー不一致時は定義のみ表示にフォールバックし、初期選択は CWD 紐づけ最新／なければ全体最新（`初期選択セッション` 参照）とする。
+_Avoid_: 全セッション同時重ね, セッション一覧駆動
 
 **参照専用**:
 ダッシュボードがワークフロー定義やセッション状態の作成・変更・削除を一切行わないスコープ制約。
 _Avoid_: 読み取り専用モード（曖昧）, view-only
 
 **進捗率**:
-`passedステップ数 / 全ステップ数` で算出する、サイドバー各タブに表示する進捗割合。skippedは分母に含めるが分子に含めない。
+`passedステップ数 / 全ステップ数` で算出する、定義ブラウザ各セッションに表示する進捗割合。skippedは分母に含めるが分子に含めない。
 _Avoid_: currentStep位置による率, (passed+running)/total
 
 **初期選択セッション**:
 起動時CWDに紐づくセッションのうち `updated_at` 最新、該当なしは全体最新。
 _Avoid_: 最後に作成されたセッション, ランダム選択
 
-**進捗フロー図**:
-ワークフロー定義と進捗を兼ねて視覚化する縦方向のボックス＋矢印図。1ステップ=1ノードで `phase/key/type` を表示し、`status` と `currentStep` を色・枠で強調。conditionでskipされたステップは灰色単線枠＋ `skipped` ラベルで区別する。
-_Avoid_: ステッパー（リスト）, ガントチャート
-
 **スキップ（skipped）**:
-`condition` が `false` を返したため実行されず `steps.status='skipped'` となったステップ。フロー図では灰色単線枠＋ラベルで表示し、進捗率の分子には含めない。
+`condition` が `false` を返したため実行されず `steps.status='skipped'` となったステップ。ノードグラフでは灰色単線枠＋ `skipped` ラベルで区別し、進捗率の分子には含めない。
 _Avoid_: スキップされたステップ（冗長）, 未実行

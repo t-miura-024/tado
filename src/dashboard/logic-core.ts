@@ -341,7 +341,7 @@ export function mergeHistory(
     id: number;
     stepKey: string;
     event: string;
-    answersJson: string | null;
+    answersJson?: string | null;
     createdAt: string | null;
   }[],
   stepIdToKey?: Map<number, string>,
@@ -354,7 +354,14 @@ export function mergeHistory(
   }
   for (const g of gateEvents) {
     const ts = g.createdAt ?? "";
-    entries.push({ kind: "gate_event", timestamp: ts, gateEvent: g });
+    const normalized = {
+      id: g.id,
+      stepKey: g.stepKey,
+      event: g.event,
+      answersJson: (g as { answersJson?: string | null }).answersJson ?? null,
+      createdAt: g.createdAt,
+    };
+    entries.push({ kind: "gate_event", timestamp: ts, gateEvent: normalized });
   }
   entries.sort((a, b) => {
     if (a.timestamp !== b.timestamp) {
@@ -405,6 +412,169 @@ export function formatHistoryEntry(entry: HistoryEntry): string {
   const g = entry.gateEvent;
   const answersText = formatGateAnswers(g.answersJson ?? null);
   return `${entry.timestamp} [gate] ${g.stepKey} ${g.event} answers:${answersText === "-" ? "-" : " " + answersText}`;
+}
+
+export function groupSessionsByWorkflowId<T extends { workflowId: string }>(
+  sessions: T[],
+): Map<string, T[]> {
+  const m = new Map<string, T[]>();
+  for (const s of sessions) {
+    const arr = m.get(s.workflowId);
+    if (arr) arr.push(s);
+    else m.set(s.workflowId, [s]);
+  }
+  return m;
+}
+
+// ---------------------------------------------------------------------------
+// Canvas layout helpers (fs-free, M3)
+// ---------------------------------------------------------------------------
+
+export interface CanvasNodeInput {
+  key: string;
+  phase: string | null;
+  type: string;
+  index: number;
+}
+
+export interface CanvasNode {
+  key: string;
+  phase: string | null;
+  type: string;
+  index: number;
+  phaseIndex: number;
+  withinPhaseIndex: number;
+  phaseSize: number;
+  x: number;
+  y: number;
+}
+
+export interface CanvasEdge {
+  from: string;
+  to: string;
+}
+
+const CANVAS_NODE_WIDTH = 180;
+const CANVAS_NODE_HEIGHT = 72;
+const CANVAS_COL_GAP = 56;
+const CANVAS_ROW_GAP = 16;
+const CANVAS_PADDING_X = 24;
+const CANVAS_PADDING_Y = 24;
+
+export function layoutWorkflowSteps(steps: CanvasNodeInput[]): {
+  nodes: CanvasNode[];
+  edges: CanvasEdge[];
+  width: number;
+  height: number;
+} {
+  if (steps.length === 0) return { nodes: [], edges: [], width: 0, height: 0 };
+  // Phase order by first appearance
+  const phaseOrder: string[] = [];
+  const phaseToIndex = new Map<string, number>();
+  for (const s of steps) {
+    const ph = s.phase ?? "__none__";
+    if (!phaseToIndex.has(ph)) {
+      phaseToIndex.set(ph, phaseOrder.length);
+      phaseOrder.push(ph);
+    }
+  }
+  // Group steps by phase for vertical sizing
+  const groups = new Map<string, CanvasNodeInput[]>();
+  for (const s of steps) {
+    const ph = s.phase ?? "__none__";
+    const arr = groups.get(ph);
+    if (arr) arr.push(s);
+    else groups.set(ph, [s]);
+  }
+  const nodes: CanvasNode[] = [];
+  // Build nodes with x based on phaseIndex, y based on within-phase order
+  // Keep y for each phase starting at 0 (simple vertical stacking)
+  for (const s of steps) {
+    const ph = s.phase ?? "__none__";
+    const pIdx = phaseToIndex.get(ph)!;
+    const group = groups.get(ph)!;
+    const withinIdx = group.findIndex((g) => g.key === s.key && g.index === s.index);
+    const phaseSize = group.length;
+    const x = CANVAS_PADDING_X + pIdx * (CANVAS_NODE_WIDTH + CANVAS_COL_GAP);
+    const y = CANVAS_PADDING_Y + withinIdx * (CANVAS_NODE_HEIGHT + CANVAS_ROW_GAP);
+    // For groups with multiple nodes, center offset could be applied, but keep simple stacking at top
+    nodes.push({
+      key: s.key,
+      phase: s.phase,
+      type: s.type,
+      index: s.index,
+      phaseIndex: pIdx,
+      withinPhaseIndex: withinIdx >= 0 ? withinIdx : 0,
+      phaseSize,
+      x,
+      y,
+    });
+  }
+
+  // Edges: linear chain in definition order + branching for phase-parallel case
+  const edges: CanvasEdge[] = [];
+  // Build map key -> node for quickly identifying parallel forks
+  // For simplicity, connect each step to next step in order (left->right logical).
+  // If next step shares same phase (parallel), the edge will be vertical-adjacent but still left->right will appear nearly vertical — still okay.
+  // To emphasize branching, when a phase has multiple nodes, connect prev-phase last node to each node of that phase, and each node to next-phase first node.
+  // Detect contiguous phase groups in step order.
+  // First, compress steps into phase-run groups (consecutive same phase)
+  const runs: { phase: string | null; steps: CanvasNodeInput[] }[] = [];
+  for (const s of steps) {
+    const last = runs.length > 0 ? runs[runs.length - 1] : undefined;
+    if (last && last.phase === s.phase) last.steps.push(s);
+    else runs.push({ phase: s.phase, steps: [s] });
+  }
+  // Now create branching edges between runs
+  for (let r = 0; r < runs.length; r++) {
+    const cur = runs[r]!;
+    const nxt = runs[r + 1];
+    if (!nxt) continue;
+    if (cur.steps.length === 1 && nxt.steps.length === 1) {
+      edges.push({ from: cur.steps[0]!.key, to: nxt.steps[0]!.key });
+    } else if (cur.steps.length === 1 && nxt.steps.length > 1) {
+      // fork
+      for (const ns of nxt.steps) edges.push({ from: cur.steps[0]!.key, to: ns.key });
+    } else if (cur.steps.length > 1 && nxt.steps.length === 1) {
+      // join
+      for (const cs of cur.steps) edges.push({ from: cs.key, to: nxt.steps[0]!.key });
+    } else {
+      // many-to-many: connect each to each (mesh) — keep simple join as each cur to first of nxt and last? Instead connect bipartite partially
+      // Connect each cur to each nxt for visual completeness (capped)
+      for (const cs of cur.steps) {
+        for (const ns of nxt.steps) {
+          edges.push({ from: cs.key, to: ns.key });
+          if (edges.length > 60) break;
+        }
+        if (edges.length > 60) break;
+      }
+    }
+    if (edges.length > 60) break;
+  }
+  // Fallback if edges still empty but steps>1 and no runs分岐? linear already covered; if still empty use linear fallback
+  if (edges.length === 0 && steps.length > 1) {
+    for (let i = 0; i < steps.length - 1; i++)
+      edges.push({ from: steps[i]!.key, to: steps[i + 1]!.key });
+  }
+
+  const maxPhaseIdx = Math.max(...nodes.map((n) => n.phaseIndex));
+  const maxYPerPhase = new Map<number, number>();
+  for (const n of nodes) {
+    const cur = maxYPerPhase.get(n.phaseIndex) ?? 0;
+    maxYPerPhase.set(n.phaseIndex, Math.max(cur, n.y + CANVAS_NODE_HEIGHT));
+  }
+  const overallHeight = Math.max(
+    ...Array.from(maxYPerPhase.values()),
+    CANVAS_PADDING_Y + CANVAS_NODE_HEIGHT,
+  );
+  const width =
+    CANVAS_PADDING_X * 2 + (maxPhaseIdx + 1) * CANVAS_NODE_WIDTH + maxPhaseIdx * CANVAS_COL_GAP;
+  const height = overallHeight + CANVAS_PADDING_Y;
+  return { nodes, edges, width, height };
+}
+
+export function getPhaseDepthStyle(phaseIndex: number): { z: number; opacity: number } {
+  return { z: phaseIndex, opacity: Math.max(0.85, 1 - phaseIndex * 0.04) };
 }
 
 export const _internal = {

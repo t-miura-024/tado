@@ -66,6 +66,9 @@ export async function runDashboard(): Promise<void> {
 
   console.log(`\n  tado dashboard running at ${url}\n`);
   console.log(`  API: ${url}/api/snapshot`);
+  console.log(`  API: ${url}/api/workflows`);
+  console.log(`  API: ${url}/api/sessions`);
+  console.log(`  API: ${url}/api/preview`);
   console.log(`  Press Ctrl+C to stop\n`);
 
   openBrowser(url);
