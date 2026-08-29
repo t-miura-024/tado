@@ -175,7 +175,7 @@ import { buildStepPrompt } from "tado/prompt";
 
 #### human_gate
 
-人間による承認・判断を挟むステップです。
+人間による承認・判断を挟むステップです。1ゲートで複数設問を一括回答できます。
 
 ```typescript
 {
@@ -186,10 +186,20 @@ import { buildStepPrompt } from "tado/prompt";
   onFail: { action: "escalate" },
   humanGate: {
     presentArtifacts: ["spec.md"],
-    choices: [
-      { value: "approve", label: "承認" },
-      { value: "revise", label: "修正が必要" },
-      { value: "abort", label: "中断" },
+    outcomeQuestionKey: "decision",
+    questions: [
+      {
+        key: "decision",
+        title: "判定",
+        type: "choice_with_input",
+        choices: [
+          { value: "approve", label: "承認" },
+          { value: "revise", label: "修正が必要", input: { required: true, placeholder: "修正理由を入力してください", maxLength: 500 } },
+          { value: "abort", label: "中断" },
+        ],
+      },
+      // 必要に応じて自由記述設問を追加
+      // { key: "comment", title: "コメント", type: "free_text", required: false, placeholder: "任意コメント", maxLength: 1000 },
     ],
     reviseTargetStep: "write_spec",
   },
@@ -198,8 +208,10 @@ import { buildStepPrompt } from "tado/prompt";
 ```
 
 - `presentArtifacts`: 提示する成果物キーの配列
-- `choices`: 人間に提示する選択肢
-- `reviseTargetStep`: `revise` 選択時に巻き戻るステップの `key`
+- `outcomeQuestionKey`: ゲート全体の状態遷移（continue/goto/abort）を決める判定設問の `key`
+- `questions`: ゲート設問の配列（`GateQuestion[]`）。各設問は `key` / `title` / `type`（`single_choice` / `free_text` / `choice_with_input`）/ `required` / `placeholder` / `maxLength` / `choices` で構成。`choice_with_input` の選択肢は `input: { required, placeholder, maxLength, title }` で付帯入力を定義でき、選択値に応じて自由入力の要否・必須・文字数・placeholder が切り替わる（例: `revise` は理由必須）
+- `reviseTargetStep`: 判定設問で `revise` に相当する値が選ばれたときに巻き戻るステップの `key`
+- 回答は `Record<questionKey, GateAnswer>` として `gateAnswers` と `gate_events.answersJson` に保存され、`ConditionCtx.gateAnswers[stepKey][questionKey]` で参照できる（旧 `gateChoices` は廃止）
 
 Human Gate への回答は **`tado confirm` サブコマンドでのみ**受け付けます（ADR-0007）。
 LLM が人間の回答を転記する経路は存在せず、`report` で human_gate ステップを報告するとエラーになります。
@@ -213,7 +225,8 @@ tado confirm --session <id>
 
 - `confirm` は stdin が TTY の場合のみ実行できるため、エージェントの Bash ツールからは構造的に実行できません。LLM が人間への案内を省略しても、ゲートは停止するだけで通過しません
 - 承認の成立に加え、TTY なしで拒否された実行試行も `gate_events` テーブルに監査記録として残ります
-- `confirm` で `revise` を選ぶと `reviseTargetStep` 以降が pending に戻り、`abort` を選ぶとセッションが中断されます
+- `confirm` は複数設問を `clack.select/autocomplete` → 条件付き `clack.text` で順次提示し、進捗 `Qn/M` と設問タイトル・説明を表示する。必須・文字数バリデーションが即時に行われ、未達なら再入力を求める。途中キャンセルは原子的に全破棄して `running` のまま再試行可能
+- 判定設問で `revise` に相当する値が選ばれると `reviseTargetStep` 以降が pending に戻り、`abort` に相当する値が選ばれるとセッションが中断される（値の判定は `outcomeQuestionKey` で指名された設問の `value` で行う）
 
 #### parallel
 

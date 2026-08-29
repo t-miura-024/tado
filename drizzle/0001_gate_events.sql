@@ -4,7 +4,7 @@ CREATE TABLE `gate_events` (
 	`step_key` text NOT NULL,
 	`attempt_number` integer,
 	`event` text NOT NULL,
-	`choice` text,
+	`answers_json` text,
 	`tty_name` text,
 	`created_at` text DEFAULT (datetime('now')) NOT NULL,
 	FOREIGN KEY (`session_id`) REFERENCES `sessions`(`id`) ON UPDATE no action ON DELETE cascade,

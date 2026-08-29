@@ -105,8 +105,8 @@
           "notNull": true,
           "autoincrement": false
         },
-        "choice": {
-          "name": "choice",
+        "answers_json": {
+          "name": "answers_json",
           "type": "text",
           "primaryKey": false,
           "notNull": false,

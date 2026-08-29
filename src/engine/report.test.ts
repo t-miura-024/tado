@@ -131,7 +131,7 @@ describe("レポート", () => {
     await next(sessionId);
     const result = await confirm(sessionId, mockConfirmDeps("approve"));
 
-    expect(result.choice).toBe("approve");
+    expect((result.answers.decision as any)?.value ?? result.answers.decision).toBe("approve");
     expect(result.nextAction).toBe("continue");
 
     const db = new Database(getWorkflowDbPath());
@@ -716,10 +716,18 @@ describe("レポート", () => {
               onFail: { action: 'escalate' },
               humanGate: {
                 presentArtifacts: [],
-                choices: [
-                  { value: 'approve', label: 'OK' },
-                  { value: 'revise', label: 'Revise' },
-                  { value: 'abort', label: 'Abort' },
+                outcomeQuestionKey: 'decision',
+                questions: [
+                  {
+                    key: 'decision',
+                    title: '判定',
+                    type: 'choice_with_input',
+                    choices: [
+                      { value: 'approve', label: 'OK' },
+                      { value: 'revise', label: 'Revise', input: { required: true, placeholder: '理由', maxLength: 500 } },
+                      { value: 'abort', label: 'Abort' },
+                    ],
+                  },
                 ],
                 reviseTargetStep: 'grill',
               },
@@ -815,9 +823,17 @@ describe("レポート", () => {
               onFail: { action: 'escalate' },
               humanGate: {
                 presentArtifacts: [],
-                choices: [
-                  { value: 'approve', label: 'OK' },
-                  { value: 'revise', label: 'Revise' },
+                outcomeQuestionKey: 'decision',
+                questions: [
+                  {
+                    key: 'decision',
+                    title: '判定',
+                    type: 'choice_with_input',
+                    choices: [
+                      { value: 'approve', label: 'OK' },
+                      { value: 'revise', label: 'Revise', input: { required: true, placeholder: '理由', maxLength: 500 } },
+                    ],
+                  },
                 ],
                 reviseTargetStep: 'work',
               },
@@ -921,9 +937,17 @@ describe("レポート", () => {
               onFail: { action: 'escalate' },
               humanGate: {
                 presentArtifacts: [],
-                choices: [
-                  { value: 'approve', label: 'OK' },
-                  { value: 'abort', label: 'Abort' },
+                outcomeQuestionKey: 'decision',
+                questions: [
+                  {
+                    key: 'decision',
+                    title: '判定',
+                    type: 'choice_with_input',
+                    choices: [
+                      { value: 'approve', label: 'OK' },
+                      { value: 'abort', label: 'Abort' },
+                    ],
+                  },
                 ],
               },
               check: (ctx) => ({ status: 'pass', reasons: [] }),

@@ -7,6 +7,7 @@ import { drizzle, type BunSQLiteDatabase } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { artifacts as artifactsTable, sessions, stepAttempts, steps } from "./schema.ts";
 import type { WorkflowDef } from "../types/workflow-def.ts";
+import type { GateAnswer } from "../types/workflow-def.ts";
 import type { ConditionCtx } from "../types/context.ts";
 import type { ArtifactInput, ArtifactRecord } from "../types/artifact.ts";
 import type { AttemptSummary } from "../types/result.ts";
@@ -129,7 +130,77 @@ export async function importWorkflowDef(workflowId: string): Promise<WorkflowDef
       `Workflow ID mismatch: directory "${workflowId}" contains workflow with id "${def.id}"`,
     );
   }
+  validateWorkflowDef(def, resolved);
   return def;
+}
+
+function validateWorkflowDef(def: WorkflowDef, source: string): void {
+  for (const step of def.steps) {
+    if (step.type !== "human_gate" || !step.humanGate) continue;
+    const hg = step.humanGate;
+    if (!hg.outcomeQuestionKey || typeof hg.outcomeQuestionKey !== "string") {
+      throw new EngineError(
+        `Invalid humanGate.outcomeQuestionKey in step "${step.key}" (${source}): must be non-empty string`,
+      );
+    }
+    if (!Array.isArray(hg.questions) || hg.questions.length === 0) {
+      throw new EngineError(
+        `Invalid humanGate.questions in step "${step.key}" (${source}): must be non-empty array`,
+      );
+    }
+    const keys = new Set<string>();
+    for (const q of hg.questions) {
+      if (!q.key || typeof q.key !== "string") {
+        throw new EngineError(`Invalid GateQuestion.key in step "${step.key}" (${source})`);
+      }
+      if (keys.has(q.key)) {
+        throw new EngineError(
+          `Duplicate GateQuestion.key "${q.key}" in step "${step.key}" (${source})`,
+        );
+      }
+      keys.add(q.key);
+      if (q.type !== "single_choice" && q.type !== "free_text" && q.type !== "choice_with_input") {
+        throw new EngineError(
+          `Invalid GateQuestion.type "${q.type}" in step "${step.key}" key "${q.key}" (${source})`,
+        );
+      }
+      if (
+        (q.type === "single_choice" || q.type === "choice_with_input") &&
+        (!q.choices || q.choices.length === 0)
+      ) {
+        throw new EngineError(
+          `GateQuestion "${q.key}" in step "${step.key}" (${source}) requires non-empty choices`,
+        );
+      }
+      if (q.choices) {
+        const cvals = new Set<string>();
+        for (const c of q.choices) {
+          if (!c.value || typeof c.value !== "string") {
+            throw new EngineError(
+              `Invalid GateChoice.value in step "${step.key}" question "${q.key}" (${source})`,
+            );
+          }
+          if (cvals.has(c.value)) {
+            throw new EngineError(
+              `Duplicate GateChoice.value "${c.value}" in step "${step.key}" question "${q.key}" (${source})`,
+            );
+          }
+          cvals.add(c.value);
+        }
+      }
+    }
+    if (!keys.has(hg.outcomeQuestionKey)) {
+      throw new EngineError(
+        `humanGate.outcomeQuestionKey "${hg.outcomeQuestionKey}" not found in questions for step "${step.key}" (${source})`,
+      );
+    }
+    const outcomeQ = hg.questions.find((q) => q.key === hg.outcomeQuestionKey)!;
+    if (outcomeQ.type !== "single_choice" && outcomeQ.type !== "choice_with_input") {
+      throw new EngineError(
+        `outcomeQuestion "${hg.outcomeQuestionKey}" in step "${step.key}" (${source}) must be single_choice or choice_with_input`,
+      );
+    }
+  }
 }
 
 export async function importWorkflowDefFromPath(filePath: string): Promise<WorkflowDef> {
@@ -142,6 +213,7 @@ export async function importWorkflowDefFromPath(filePath: string): Promise<Workf
   if (!def || !def.id || !def.steps) {
     throw new EngineError(`Invalid workflow definition in: ${resolved}`);
   }
+  validateWorkflowDef(def, resolved);
   return def;
 }
 
@@ -276,7 +348,7 @@ export function registerHookArtifacts(
 
 export function buildConditionCtx(db: TadoDb, sessionId: string): ConditionCtx {
   const artifacts = getArtifacts(db, sessionId);
-  const gateChoices: Record<string, string> = {};
+  const gateAnswers: Record<string, Record<string, GateAnswer>> = {};
 
   const gateStepRows = db
     .select({ id: steps.id, stepKey: steps.stepKey })
@@ -295,9 +367,22 @@ export function buildConditionCtx(db: TadoDb, sessionId: string): ConditionCtx {
       .limit(1)
       .get();
     if (attempt?.resultJson) {
-      gateChoices[gs.stepKey] = attempt.resultJson.trim();
+      try {
+        const parsed = JSON.parse(attempt.resultJson);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          gateAnswers[gs.stepKey] = parsed as Record<string, GateAnswer>;
+        } else {
+          console.warn(
+            `[tado] malformed gateAnswers for step ${gs.stepKey}: not an object, resultJson=${attempt.resultJson.slice(0, 200)}`,
+          );
+        }
+      } catch (e) {
+        console.warn(
+          `[tado] malformed gateAnswers JSON for step ${gs.stepKey}: ${String(e)}, resultJson=${attempt.resultJson.slice(0, 200)}`,
+        );
+      }
     }
   }
 
-  return { gateChoices, artifacts };
+  return { gateAnswers, artifacts };
 }

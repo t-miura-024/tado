@@ -3,10 +3,11 @@
  */
 import type { ArtifactRecord } from "./artifact.ts";
 import type { AttemptResult } from "./result.ts";
+import type { GateAnswer } from "./workflow-def.ts";
 
 /** ステップの `condition` 判定に渡されるコンテキスト。 */
 export interface ConditionCtx {
-  gateChoices: Record<string, string>;
+  gateAnswers: Record<string, Record<string, GateAnswer>>;
   artifacts: ArtifactRecord[];
 }
 

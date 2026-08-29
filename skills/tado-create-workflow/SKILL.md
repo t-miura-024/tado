@@ -76,7 +76,7 @@ tado の `WorkflowDef` を対話的に設計し、`{TADO_HOME}/workflows/<workfl
   - Section ネストが必要か（`###` 以降の見出し構造が必要な場合は `PromptSection` を使う。例: `approach` 内で `### 前提確認` / `### 実行手順` に分割する）
   - `PromptItem<string|Section>`、H6キャップ（`######` で止まる）、行頭 `#` は型で拒否される旨を意識した記述とする。`string` に `# 見出し` を直接書かず、`Section` の `title` を使う。
 - **`check` 関数の有無と判定ロジック概要**: `check` は必須。各ステップの `check` で何を検証するか（例: `ctx.attemptResult.subagentOutput` に特定文字列が含まれるか、`ctx.sessionDir` 配下に成果物ファイルが存在するか）を決定する。
-- **`condition` の有無と判定条件**: Round 2 で決定した `condition` の詳細（例: `ctx.gateChoices["step_key"] === "approve"` のときのみ実行）。
+- **`condition` の有無と判定条件**: Round 2 で決定した `condition` の詳細（例: `ctx.gateAnswers["step_key"]?.["decision"]` の値が `approve` のときのみ実行。`choice_with_input` の場合は `value` を取り出す: `const ans = ctx.gateAnswers["step_key"]?.["decision"]; const val = typeof ans === 'string' ? ans : ans?.value; val === "approve"`）。
 - **`beforeStep` / `afterStep` の有無と返却 artifacts 概要**: `beforeStep`（プロンプト生成前に実行、返却 `ArtifactInput[]` は既存成果物と同名キーを上書きして DB へ登録・マージ）/ `afterStep`（`check` 前に実行、同様に artifacts を登録）の有無と、返却する artifacts の概要を決定する。
 - ラウンド終了時に「各ステップの6セクション概要」「`check` / `condition` / `beforeStep` / `afterStep` の有無と概要」を要約してユーザー確認を取る。
 
@@ -111,7 +111,7 @@ export default def;
   - H6キャップ（`######` で止まる）であること
   - 行頭 `#` は `PromptString` 型で拒否されるため `string` に `# 見出し` を直接書かず `Section` の `title` を使うこと
 - `task` の3種別雛形（`run_subagent` / `run_command` / `orchestrate`）をコメントまたはサンプルコードとして含める。実際に選択された `action` に応じた雛形を生成し、他の種別はコメントで例示する。
-- `human_gate` 雛形: `presentArtifacts` / `choices`（`value` / `label` / `desc`）/ `reviseTargetStep` を含む。
+- `human_gate` 雛形: `presentArtifacts` / `outcomeQuestionKey` / `questions`（`GateQuestion[]`：`key` / `title` / `type`（`single_choice` / `free_text` / `choice_with_input`）/ `required` / `placeholder` / `maxLength` / `choices`（`value` / `label` / `desc` / `input: { required, placeholder, maxLength, title }`））/ `reviseTargetStep` を含む。例: `decision` 設問を `choice_with_input` で `approve/revise/abort` を定義し `revise` に `input: {required:true, placeholder:"理由", maxLength:500}` を付与する。
 - `parallel` の `subtasks` 雛形: 各 subtask の `key` / `subagentType` / `buildPrompt` を含む。
 - `condition` / `beforeStep` / `afterStep` は Round 3 で「有り」とされた場合のみ雛形を含め、「無し」の場合はコメントで利用例を示す程度に留める。
 - `import from "tado"` 解決は `{TADO_HOME}/node_modules/tado`（`getTadoHome()` 配下）を前提とし、相対パス `../src/prompt.ts` は用いない。

@@ -208,6 +208,11 @@ describe("next", () => {
     expect(result.prompt).toContain("revise");
     expect(result.prompt).toContain("abort");
     expect(result.prompt).toContain(`tado confirm --session ${sessionId}`);
+    expect(result.prompt).toContain("設問一覧");
+    expect(result.prompt).toContain("decision");
+    expect(result.prompt).toContain("判定");
+    expect(result.prompt).toContain("choice_with_input");
+    expect(result.prompt).toContain("判定設問");
     expect(result.prompt).not.toContain("回答は選択肢の value を入力してください");
   });
 
@@ -543,7 +548,7 @@ describe("next", () => {
       db.close();
     });
 
-    it("conditionコンテキストにgateChoicesを提供する", async () => {
+    it("conditionコンテキストにgateAnswersを提供する", async () => {
       const gate_choices_test_workflow_content = `
         let capturedCtx = null;
         const def = {
@@ -557,9 +562,17 @@ describe("next", () => {
               onFail: { action: 'escalate' },
               humanGate: {
                 presentArtifacts: [],
-                choices: [
-                  { value: 'approve', label: 'OK' },
-                  { value: 'abort', label: 'Abort' },
+                outcomeQuestionKey: 'decision',
+                questions: [
+                  {
+                    key: 'decision',
+                    title: '判定',
+                    type: 'choice_with_input',
+                    choices: [
+                      { value: 'approve', label: 'OK' },
+                      { value: 'abort', label: 'Abort' },
+                    ],
+                  },
                 ],
               },
               check: (ctx) => ({ status: 'pass', reasons: [] }),
@@ -572,7 +585,7 @@ describe("next", () => {
               onFail: { action: 'abort' },
               condition: (ctx) => {
                 capturedCtx = ctx;
-                return ctx.gateChoices['gate_step'] === 'approve';
+                return ((ans => typeof ans === 'string' ? ans : (ans as any)?.value)(ctx.gateAnswers['gate_step']?.['decision']) === 'approve');
               },
               task: {
                 action: 'run_subagent',
@@ -607,12 +620,12 @@ describe("next", () => {
       await next(sessionId);
       await confirm(sessionId, mockConfirmDeps("approve"));
 
-      // conditional_step should execute because gateChoices['gate_step'] === 'approve'
+      // conditional_step should execute because gateAnswers['gate_step'] === 'approve'
       const r = await next(sessionId);
       expect(r.stepKey).toBe("conditional_step");
     });
 
-    it("gateChoices条件が満たされたときにステップを実行する", async () => {
+    it("gateAnswers条件が満たされたときにステップを実行する", async () => {
       const gate_execute_test_workflow_content = `
         const def = {
           id: 'gate-execute-test',
@@ -625,9 +638,17 @@ describe("next", () => {
               onFail: { action: 'escalate' },
               humanGate: {
                 presentArtifacts: [],
-                choices: [
-                  { value: 'approve', label: 'OK' },
-                  { value: 'abort', label: 'Abort' },
+                outcomeQuestionKey: 'decision',
+                questions: [
+                  {
+                    key: 'decision',
+                    title: '判定',
+                    type: 'choice_with_input',
+                    choices: [
+                      { value: 'approve', label: 'OK' },
+                      { value: 'abort', label: 'Abort' },
+                    ],
+                  },
                 ],
               },
               check: (ctx) => ({ status: 'pass', reasons: [] }),
@@ -638,7 +659,7 @@ describe("next", () => {
               type: 'task',
               maxRetries: 0,
               onFail: { action: 'abort' },
-              condition: (ctx) => ctx.gateChoices['gate_step'] === 'approve',
+              condition: (ctx) => ((ans => typeof ans === 'string' ? ans : (ans as any)?.value)(ctx.gateAnswers['gate_step']?.['decision']) === 'approve'),
               task: {
                 action: 'run_subagent',
                 subagentType: 'test',
@@ -667,7 +688,7 @@ describe("next", () => {
 
       const { sessionId } = await init("gate-execute-test", { title: "test-title" });
 
-      // Gate approves → condition gateChoices['gate_step'] === 'approve' is true → step executes
+      // Gate approves → condition gateAnswers['gate_step'] === 'approve' is true → step executes
       await next(sessionId);
       await confirm(sessionId, mockConfirmDeps("approve"));
 
@@ -775,10 +796,18 @@ describe("next", () => {
               onFail: { action: 'escalate' },
               humanGate: {
                 presentArtifacts: ['issue-body.md'],
-                choices: [
-                  { value: 'approve', label: 'OK' },
-                  { value: 'revise', label: 'Revise' },
-                  { value: 'abort', label: 'Abort' },
+                outcomeQuestionKey: 'decision',
+                questions: [
+                  {
+                    key: 'decision',
+                    title: '判定',
+                    type: 'choice_with_input',
+                    choices: [
+                      { value: 'approve', label: 'OK' },
+                      { value: 'revise', label: 'Revise', input: { required: true, placeholder: '理由', maxLength: 500 } },
+                      { value: 'abort', label: 'Abort' },
+                    ],
+                  },
                 ],
                 reviseTargetStep: 'prepare',
               },

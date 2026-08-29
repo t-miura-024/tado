@@ -1,6 +1,7 @@
 /**
  * ステップ実行の結果および CLI / API の返却値関連の型定義。
  */
+import type { GateAnswer } from "./workflow-def.ts";
 
 /** ステップの完了チェック結果。 */
 export interface CheckResult {
@@ -101,7 +102,7 @@ export interface ReportResult {
 export interface ConfirmResult {
   sessionId: string;
   stepKey: string;
-  choice: string;
+  answers: Record<string, GateAnswer>;
   nextAction: "continue" | "goto" | "abort" | "done";
   targetStep?: string;
   message: string;

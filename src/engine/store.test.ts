@@ -457,7 +457,7 @@ describe("ストア", () => {
         .get("sid-1", "gate_step") as Record<string, unknown>;
       raw.run(
         "INSERT INTO step_attempts (step_id, attempt_number, result_json, check_status) VALUES (?, ?, ?, ?)",
-        [gateRaw.id as number, 1, "approve", "pass"],
+        [gateRaw.id as number, 1, JSON.stringify({ decision: { value: "approve" } }), "pass"],
       );
       raw.run(
         "INSERT INTO artifacts (session_id, step_key, artifact_key, file_path, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -466,7 +466,8 @@ describe("ストア", () => {
       raw.close();
 
       const ctx = buildConditionCtx(db, "sid-1");
-      expect(ctx.gateChoices["gate_step"]).toBe("approve");
+      const ans = ctx.gateAnswers["gate_step"]?.["decision"] as { value: string };
+      expect(ans.value).toBe("approve");
       expect(ctx.artifacts).toHaveLength(1);
       expect(ctx.artifacts[0].artifactKey).toBe("doc.md");
       db.$client.close();

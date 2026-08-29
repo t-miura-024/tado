@@ -51,9 +51,10 @@ export interface TaskStepDef {
 /** ヒューマンゲートステップの定義。人間による承認・選択を待つ。 */
 export interface HumanGateStepDef {
   presentArtifacts: string[];
-  choices: GateChoice[];
+  outcomeQuestionKey: string;
   /** 差し戻し時に再実行するステップの key。 */
   reviseTargetStep?: string;
+  questions: GateQuestion[];
 }
 
 /** 並列ステップの定義。複数のサブタスクを同時に実行する。 */
@@ -78,9 +79,29 @@ export interface OnFailStrategy {
   requeueSource?: boolean;
 }
 
+/** ヒューマンゲート設問の定義。 */
+export interface GateQuestion {
+  key: string;
+  title: string;
+  description?: string;
+  type: "single_choice" | "free_text" | "choice_with_input";
+  required?: boolean;
+  placeholder?: string;
+  maxLength?: number;
+  choices?: GateChoice[];
+}
+
 /** ヒューマンゲートで提示する選択肢。 */
 export interface GateChoice {
   value: string;
   label: string;
   desc?: string;
+  input?: {
+    title?: string;
+    placeholder?: string;
+    required?: boolean;
+    maxLength?: number;
+  };
 }
+
+export type GateAnswer = string | { value: string; input?: string };
