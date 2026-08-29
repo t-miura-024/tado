@@ -1,9 +1,17 @@
-import { useRef, useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import { Points, PointMaterial } from "@react-three/drei";
 import * as THREE from "three";
+import { catppuccinNumber } from "@/lib/catppuccin";
 
-const CATPPUCCIN_COLORS = [0xcba6f7, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xb4befe, 0x74c7ec];
+const PARTICLE_COLORS = [
+  catppuccinNumber.mauve,
+  catppuccinNumber.blue,
+  catppuccinNumber.pink,
+  catppuccinNumber.teal,
+  catppuccinNumber.lavender,
+  catppuccinNumber.sapphire,
+];
 
 function hexToRgb(hex: number): [number, number, number] {
   return [(hex >> 16) & 0xff, (hex >> 8) & 0xff, hex & 0xff].map((v) => v / 255) as [
@@ -15,7 +23,16 @@ function hexToRgb(hex: number): [number, number, number] {
 
 function ParticleField() {
   const ref = useRef<THREE.Points>(null!);
+  const pausedRef = useRef(false);
   const count = 60;
+
+  useEffect(() => {
+    const onVis = () => {
+      pausedRef.current = document.hidden;
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, []);
 
   const { positions, colors, phases, baseY, baseX } = useMemo(() => {
     const pos = new Float32Array(count * 3);
@@ -33,7 +50,7 @@ function ParticleField() {
       bx[i] = x;
       by[i] = y;
       ph[i] = Math.random() * Math.PI * 2;
-      const hex = CATPPUCCIN_COLORS[Math.floor(Math.random() * CATPPUCCIN_COLORS.length)]!;
+      const hex = PARTICLE_COLORS[Math.floor(Math.random() * PARTICLE_COLORS.length)]!;
       const [r, g, b] = hexToRgb(hex);
       col[i * 3] = r;
       col[i * 3 + 1] = g;
@@ -42,11 +59,10 @@ function ParticleField() {
     return { positions: pos, colors: col, phases: ph, baseY: by, baseX: bx };
   }, []);
 
-  // Animate via useFrame — respects prefers-reduced-motion externally
   useFrame((state) => {
     if (!ref.current) return;
+    if (pausedRef.current || document.hidden) return;
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    if (document.hidden) return;
     const t = state.clock.getElapsedTime();
     const posAttr = (ref.current.geometry as THREE.BufferGeometry).getAttribute(
       "position",
@@ -60,7 +76,6 @@ function ParticleField() {
     posAttr.needsUpdate = true;
   });
 
-  // Build geometry with colors
   const geometry = useMemo(() => {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.BufferAttribute(positions.slice(), 3));
@@ -83,11 +98,35 @@ function ParticleField() {
 }
 
 /**
- * R3F + drei background — declarative alternative to raw ThreeBackground.
- * Uses @react-three/fiber Canvas and @react-three/drei Points.
- * Falls back to CSS gradient if WebGL unavailable (handled by Canvas onCreated error).
+ * R3F + drei 装飾背景 — M2最小実装
+ * - 60 Points / BufferGeometry で軽量化
+ * - catppuccin.ts で色一元化
+ * - prefers-reduced-motion / visibilitychange で省電力
+ * - WebGL失敗時はCSSグラデーションフォールバック
  */
 export default function R3FBackground() {
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    // 同期的にWebGL非対応を検出したらフォールバック
+    try {
+      const canvas = document.createElement("canvas");
+      const gl = canvas.getContext("webgl") || canvas.getContext("experimental-webgl");
+      if (!gl) setFailed(true);
+    } catch {
+      setFailed(true);
+    }
+  }, []);
+
+  if (failed) {
+    return (
+      <div
+        className="fixed inset-0 -z-10 bg-gradient-to-br from-catppuccin-base via-catppuccin-mantle to-catppuccin-crust"
+        aria-hidden="true"
+      />
+    );
+  }
+
   return (
     <div
       aria-hidden="true"
@@ -104,7 +143,11 @@ export default function R3FBackground() {
         dpr={1}
         style={{ width: "100%", height: "100%", display: "block" }}
         onCreated={({ gl }) => {
-          gl.setClearColor(0x1e1e2e, 0);
+          try {
+            gl.setClearColor(catppuccinNumber.base, 0);
+          } catch {
+            setFailed(true);
+          }
         }}
         fallback={
           <div className="fixed inset-0 -z-10 bg-gradient-to-br from-catppuccin-base via-catppuccin-mantle to-catppuccin-crust" />
@@ -112,7 +155,7 @@ export default function R3FBackground() {
       >
         <ParticleField />
       </Canvas>
-      {/* CSS gradient fallback underneath Canvas — visible if Canvas fails or is transparent */}
+      {/* CSSグラデーションフォールバック — Canvasが透明または失敗時に表示 */}
       <div
         className="fixed inset-0 -z-10 bg-gradient-to-br from-catppuccin-base via-catppuccin-mantle to-catppuccin-crust"
         style={{ zIndex: -2 }}

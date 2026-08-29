@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
+import { catppuccinNumber } from "@/lib/catppuccin";
 
-const CATPPUCCIN_LINE_COLORS = [0xcba6f7, 0x89b4fa, 0x94e2d5];
+const CATPPUCCIN_LINE_COLORS = [
+  catppuccinNumber.mauve,
+  catppuccinNumber.blue,
+  catppuccinNumber.teal,
+];
 
 interface FlowThreeLinesProps {
   /** number of arrow gaps; used to space glowing dots */
@@ -20,9 +25,11 @@ export default function FlowThreeLines({ count = 6 }: FlowThreeLinesProps) {
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    const prefersReduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     let renderer: THREE.WebGLRenderer | null = null;
     let animationId = 0;
     let disposed = false;
+    let paused = false;
 
     try {
       const width = canvas.clientWidth || 32;
@@ -90,23 +97,38 @@ export default function FlowThreeLines({ count = 6 }: FlowThreeLinesProps) {
       const clock = new THREE.Clock();
       const animate = () => {
         if (disposed) return;
-        animationId = requestAnimationFrame(animate);
-        const t = clock.getElapsedTime();
-        for (let i = 0; i < dots.length; i++) {
-          const d = dots[i]!;
-          const phase = (d as unknown as { _phase: number })._phase;
-          const mat = d.material as THREE.MeshBasicMaterial;
-          mat.opacity = 0.55 + Math.sin(t * 1.1 + phase) * 0.28;
-          d.scale.setScalar(0.95 + Math.sin(t * 0.9 + phase) * 0.18);
+        if (paused || document.hidden) {
+          animationId = requestAnimationFrame(animate);
+          return;
         }
-        for (let i = 0; i < lines.length; i++) {
-          const l = lines[i]!;
-          const mat = l.material as THREE.LineBasicMaterial;
-          mat.opacity = 0.28 + Math.sin(t * 0.6 + i) * 0.14;
+        animationId = requestAnimationFrame(animate);
+        if (!prefersReduced) {
+          const t = clock.getElapsedTime();
+          for (let i = 0; i < dots.length; i++) {
+            const d = dots[i]!;
+            const phase = (d as unknown as { _phase: number })._phase;
+            const mat = d.material as THREE.MeshBasicMaterial;
+            mat.opacity = 0.55 + Math.sin(t * 1.1 + phase) * 0.28;
+            d.scale.setScalar(0.95 + Math.sin(t * 0.9 + phase) * 0.18);
+          }
+          for (let i = 0; i < lines.length; i++) {
+            const l = lines[i]!;
+            const mat = l.material as THREE.LineBasicMaterial;
+            mat.opacity = 0.28 + Math.sin(t * 0.6 + i) * 0.14;
+          }
         }
         renderer!.render(scene, camera);
       };
       animate();
+
+      const onVisibility = () => {
+        if (document.hidden) paused = true;
+        else {
+          paused = false;
+          clock.getDelta();
+        }
+      };
+      document.addEventListener("visibilitychange", onVisibility);
 
       const ro = new ResizeObserver(() => {
         if (disposed || !renderer || !canvas) return;
@@ -121,6 +143,7 @@ export default function FlowThreeLines({ count = 6 }: FlowThreeLinesProps) {
       return () => {
         disposed = true;
         cancelAnimationFrame(animationId);
+        document.removeEventListener("visibilitychange", onVisibility);
         ro.disconnect();
         try {
           renderer?.dispose();

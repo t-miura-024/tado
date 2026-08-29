@@ -7,6 +7,23 @@ import {
   resolveArtifactPath,
 } from "./logic.ts";
 import { loadDashboardSnapshot, type DashboardSnapshot } from "./store.ts";
+import { listWorkflows as listWorkflowsEngine } from "../engine/workflows.ts";
+import {
+  getWorkflowDbPath,
+  getWorkflowsDir,
+  importWorkflowDef,
+  openDb,
+  resolveWorkflowPath,
+} from "../engine/store.ts";
+import { eq, inArray } from "drizzle-orm";
+import {
+  artifacts as artifactsTable,
+  gateEvents as gateEventsTable,
+  sessions as sessionsTable,
+  stepAttempts as stepAttemptsTable,
+  steps as stepsTable,
+} from "../engine/schema.ts";
+import type { GateQuestion, WorkflowDef } from "../types/workflow-def.ts";
 import { logError, logInfo, logWarn } from "./logger.ts";
 
 const DIST_DIR = path.join(import.meta.dir, "client", "dist");
@@ -99,6 +116,151 @@ export interface DashboardServer {
   stop: () => void;
 }
 
+// ---------------------------------------------------------------------------
+// Workflows
+// ---------------------------------------------------------------------------
+
+export interface WorkflowListItem {
+  id: string;
+  description?: string;
+  workflowPath: string;
+  steps: { key: string; phase: string; type: string }[];
+}
+
+export interface WorkflowDetail {
+  id: string;
+  description?: string;
+  workflowPath: string;
+  steps: {
+    key: string;
+    phase: string;
+    type: string;
+    maxRetries: number;
+    onFail: WorkflowDef["steps"][number]["onFail"];
+    hasCondition: boolean;
+    hasBeforeStep: boolean;
+    hasAfterStep: boolean;
+    task?: { action: string; subagentType?: string; readonly?: boolean };
+    humanGate?: {
+      presentArtifacts: string[];
+      outcomeQuestionKey: string;
+      reviseTargetStep?: string;
+      questions: GateQuestion[];
+    };
+    parallel?: { subtasks: { key: string; subagentType: string; readonly?: boolean }[] };
+  }[];
+}
+
+const WORKFLOW_ID_RE = /^[a-zA-Z0-9._-]+$/;
+
+function isValidWorkflowId(id: string): boolean {
+  return WORKFLOW_ID_RE.test(id);
+}
+
+function isValidSessionId(id: string): boolean {
+  // session ids are typically generated with nanoid-like strings; accept word chars, dash
+  return (
+    id.length > 0 &&
+    id.length <= 128 &&
+    !id.includes("/") &&
+    !id.includes("\\") &&
+    !id.includes("..")
+  );
+}
+
+async function listWorkflows(): Promise<{ workflows: WorkflowListItem[]; total: number }> {
+  const summaries = await listWorkflowsEngine();
+  const workflows: WorkflowListItem[] = [];
+  for (const s of summaries) {
+    try {
+      const def = await importWorkflowDef(s.id);
+      workflows.push({
+        id: def.id,
+        description: def.description,
+        workflowPath: s.path,
+        steps: def.steps.map((st) => ({ key: st.key, phase: st.phase, type: st.type })),
+      });
+    } catch {
+      // fallback if import fails: use summary as-is
+      workflows.push({
+        id: s.id,
+        description: s.description,
+        workflowPath: s.path,
+        steps: [],
+      });
+    }
+  }
+  workflows.sort((a, b) => a.id.localeCompare(b.id));
+  return { workflows, total: workflows.length };
+}
+
+async function getWorkflowById(id: string): Promise<WorkflowDetail | null> {
+  if (!isValidWorkflowId(id)) return null;
+  const workflowsDir = getWorkflowsDir();
+  const wp = resolveWorkflowPath(id);
+  const resolvedWorkflowsDir = path.resolve(workflowsDir);
+  const resolvedWp = path.resolve(wp);
+  if (!resolvedWp.startsWith(resolvedWorkflowsDir + path.sep)) return null;
+  try {
+    const def = await importWorkflowDef(id);
+    const detail: WorkflowDetail = {
+      id: def.id,
+      description: def.description,
+      workflowPath: wp,
+      steps: def.steps.map((s) => ({
+        key: s.key,
+        phase: s.phase,
+        type: s.type,
+        maxRetries: s.maxRetries,
+        onFail: s.onFail,
+        hasCondition: typeof s.condition === "function",
+        hasBeforeStep: typeof s.beforeStep === "function",
+        hasAfterStep: typeof s.afterStep === "function",
+        task: s.task
+          ? { action: s.task.action, subagentType: s.task.subagentType, readonly: s.task.readonly }
+          : undefined,
+        humanGate: s.humanGate
+          ? {
+              presentArtifacts: s.humanGate.presentArtifacts,
+              outcomeQuestionKey: s.humanGate.outcomeQuestionKey,
+              reviseTargetStep: s.humanGate.reviseTargetStep,
+              questions: s.humanGate.questions,
+            }
+          : undefined,
+        parallel: s.parallel
+          ? {
+              subtasks: s.parallel.subtasks.map((st) => ({
+                key: st.key,
+                subagentType: st.subagentType,
+                readonly: st.readonly,
+              })),
+            }
+          : undefined,
+      })),
+    };
+    return detail;
+  } catch (e) {
+    logWarn("workflow_load_failed", {
+      detail: { id, error: e instanceof Error ? e.message : String(e) },
+    });
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sessions
+// ---------------------------------------------------------------------------
+
+function jsonResponse(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
 function getMimeType(filePath: string): string {
   const ext = path.extname(filePath).toLowerCase();
   switch (ext) {
@@ -143,8 +305,14 @@ export function startDashboardServer(opts?: StartDashboardServerOptions): Dashbo
           const limitRaw = url.searchParams.get("limit");
           let limit: number | undefined;
           if (limitRaw != null) {
-            const n = Number.parseInt(limitRaw, 10);
-            if (!Number.isNaN(n) && n > 0) limit = n;
+            const n = Number(limitRaw);
+            if (!Number.isInteger(n) || n <= 0 || n > 200) {
+              return jsonResponse(
+                { error: "invalid limit", reason: "limit must be integer 1-200" },
+                400,
+              );
+            }
+            limit = n;
           }
           const snapshot = loadDashboardSnapshot(
             cwd,
@@ -158,6 +326,149 @@ export function startDashboardServer(opts?: StartDashboardServerOptions): Dashbo
               "Cache-Control": "no-store",
             },
           });
+        }
+
+        if (url.pathname === "/api/workflows") {
+          const result = await listWorkflows();
+          return jsonResponse(result);
+        }
+
+        if (url.pathname.startsWith("/api/workflows/")) {
+          const rawId = url.pathname.slice("/api/workflows/".length);
+          // reject if contains additional slash
+          if (!rawId || rawId.includes("/")) {
+            return jsonResponse({ error: "not found" }, 404);
+          }
+          let id: string;
+          try {
+            id = decodeURIComponent(rawId);
+          } catch {
+            return jsonResponse({ error: "invalid id" }, 400);
+          }
+          if (!isValidWorkflowId(id)) {
+            return jsonResponse({ error: "invalid workflow id" }, 400);
+          }
+          const detail = await getWorkflowById(id);
+          if (!detail) {
+            return jsonResponse({ error: "workflow not found" }, 404);
+          }
+          return jsonResponse(detail);
+        }
+
+        if (url.pathname === "/api/sessions") {
+          const limitRaw = url.searchParams.get("limit");
+          let limit: number | undefined;
+          if (limitRaw != null) {
+            const n = Number(limitRaw);
+            if (!Number.isInteger(n) || n <= 0 || n > 200) {
+              return jsonResponse(
+                { error: "invalid limit", reason: "limit must be integer 1-200" },
+                400,
+              );
+            }
+            limit = n;
+          }
+          const workflowIdFilter = url.searchParams.get("workflowId") ?? undefined;
+          try {
+            const snap = loadDashboardSnapshot(
+              launchCwd,
+              undefined,
+              limit != null ? { limit } : undefined,
+            );
+            let sessions = snap.sessions;
+            if (workflowIdFilter) {
+              sessions = sessions.filter((r) => r.workflowId === workflowIdFilter);
+            }
+            return jsonResponse({
+              dbMissing: snap.dbMissing,
+              sessions,
+              totalSessions: snap.totalSessions,
+            });
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            logWarn("sessions_list_error", { detail: { message: msg } });
+            return jsonResponse({ error: msg }, 500);
+          }
+        }
+
+        if (url.pathname.startsWith("/api/sessions/")) {
+          const rawId = url.pathname.slice("/api/sessions/".length);
+          if (!rawId || rawId.includes("/")) {
+            return jsonResponse({ error: "not found" }, 404);
+          }
+          let id: string;
+          try {
+            id = decodeURIComponent(rawId);
+          } catch {
+            return jsonResponse({ error: "invalid id" }, 400);
+          }
+          if (!isValidSessionId(id)) {
+            return jsonResponse({ error: "invalid session id" }, 400);
+          }
+          const dbPath = getWorkflowDbPath();
+          if (!fs.existsSync(dbPath)) {
+            return jsonResponse({ error: "db not found", dbMissing: true }, 404);
+          }
+          let db: ReturnType<typeof openDb> | undefined;
+          try {
+            db = openDb();
+            // レイヤ境界を保つため既存の抽象 loadDashboardSnapshot 相当の絞り込みを SQL 側で実行（フルスキャン+JSフィルタを排除）
+            const session = db
+              .select()
+              .from(sessionsTable)
+              .where(eq(sessionsTable.id, id))
+              .get() as DashboardSnapshot["sessions"][number] | undefined;
+            if (!session) {
+              return jsonResponse({ error: "session not found" }, 404);
+            }
+            const stepsRows = db
+              .select()
+              .from(stepsTable)
+              .where(eq(stepsTable.sessionId, id))
+              .all() as DashboardSnapshot["selectedSteps"];
+            stepsRows.sort((a, b) => a.stepIndex - b.stepIndex);
+            const artifactsRows = db
+              .select()
+              .from(artifactsTable)
+              .where(eq(artifactsTable.sessionId, id))
+              .all();
+            const gateEventsRows = db
+              .select()
+              .from(gateEventsTable)
+              .where(eq(gateEventsTable.sessionId, id))
+              .all();
+            const stepIds = new Set(stepsRows.map((s) => s.id));
+            const attemptsRows =
+              stepIds.size === 0
+                ? []
+                : db
+                    .select()
+                    .from(stepAttemptsTable)
+                    .where(inArray(stepAttemptsTable.stepId, [...stepIds]))
+                    .all();
+            return jsonResponse({
+              dbMissing: false,
+              session,
+              steps: stepsRows,
+              artifacts: artifactsRows,
+              gateEvents: gateEventsRows,
+              attempts: attemptsRows,
+            });
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            logError("session_detail_error", e instanceof Error ? e : new Error(msg), {
+              detail: { sessionId: id },
+            });
+            return jsonResponse({ error: msg }, 500);
+          } finally {
+            if (db) {
+              try {
+                db.$client.close();
+              } catch {
+                // ignore
+              }
+            }
+          }
         }
 
         if (url.pathname === "/api/preview") {
@@ -199,10 +510,22 @@ export function startDashboardServer(opts?: StartDashboardServerOptions): Dashbo
           }
           allowedBases.push(launchCwd);
           const isAllowed = (() => {
-            const normalized = path.resolve(resolved);
+            const normalized = (() => {
+              try {
+                return fs.realpathSync(path.resolve(resolved));
+              } catch {
+                return path.resolve(resolved);
+              }
+            })();
             for (const base of allowedBases) {
               if (!base) continue;
-              const baseResolved = path.resolve(base);
+              const baseResolved = (() => {
+                try {
+                  return fs.realpathSync(path.resolve(base));
+                } catch {
+                  return path.resolve(base);
+                }
+              })();
               if (normalized === baseResolved) return true;
               if (normalized.startsWith(baseResolved + path.sep)) return true;
             }
@@ -337,5 +660,7 @@ if (import.meta.main) {
   const srv = startDashboardServer();
   console.log(`Dashboard server running at ${srv.url}`);
   console.log(`API: ${srv.url}/api/snapshot`);
+  console.log(`API: ${srv.url}/api/workflows`);
+  console.log(`API: ${srv.url}/api/sessions`);
   console.log("Press Ctrl+C to stop");
 }

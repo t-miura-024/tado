@@ -10,14 +10,14 @@
     --card-foreground: 226 64% 88%;
     --primary: 232 97% 85%;
     --primary-foreground: 240 21% 15%;
-    --secondary: 240 13% 31%;
+    --secondary: 234 13% 31%;
     --secondary-foreground: 226 64% 88%;
-    --muted: 240 13% 31%;
-    --muted-foreground: 228 11% 65%;
-    --accent: 240 13% 31%;
+    --muted: 234 13% 31%;
+    --muted-foreground: 228 24% 72%;
+    --accent: 234 13% 31%;
     --accent-foreground: 226 64% 88%;
-    --border: 240 13% 31%;
-    --input: 240 13% 31%;
+    --border: 234 13% 31%;
+    --input: 234 13% 31%;
     --ring: 267 84% 81%;
     --radius: 0.5rem;
   }
