@@ -347,6 +347,14 @@ export function registerHookArtifacts(
 }
 
 export function buildConditionCtx(db: TadoDb, sessionId: string): ConditionCtx {
+  const session = db
+    .select({ sessionDir: sessions.sessionDir })
+    .from(sessions)
+    .where(eq(sessions.id, sessionId))
+    .get();
+  if (!session) {
+    throw new EngineError(`Session not found: ${sessionId}`);
+  }
   const artifacts = getArtifacts(db, sessionId);
   const gateAnswers: Record<string, Record<string, GateAnswer>> = {};
 
@@ -384,5 +392,5 @@ export function buildConditionCtx(db: TadoDb, sessionId: string): ConditionCtx {
     }
   }
 
-  return { gateAnswers, artifacts };
+  return { sessionDir: session.sessionDir, gateAnswers, artifacts };
 }

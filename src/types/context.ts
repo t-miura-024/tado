@@ -7,6 +7,7 @@ import type { GateAnswer } from "./workflow-def.ts";
 
 /** ステップの `condition` 判定に渡されるコンテキスト。 */
 export interface ConditionCtx {
+  sessionDir: string;
   gateAnswers: Record<string, Record<string, GateAnswer>>;
   artifacts: ArtifactRecord[];
 }

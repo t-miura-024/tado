@@ -470,6 +470,7 @@ describe("ストア", () => {
       expect(ans.value).toBe("approve");
       expect(ctx.artifacts).toHaveLength(1);
       expect(ctx.artifacts[0].artifactKey).toBe("doc.md");
+      expect(ctx.sessionDir).toBe(dir);
       db.$client.close();
     });
   });
