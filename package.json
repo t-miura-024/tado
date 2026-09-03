@@ -13,6 +13,7 @@
   "type": "module",
   "exports": {
     ".": "./src/types/index.ts",
+    "./artifacts": "./src/artifacts.ts",
     "./prompt": "./src/prompt.ts",
     "./types/*": "./src/types/*"
   },
