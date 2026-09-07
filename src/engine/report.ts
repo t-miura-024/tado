@@ -123,6 +123,17 @@ export async function report(
   }
   const sessionDir = session.sessionDir;
 
+  // 係属ステップ以外の report は受理しない。オーケストレーターが別ステップとして
+  // 報告して正規化・判定ステップを迂回するのを構造的に排除する
+  //（human_gate 排除と同型のガード。goto・リトライは currentStep 自体を書き換える
+  // ため、厳密一致チェックと両立する）。
+  if (input.stepKey !== session.currentStep) {
+    db.$client.close();
+    throw new EngineError(
+      `Step mismatch: current step is '${session.currentStep}', but report targets '${input.stepKey}'. Report the current step instead.`,
+    );
+  }
+
   const resolvedWorkflowPath = workflowPath ?? session.workflowPath;
   if (!resolvedWorkflowPath) {
     db.$client.close();

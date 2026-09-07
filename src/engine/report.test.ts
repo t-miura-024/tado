@@ -637,6 +637,36 @@ describe("レポート", () => {
     });
   });
 
+  describe("係属ステップ一致", () => {
+    it("係属外ステップのreportを拒否する", async () => {
+      setupSimpleWorkflow();
+      const { sessionId } = await init("test-simple", { title: "test-title" });
+      await next(sessionId);
+
+      await expect(
+        report(sessionId, {
+          stepKey: "step3_parallel",
+          status: "completed",
+          subagentOutput: "done",
+        }),
+      ).rejects.toThrow(/Step mismatch: current step is 'step1_task'/);
+    });
+
+    it("係属ステップのreportは受理する", async () => {
+      setupSimpleWorkflow();
+      const { sessionId } = await init("test-simple", { title: "test-title" });
+      await next(sessionId);
+
+      const result = await report(sessionId, {
+        stepKey: "step1_task",
+        status: "completed",
+        subagentOutput: "success task done",
+      });
+
+      expect(result.checkResult.status).toBe("pass");
+    });
+  });
+
   describe("check例外処理", () => {
     it("check関数の例外をキャッチしステータスをerrorに設定する", async () => {
       const check_exception_test_workflow_content = `
