@@ -22,6 +22,13 @@
       "when": 1787669330913,
       "tag": "0002_sessions_cwd_title",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1789262704607,
+      "tag": "0003_harsh_zaladane",
+      "breakpoints": true
     }
   ]
 }

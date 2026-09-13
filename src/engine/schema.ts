@@ -53,6 +53,7 @@ export const steps = sqliteTable(
     maxRetries: integer("max_retries").notNull().default(3),
     onFailAction: text("on_fail_action"),
     onFailTarget: text("on_fail_target"),
+    onFailReset: text("on_fail_reset"),
     createdAt: text("created_at")
       .notNull()
       .default(sql`(datetime('now'))`),

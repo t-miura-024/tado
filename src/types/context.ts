@@ -5,10 +5,19 @@ import type { ArtifactRecord } from "./artifact.ts";
 import type { AttemptResult } from "./result.ts";
 import type { GateAnswer } from "./workflow-def.ts";
 
-/** ステップの `condition` 判定に渡されるコンテキスト。 */
-export interface ConditionCtx {
+/** ゲートごとの最新回答（`stepKey` → `questionKey` → `GateAnswer`）。 */
+export type GateAnswers = Record<string, Record<string, GateAnswer>>;
+
+/** 全フック（condition / check / buildPrompt / beforeStep / afterStep）が共通で受け取るコンテキスト。 */
+export interface HookCtxBase {
   sessionDir: string;
-  gateAnswers: Record<string, Record<string, GateAnswer>>;
+  sessionId: string;
+  /** ゲートごとの最新試行の回答（approve / revise を問わず）。未回答のゲートは含まれない。 */
+  gateAnswers: GateAnswers;
+}
+
+/** ステップの `condition` 判定に渡されるコンテキスト。 */
+export interface ConditionCtx extends HookCtxBase {
   artifacts: ArtifactRecord[];
 }
 
@@ -19,23 +28,20 @@ export interface InitCtx {
 }
 
 /** ステップの `check` 関数に渡されるコンテキスト。 */
-export interface CheckCtx {
-  sessionDir: string;
+export interface CheckCtx extends HookCtxBase {
   artifactDbPath?: string;
   attemptResult: AttemptResult;
   artifacts: ArtifactRecord[];
 }
 
 /** タスク / サブタスクの `buildPrompt` 関数に渡されるコンテキスト。 */
-export interface PromptCtx {
-  sessionDir: string;
+export interface PromptCtx extends HookCtxBase {
   artifactDbPath?: string;
   artifacts: ArtifactRecord[];
 }
 
 /** `beforeStep` / `afterStep` フックに渡されるコンテキスト。 */
-export interface StepCtx {
-  sessionDir: string;
+export interface StepCtx extends HookCtxBase {
   artifacts: ArtifactRecord[];
   stepKey: string;
   attemptNumber: number;

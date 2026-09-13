@@ -1,6 +1,6 @@
 ---
 name: tado
-description: LLM のワークフロー順守を強制する決定論的ワークフローエンジン。init/next/report/confirm/status のコマンドでセッション管理・ステップ進行・ヒューマンゲート・リトライ判定を行う。
+description: LLM のワークフロー順守を強制する決定論的ワークフローエンジン。init/next/report/confirm/answers/status のコマンドでセッション管理・ステップ進行・ヒューマンゲート・リトライ判定・回答の確認を行う。
 ---
 
 # tado
@@ -16,7 +16,7 @@ Workflow Registry ({TADO_HOME}/workflows/<name>/index.ts)
   └── WorkflowDef (id / description / steps)
                           │
 tado (共有エンジン)        │
-  ├── CLI  ── エントリポイント（init/next/report/confirm/status）
+  ├── CLI  ── エントリポイント（init/next/report/confirm/answers/status）
   └── engine ── 状態機械核心（SQLite 管理）
 ```
 
@@ -147,6 +147,20 @@ human_gate の回答を人間から直接受け付ける対話コマンドです
   - `revise` 相当（例: `revise`）: `reviseTargetStep` 以降を pending に戻して巻き戻す
   - `abort` 相当（例: `abort`）: セッションを中断する
 
+### answers
+
+```bash
+tado answers --session <id> [--step <key>] [--json] [--all]
+```
+
+記録済みのゲート回答を読み出す読み取り専用コマンドです。人間・エージェント・外部ツールが回答を確認・監査する公式窓口であり、`workflow.db` を直接読まずにこのコマンドを使ってください。
+
+- デフォルトはゲートごとの最新試行の回答（approve / revise を問わず）。回答がまだ記録されていないゲートは含めない
+- `--all` を指定すると、最新試行に限らず全試行の回答履歴を返す。最新試行が未回答のゲートはデフォルト出力に過去の回答が含まれないため、履歴の確認には `--all` を使う
+- `--step <key>` を指定すると、単一ゲートステップの回答のみに絞り込む
+- `--json` を指定すると `{"sessionId": "...", "gateAnswers": {...}}` 形式の機械可読 JSON で出力する。回答が 0 件の場合も空の `gateAnswers` を返す。未指定時は人間向けテキストで出力する
+- テキスト出力で回答が記録されていない場合は `No gate answers found for session <id>.` と表示する
+
 ### status
 
 ```bash
@@ -241,6 +255,14 @@ const def: WorkflowDef = {
 
 export default def;
 ```
+
+### フック共通 ctx の `gateAnswers`
+
+全フック（`condition` / `check` / `buildPrompt` / `beforeStep` / `afterStep`）の ctx から `gateAnswers[stepKey][questionKey]` でゲート回答を参照できる。値はゲートごとの最新試行の回答（approve / revise を問わず）で、未回答のゲートは含まれない。
+
+### `onFail` の `goto` と `reset: "downstream"`
+
+`onFail` に `{ action: "goto", target: "<stepKey>", reset: "downstream" }` を指定すると、分岐先 `target` から失敗元ステップまで（両端を含む）が pending + retryCount=0 に戻り、サイクルが再実行される。`reset` を省略できるのは前方 goto のみで、その場合は失敗元のみ `failed` となり、中間ステップは変更されない。後方 goto（`target` が失敗元ステップより前）で `reset` を省略した定義は、ロード時に EngineError で拒否される。
 
 最小テンプレートはリポジトリの `examples/simple-workflow.ts` を参照。
 

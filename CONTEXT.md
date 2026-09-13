@@ -9,16 +9,20 @@
 _Avoid_: 承認ステップ, approval step, チェックポイント
 
 **ゲート回答**:
-ヒューマンゲートにおける人間の選択（approve / revise / abort）。confirm を通じてのみエンジンに記録され、LLM が代答することはない。本設計では単一選択のみを扱い、旧来の GateQuestion / QuestionType / ChoiceInput / GateAnswers / OutcomeQuestion 等による複数設問・条件付き入力はゼロベース再設計により廃止し、縮退範囲と移行は ADR 0017 系に記録する。
+ヒューマンゲートにおける人間の選択。設問（`GateQuestion`）ごとの回答を `Record<questionKey, GateAnswer>` として持ち、confirm を通じてのみエンジンに記録され、LLM が代答することはない。全フック ctx（condition / check / buildPrompt / beforeStep / afterStep）の `gateAnswers[stepKey][questionKey]` から、ゲートごとの最新試行の回答（approve / revise を問わず）を参照できる。
 _Avoid_: subagentOutput（ゲート文脈での転記値）, ユーザー入力
 
 **confirm（承認サブコマンド）**:
-人間が自分の端末（TTY 付き）で実行し、ゲート回答を記録して状態遷移まで行う CLI 操作。エージェントの Bash ツールからは TTY がないため構造的に実行できない。単一選択のため複数設問の順次回収や途中キャンセルの原子性は不要であり、旧来の原子性保証は廃止した。
+人間が自分の端末（TTY 付き）で実行し、ゲート回答を記録して状態遷移まで行う CLI 操作。複数設問を順次対話で回収し、途中キャンセルは原子的に全破棄する。エージェントの Bash ツールからは TTY がないため構造的に実行できない。
 _Avoid_: approve コマンド, 承認 API
 
 **無視型スキップ**:
 オーケストレータ LLM がゲートプロンプトを人間に提示せず、自己判断で回答を捏造する失敗モード。本設計が構造的に排除する対象。
 _Avoid_: スキップ（単独で使う）
+
+**巻き戻し（rewind）**:
+`onFail` の `goto` に `reset: "downstream"` を指定すると、分岐先から失敗元までのステップが pending + retryCount=0 に戻り、サイクル全体が再実行される意味論。confirm の revise 巻き戻しと同一機構を一般化したもの。
+_Avoid_: リセット（汎用）, 再実行（単独）
 
 **ワークフロー（Workflow）**:
 tado エンジンが実行する `WorkflowDef` で定義された一連のステップ列。`id` で識別される。
@@ -99,3 +103,11 @@ _Avoid_: 最後に作成されたセッション, ランダム選択
 **スキップ（skipped）**:
 `condition` が `false` を返したため実行されず `steps.status='skipped'` となったステップ。ノードグラフでは灰色単線枠＋ `skipped` ラベルで区別し、進捗率の分子には含めない。
 _Avoid_: スキップされたステップ（冗長）, 未実行
+
+**公開契約**:
+ワークフローとエージェントが依存してよい境界。ctx / CLI / `WorkflowDef` が該当し、DB スキーマは内部実装として公開契約に含めない。
+_Avoid_: パブリック API（汎用）, 内部構造
+
+**answers（読み出しサブコマンド）**:
+`tado answers --session <id> [--step <key>] [--json] [--all]` でゲート回答を読み出す読み取り専用 CLI。デフォルトはゲートごとの最新試行の回答のみを返し、`--all` を指定すると全試行の回答履歴を返す。人間・エージェント・外部ツールが回答を確認・監査する公式窓口。
+_Avoid_: get, show（汎用）

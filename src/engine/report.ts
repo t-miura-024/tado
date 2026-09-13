@@ -1,7 +1,7 @@
 import { and, desc, eq, gt, sql } from "drizzle-orm";
 import { artifacts as artifactsTable, sessions, stepAttempts, steps } from "./schema.ts";
-import type { StepDef } from "../types/workflow-def.ts";
 import type { CheckCtx, StepCtx } from "../types/context.ts";
+import type { StepDef } from "../types/workflow-def.ts";
 import type { ReportInput, ReportResult, StatusResult, AttemptResult } from "../types/result.ts";
 import {
   openSessionDb,
@@ -9,7 +9,9 @@ import {
   importWorkflowDefFromPath,
   isPathLike,
   getArtifacts,
+  getGateAnswers,
   registerHookArtifacts,
+  rewindSteps,
   EngineError,
 } from "./store.ts";
 import type { StepRow, TadoDb } from "./store.ts";
@@ -18,14 +20,16 @@ function handleStepFailure(
   db: TadoDb,
   sessionId: string,
   step: StepRow,
+  stepDef: StepDef | undefined,
   input: ReportInput,
   checkStatus: "pass" | "fail" | "error",
   checkReasons: string[],
-  stepDef?: StepDef,
 ): ReportResult {
   const newRetryCount = step.retryCount + 1;
   const maxRetries = step.maxRetries;
 
+  // リトライ予算が残っている間は onFail を適用しない。onFail のドリフト検証や
+  // reset の対象解決はここで行わない（成功経路・リトライ経路を brick させない）。
   if (newRetryCount <= maxRetries) {
     db.update(steps)
       .set({ retryCount: newRetryCount, status: "pending" })
@@ -46,13 +50,77 @@ function handleStepFailure(
 
   const onFailAction = step.onFailAction;
   const onFailTarget = step.onFailTarget;
+  const onFailReset = step.onFailReset ?? null;
+  const defOnFail = stepDef?.onFail;
+
+  // セッション作成後にワークフロー定義の onFail が変わったドリフトを、ここで
+  // 無言に適用しない。失敗元ステップを failed に確定させてから拒否する。
+  // reset も action/target と同様に steps へスナップショット済みで、定義側が
+  // 後から reset を追記/削除しても適用前に食い違いとして検出する。マイグレーション
+  // 前の既存セッションの NULL は「reset 未指定」として扱う（ADR-0025）。
+  const defAction = defOnFail?.action ?? null;
+  const defTarget = defOnFail?.target ?? null;
+  const defReset = defOnFail?.reset ?? null;
+  if (defAction !== onFailAction || defTarget !== onFailTarget || defReset !== onFailReset) {
+    db.update(steps).set({ status: "failed" }).where(eq(steps.id, step.id)).run();
+    throw new EngineError(
+      `onFail drift detected for step "${step.stepKey}" in session ${sessionId}: definition has action "${defAction ?? ""}" target "${defTarget ?? ""}" reset "${defReset ?? ""}", but the session was created with action "${onFailAction ?? ""}" target "${onFailTarget ?? ""}" reset "${onFailReset ?? ""}". Start a new session or restore the original workflow definition`,
+    );
+  }
+
+  // reset の適用判定はセッション作成時に凍結したスナップショットを基準にし、
+  // 対象解決・範囲検証はリトライ予算を使い切ったこの時点で行う（ADR-0025）。
+  if (onFailReset === "downstream") {
+    const resetTargetRow = onFailTarget
+      ? db
+          .select({ stepIndex: steps.stepIndex })
+          .from(steps)
+          .where(and(eq(steps.sessionId, sessionId), eq(steps.stepKey, onFailTarget)))
+          .get()
+      : undefined;
+    if (!onFailTarget || !resetTargetRow) {
+      db.update(steps).set({ status: "failed" }).where(eq(steps.id, step.id)).run();
+      throw new EngineError(
+        `Cannot reset downstream: onFail.target "${onFailTarget ?? ""}" was not found in session ${sessionId} (step "${step.stepKey}")`,
+      );
+    }
+    if (resetTargetRow.stepIndex > step.stepIndex) {
+      db.update(steps).set({ status: "failed" }).where(eq(steps.id, step.id)).run();
+      throw new EngineError(
+        `Cannot reset downstream: onFail.target "${onFailTarget}" (stepIndex ${resetTargetRow.stepIndex}) is after failing step "${step.stepKey}" (stepIndex ${step.stepIndex})`,
+      );
+    }
+    // 巻き戻しと currentStep 更新を BEGIN IMMEDIATE / COMMIT で囲み、
+    // 途中で失敗しても「steps は pending だが currentStep は失敗元」という
+    // 半端な状態を残さない（ADR-0025）。
+    db.run(sql`BEGIN IMMEDIATE`);
+    try {
+      rewindSteps(db, sessionId, resetTargetRow.stepIndex, step.stepIndex);
+      db.update(sessions)
+        .set({ currentStep: onFailTarget, updatedAt: sql`datetime('now')` })
+        .where(eq(sessions.id, sessionId))
+        .run();
+      db.run(sql`COMMIT`);
+    } catch (error) {
+      try {
+        db.run(sql`ROLLBACK`);
+      } catch {
+        // ロールバック自体が失敗しても元のエラーを優先する。
+      }
+      throw error;
+    }
+    return {
+      sessionId,
+      stepKey: input.stepKey,
+      checkResult: { status: checkStatus, reasons: checkReasons },
+      nextAction: "goto",
+      targetStep: onFailTarget,
+      message: `Step failed after ${maxRetries} retries. Rewinding steps ${onFailTarget}..${step.stepKey} to pending. Going to: ${onFailTarget}`,
+    };
+  }
 
   if (onFailAction === "goto" && onFailTarget) {
-    const requeueSource = stepDef?.onFail?.requeueSource === true;
-    db.update(steps)
-      .set({ status: requeueSource ? "pending" : "failed" })
-      .where(eq(steps.id, step.id))
-      .run();
+    db.update(steps).set({ status: "failed" }).where(eq(steps.id, step.id)).run();
     db.update(sessions)
       .set({ currentStep: onFailTarget, updatedAt: sql`datetime('now')` })
       .where(eq(sessions.id, sessionId))
@@ -63,9 +131,7 @@ function handleStepFailure(
       checkResult: { status: checkStatus, reasons: checkReasons },
       nextAction: "goto",
       targetStep: onFailTarget,
-      message: requeueSource
-        ? `Step requires revision. Going to: ${onFailTarget} (review will re-run after fix)`
-        : `Step failed after ${maxRetries} retries. Going to: ${onFailTarget}`,
+      message: `Step failed after ${maxRetries} retries. Going to: ${onFailTarget}`,
     };
   }
 
@@ -160,6 +226,12 @@ export async function report(
     );
   }
 
+  const isPath = isPathLike(resolvedWorkflowPath);
+  const def = isPath
+    ? await importWorkflowDefFromPath(resolvedWorkflowPath)
+    : await importWorkflowDef(resolvedWorkflowPath);
+  const stepDef = def.steps.find((s) => s.key === input.stepKey);
+
   const attempt = db
     .select()
     .from(stepAttempts)
@@ -196,19 +268,17 @@ export async function report(
     }
   }
 
-  const isPath = isPathLike(resolvedWorkflowPath);
-  const def = isPath
-    ? await importWorkflowDefFromPath(resolvedWorkflowPath)
-    : await importWorkflowDef(resolvedWorkflowPath);
-  const stepDef = def.steps.find((s) => s.key === input.stepKey);
-
   let checkStatus: "pass" | "fail" | "error" = "pass";
   let checkReasons: string[] = [];
 
   if (stepDef) {
+    const gateAnswers = getGateAnswers(db, sessionId);
+
     if (stepDef.afterStep) {
       const stepCtx: StepCtx = {
         sessionDir,
+        sessionId,
+        gateAnswers,
         artifacts: getArtifacts(db, sessionId),
         stepKey: step.stepKey,
         attemptNumber: attempt.attemptNumber,
@@ -228,6 +298,8 @@ export async function report(
 
     const checkCtx: CheckCtx = {
       sessionDir,
+      sessionId,
+      gateAnswers,
       artifactDbPath: session.artifactDbPath ?? undefined,
       attemptResult,
       artifacts,
@@ -296,17 +368,11 @@ export async function report(
       };
     }
   } else {
-    const result = handleStepFailure(
-      db,
-      sessionId,
-      step,
-      input,
-      checkStatus,
-      checkReasons,
-      stepDef,
-    );
-    db.$client.close();
-    return result;
+    try {
+      return handleStepFailure(db, sessionId, step, stepDef, input, checkStatus, checkReasons);
+    } finally {
+      db.$client.close();
+    }
   }
 }
 

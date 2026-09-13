@@ -1,16 +1,17 @@
 import { spawnSync } from "node:child_process";
 import * as clack from "@clack/prompts";
-import { and, desc, eq, gt, gte, sql } from "drizzle-orm";
+import { and, desc, eq, gt, sql } from "drizzle-orm";
 import { gateEvents, sessions, stepAttempts, steps } from "./schema.ts";
-import type { StepRow, TadoDb } from "./store.ts";
 import {
   getArtifacts,
   importWorkflowDef,
   importWorkflowDefFromPath,
   isPathLike,
   openSessionDb,
+  rewindSteps,
   EngineError,
 } from "./store.ts";
+import type { StepRow, TadoDb } from "./store.ts";
 import type { ConfirmResult } from "../types/result.ts";
 import type { GateAnswer, GateQuestion, HumanGateStepDef } from "../types/workflow-def.ts";
 
@@ -408,14 +409,12 @@ export async function confirm(
           .from(steps)
           .where(and(eq(steps.sessionId, sessionId), eq(steps.stepKey, targetStep)))
           .get();
-        if (targetStepRow) {
-          db.update(steps)
-            .set({ status: "pending", retryCount: 0 })
-            .where(
-              and(eq(steps.sessionId, sessionId), gte(steps.stepIndex, targetStepRow.stepIndex)),
-            )
-            .run();
+        if (!targetStepRow) {
+          throw new EngineError(
+            `Cannot revise: target step "${targetStep}" was not found in session ${sessionId} (step "${stepRow.stepKey}")`,
+          );
         }
+        rewindSteps(db, sessionId, targetStepRow.stepIndex);
         db.update(sessions)
           .set({ currentStep: targetStep, updatedAt: sql`datetime('now')` })
           .where(eq(sessions.id, sessionId))

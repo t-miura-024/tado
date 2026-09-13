@@ -8,9 +8,14 @@ import {
   status,
   confirm,
   listWorkflows,
+  readGateAnswers,
+  readGateAnswersHistory,
   EngineError,
 } from "../engine/index.ts";
+import type { GateAnswersHistoryEntry } from "../engine/index.ts";
 import type { WorkflowSummary } from "../engine/workflows.ts";
+import type { GateAnswers } from "../types/context.ts";
+import type { GateAnswer } from "../types/workflow-def.ts";
 import type { ReportInput } from "../types/result.ts";
 import { installCommand } from "./install.ts";
 import { updateCommand } from "./update.ts";
@@ -28,6 +33,13 @@ interface InitOpts extends WorkflowOpts {
 
 interface SessionOpts extends WorkflowOpts {
   session: string;
+}
+
+interface AnswersOpts {
+  session: string;
+  step?: string;
+  json?: boolean;
+  all?: boolean;
 }
 
 function readStdin(): string {
@@ -61,6 +73,50 @@ function formatWorkflowTable(workflows: WorkflowSummary[], verbose: boolean): st
   const formatRow = (cols: string[]): string =>
     cols.map((c, i) => (i < cols.length - 1 ? c.padEnd(colWidths[i]) : c)).join("  ");
   const lines = allRows.map((r) => formatRow(r));
+  return lines.join("\n") + "\n";
+}
+
+function formatGateAnswer(answer: GateAnswer): string {
+  if (typeof answer === "string") {
+    return answer;
+  }
+  return answer.input ? `${answer.value} (input: ${answer.input})` : answer.value;
+}
+
+function formatGateAnswers(sessionId: string, gateAnswers: GateAnswers, step?: string): string {
+  const stepKeys = Object.keys(gateAnswers);
+  if (stepKeys.length === 0) {
+    return step === undefined
+      ? `No gate answers found for session ${sessionId}.\n`
+      : `No gate answers found for step "${step}" in session ${sessionId} (latest attempt per gate only).\n`;
+  }
+  const lines = [`Session: ${sessionId}`];
+  for (const stepKey of stepKeys) {
+    lines.push(`Gate: ${stepKey}`);
+    for (const [questionKey, answer] of Object.entries(gateAnswers[stepKey])) {
+      lines.push(`  ${questionKey}: ${formatGateAnswer(answer)}`);
+    }
+  }
+  return lines.join("\n") + "\n";
+}
+
+function formatGateAnswersHistory(
+  sessionId: string,
+  history: GateAnswersHistoryEntry[],
+  step?: string,
+): string {
+  if (history.length === 0) {
+    return step === undefined
+      ? `No gate answers found for session ${sessionId} (all attempts).\n`
+      : `No gate answers found for step "${step}" in session ${sessionId} (all attempts).\n`;
+  }
+  const lines = [`Session: ${sessionId}`];
+  for (const entry of history) {
+    lines.push(`Step: ${entry.stepKey} (attempt ${entry.attemptNumber})`);
+    for (const [questionKey, answer] of Object.entries(entry.answers)) {
+      lines.push(`  ${questionKey}: ${formatGateAnswer(answer)}`);
+    }
+  }
   return lines.join("\n") + "\n";
 }
 
@@ -133,6 +189,46 @@ function buildProgram(): Command {
     .action(async (opts: SessionOpts) => {
       const result = await confirm(opts.session);
       output(result);
+    });
+
+  program
+    .command("answers")
+    .description("Show recorded human gate answers (read-only)")
+    .requiredOption("--session <id>", "Session ID")
+    .option("--step <key>", "Only show answers for the given gate step key")
+    .option("--all", "Show every recorded attempt per gate (default: latest attempt per gate)")
+    .option("--json", "Output as JSON")
+    .action((opts: AnswersOpts) => {
+      if (opts.all) {
+        let history = readGateAnswersHistory(opts.session);
+        if (opts.step !== undefined) {
+          history = history.filter((entry) => entry.stepKey === opts.step);
+        }
+        if (opts.json) {
+          output({
+            sessionId: opts.session,
+            history: history.map((entry) => ({
+              stepKey: entry.stepKey,
+              attemptNumber: entry.attemptNumber,
+              gateAnswers: entry.answers,
+            })),
+          });
+        } else {
+          process.stdout.write(formatGateAnswersHistory(opts.session, history, opts.step));
+        }
+        return;
+      }
+      let gateAnswers = readGateAnswers(opts.session);
+      if (opts.step !== undefined) {
+        gateAnswers = Object.hasOwn(gateAnswers, opts.step)
+          ? { [opts.step]: gateAnswers[opts.step] }
+          : {};
+      }
+      if (opts.json) {
+        output({ sessionId: opts.session, gateAnswers });
+      } else {
+        process.stdout.write(formatGateAnswers(opts.session, gateAnswers, opts.step));
+      }
     });
 
   program

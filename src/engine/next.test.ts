@@ -1179,4 +1179,145 @@ describe("next", () => {
       db.close();
     });
   });
+
+  describe("フックctxのゲート回答公開", () => {
+    it("condition / buildPrompt / beforeStepのctxからgateAnswersとsessionIdを参照できる", async () => {
+      const hook_ctx_test_workflow_content = `
+        import * as fs from 'node:fs';
+        import * as path from 'node:path';
+        const capture = (name, ctx) => {
+          fs.writeFileSync(path.join(ctx.sessionDir, name), JSON.stringify({
+            sessionId: ctx.sessionId,
+            gateAnswers: ctx.gateAnswers,
+          }));
+        };
+        const def = {
+          id: 'hook-ctx-test',
+          steps: [
+            {
+              key: 'gate',
+              phase: 'gate',
+              type: 'human_gate',
+              maxRetries: 1,
+              onFail: { action: 'escalate' },
+              humanGate: {
+                presentArtifacts: [],
+                outcomeQuestionKey: 'decision',
+                questions: [
+                  {
+                    key: 'decision',
+                    title: '判定',
+                    type: 'choice_with_input',
+                    choices: [
+                      { value: 'approve', label: 'OK' },
+                      { value: 'abort', label: 'Abort' },
+                    ],
+                  },
+                ],
+              },
+              check: (ctx) => ({ status: 'pass', reasons: [] }),
+            },
+            {
+              key: 'hooked',
+              phase: 'hooked',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'abort' },
+              condition: (ctx) => { capture('condition.json', ctx); return true; },
+              beforeStep: async (ctx) => { capture('before-step.json', ctx); return []; },
+              task: {
+                action: 'run_subagent',
+                subagentType: 'test',
+                buildPrompt: (ctx) => { capture('build-prompt.json', ctx); return 'hooked'; },
+              },
+              check: (ctx) => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+            `;
+      setupWorkflowFromContent("hook-ctx-test", hook_ctx_test_workflow_content);
+
+      const { sessionId, sessionDir } = await init("hook-ctx-test", { title: "test-title" });
+      await next(sessionId);
+      await confirm(sessionId, mockConfirmDeps("approve"));
+      const result = await next(sessionId);
+      expect(result.stepKey).toBe("hooked");
+
+      for (const name of ["condition.json", "build-prompt.json", "before-step.json"]) {
+        const captured = JSON.parse(fs.readFileSync(path.join(sessionDir, name), "utf-8")) as {
+          sessionId: string;
+          gateAnswers: Record<string, unknown>;
+        };
+        expect(captured.sessionId).toBe(sessionId);
+        expect(captured.gateAnswers).toEqual({ gate: { decision: { value: "approve" } } });
+      }
+    });
+
+    it("reviseの巻き戻し後もbuildPromptから最新のゲート回答を参照できる", async () => {
+      const rewind_answers_test_workflow_content = `
+        const def = {
+          id: 'rewind-answers-test',
+          steps: [
+            {
+              key: 'execute',
+              phase: 'execute',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'abort' },
+              task: {
+                action: 'run_subagent',
+                subagentType: 'test',
+                buildPrompt: (ctx) => 'session=' + ctx.sessionId + ' answers=' + JSON.stringify(ctx.gateAnswers),
+              },
+              check: (ctx) => ({ status: 'pass', reasons: [] }),
+            },
+            {
+              key: 'review_gate',
+              phase: 'review',
+              type: 'human_gate',
+              maxRetries: 1,
+              onFail: { action: 'escalate' },
+              humanGate: {
+                presentArtifacts: [],
+                outcomeQuestionKey: 'decision',
+                reviseTargetStep: 'execute',
+                questions: [
+                  {
+                    key: 'decision',
+                    title: '判定',
+                    type: 'choice_with_input',
+                    choices: [
+                      { value: 'approve', label: 'OK' },
+                      { value: 'revise', label: 'Revise', input: { required: true, placeholder: '理由', maxLength: 500 } },
+                    ],
+                  },
+                ],
+              },
+              check: (ctx) => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+            `;
+      setupWorkflowFromContent("rewind-answers-test", rewind_answers_test_workflow_content);
+
+      const { sessionId } = await init("rewind-answers-test", { title: "test-title" });
+      const first = await next(sessionId);
+      expect(first.stepKey).toBe("execute");
+      expect(first.prompt).toContain(`session=${sessionId}`);
+      expect(first.prompt).toContain("answers={}");
+
+      await report(sessionId, { stepKey: "execute", status: "completed", subagentOutput: "done" });
+      const gate = await next(sessionId);
+      expect(gate.stepKey).toBe("review_gate");
+
+      await confirm(sessionId, mockConfirmDeps("revise"));
+
+      // 巻き戻し中（ゲートは pending）でも revise の最新回答が参照できる
+      const rewound = await next(sessionId);
+      expect(rewound.stepKey).toBe("execute");
+      expect(rewound.prompt).toContain('"decision":{"value":"revise","input":"要修正"}');
+    });
+  });
 });
