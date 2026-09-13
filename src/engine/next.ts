@@ -1,5 +1,5 @@
 import type { StepDef } from "../types/workflow-def.ts";
-import type { PromptCtx, StepCtx } from "../types/context.ts";
+import type { GateAnswers, PromptCtx, StepCtx } from "../types/context.ts";
 import type { ArtifactInput, ArtifactRecord } from "../types/artifact.ts";
 import type { AttemptSummary, NextResult, ParallelNextResult } from "../types/result.ts";
 import { and, count, eq, gt, inArray, notInArray, sql } from "drizzle-orm";
@@ -11,6 +11,7 @@ import {
   isPathLike,
   getPreviousAttempts,
   getArtifacts,
+  getGateAnswers,
   registerHookArtifacts,
   buildConditionCtx,
   EngineError,
@@ -282,6 +283,7 @@ async function runBeforeStep(
   step: StepRow,
   stepDef: StepDef,
   attemptNumber: number,
+  gateAnswers: GateAnswers,
 ): Promise<ArtifactInput[] | null> {
   if (!stepDef.beforeStep) {
     return [];
@@ -289,6 +291,8 @@ async function runBeforeStep(
 
   const ctx: StepCtx = {
     sessionDir,
+    sessionId,
+    gateAnswers,
     artifacts: getArtifacts(db, sessionId),
     stepKey: step.stepKey,
     attemptNumber,
@@ -475,6 +479,8 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
 
         const promptCtx: PromptCtx = {
           sessionDir,
+          sessionId,
+          gateAnswers: getGateAnswers(db, sessionId),
           artifactDbPath: session.artifactDbPath ?? undefined,
           artifacts,
         };
@@ -546,6 +552,7 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
       const previousAttempts = getPreviousAttempts(db, currentStep.id);
       const artifacts = getArtifacts(db, sessionId);
       const attemptNumber = previousAttempts.length + 1;
+      const gateAnswers = getGateAnswers(db, sessionId);
 
       if (!stepDef.beforeStep) {
         // Fast path: the step has no hook, so no user code runs inside the
@@ -559,6 +566,8 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
 
         const promptCtx: PromptCtx = {
           sessionDir,
+          sessionId,
+          gateAnswers,
           artifactDbPath: session.artifactDbPath ?? undefined,
           artifacts,
         };
@@ -599,6 +608,7 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
         currentStep,
         stepDef,
         attemptNumber,
+        gateAnswers,
       );
       if (hookArtifacts === null) {
         // A concurrent next() allocated the step (or otherwise changed it)
@@ -645,6 +655,8 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
 
       const promptCtx: PromptCtx = {
         sessionDir,
+        sessionId,
+        gateAnswers,
         artifactDbPath: reSession.artifactDbPath ?? undefined,
         artifacts: finalArtifacts,
       };

@@ -64,7 +64,7 @@ tado の `WorkflowDef` を対話的に設計し、`{TADO_HOME}/workflows/<workfl
   - `condition` による分岐の有無と判定条件
   - `reviseTargetStep` による差し戻し先（`human_gate` の `revise` 選択時に戻るステップの `key`）
   - `onFail` 戦略（`retry` / `goto` / `abort` / `escalate`）と `goto` 時の `target`
-- **`maxRetries` と `onFail`**: 各ステップの `maxRetries`（リトライ上限）と `onFail`（`{ action, target?, requeueSource? }`）を決定する。
+- **`maxRetries` と `onFail`**: 各ステップの `maxRetries`（リトライ上限）と `onFail`（`{ action, target?, reset? }`）を決定する。`goto` 時に `reset: "downstream"` を指定すると、分岐先 `target` から失敗元までのステップが pending + retryCount=0 に巻き戻り、サイクル全体が再実行される。省略時は失敗元のみ `failed` となり中間ステップは変更されない。
 - ラウンド終了時に「各ステップの `key` / `phase` / `type` / `action` / `subtasks` / `condition` / `onFail` / `maxRetries`」の一覧を要約してユーザー確認を取る。
 
 ### Round 3: 各ステップの `buildStepPrompt` 6セクション概要と `check` / `condition` / `beforeStep` / `afterStep` 有無確定

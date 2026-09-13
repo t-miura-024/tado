@@ -73,10 +73,19 @@ export interface SubtaskDef {
 /** チェック失敗時の戦略。アクションと分岐先で振る舞いを指定する。 */
 export interface OnFailStrategy {
   action: "retry" | "goto" | "abort" | "escalate";
-  /** `goto` 時の分岐先ステップの key。 */
+  /**
+   * `goto` 時の分岐先ステップの key。human_gate では confirm の revise が
+   * `humanGate.reviseTargetStep` のフォールバックとして参照する。
+   */
   target?: string;
-  /** 失敗した試行のソースをキューへ再投入するかどうか。 */
-  requeueSource?: boolean;
+  /**
+   * `goto` 時の巻き戻し範囲。`"downstream"` を指定すると、分岐先 `target` から
+   * 失敗元ステップまでのステップ（両端を含む）が pending + retryCount=0 に戻り、
+   * サイクル全体が再実行される。省略時は失敗元のみ failed となり、中間の
+   * ステップは変更されない。human_gate では指定できず、差し戻しは
+   * `humanGate.reviseTargetStep` を使う。
+   */
+  reset?: "downstream";
 }
 
 /** ヒューマンゲート設問の定義。 */

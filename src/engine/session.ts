@@ -105,6 +105,7 @@ export async function init(
         maxRetries: step.maxRetries,
         onFailAction: step.onFail.action,
         onFailTarget: step.onFail.target ?? null,
+        onFailReset: step.onFail.reset ?? null,
       })
       .run();
   }

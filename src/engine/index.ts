@@ -11,5 +11,8 @@ export {
   getSessionsDir,
   getSessionDir,
   resolveWorkflowPath,
+  readGateAnswers,
+  readGateAnswersHistory,
 } from "./store.ts";
+export type { GateAnswersHistoryEntry } from "./store.ts";
 export { listWorkflows } from "./workflows.ts";

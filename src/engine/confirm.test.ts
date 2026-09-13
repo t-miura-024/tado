@@ -139,6 +139,31 @@ describe("confirm", () => {
     expect(r.stepKey).toBe("step1_task");
   });
 
+  it("revise対象のステップ行がセッションに無い場合はEngineErrorになり巻き戻さない", async () => {
+    const sessionId = await reachGate();
+
+    // def には reviseTargetStep（step1_task）があるが、セッションの行が無い状態を再現する
+    const db = new Database(getWorkflowDbPath());
+    db.run("DELETE FROM steps WHERE session_id = ? AND step_key = ?", [sessionId, "step1_task"]);
+    db.close();
+
+    await expect(confirm(sessionId, mockConfirmDeps("revise"))).rejects.toThrow(
+      /Cannot revise: target step "step1_task" was not found/,
+    );
+
+    // トランザクションはロールバックされ、ゲートは running のまま
+    const verifyDb = new Database(getWorkflowDbPath());
+    const gate = verifyDb
+      .query("SELECT status FROM steps WHERE session_id = ? AND step_key = ?")
+      .get(sessionId, "step2_human_gate") as Record<string, unknown>;
+    expect(gate.status).toBe("running");
+    const session = verifyDb
+      .query("SELECT current_step FROM sessions WHERE id = ?")
+      .get(sessionId) as Record<string, unknown>;
+    expect(session.current_step).toBe("step2_human_gate");
+    verifyDb.close();
+  });
+
   it("abortでセッションを中断する", async () => {
     const sessionId = await reachGate();
 

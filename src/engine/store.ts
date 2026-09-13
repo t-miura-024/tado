@@ -2,13 +2,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Database } from "bun:sqlite";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, gte, lte } from "drizzle-orm";
 import { drizzle, type BunSQLiteDatabase } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { artifacts as artifactsTable, sessions, stepAttempts, steps } from "./schema.ts";
-import type { WorkflowDef } from "../types/workflow-def.ts";
-import type { GateAnswer } from "../types/workflow-def.ts";
-import type { ConditionCtx } from "../types/context.ts";
+import type { GateAnswer, StepDef, WorkflowDef } from "../types/workflow-def.ts";
+import type { ConditionCtx, GateAnswers } from "../types/context.ts";
 import type { ArtifactInput, ArtifactRecord } from "../types/artifact.ts";
 import type { AttemptSummary } from "../types/result.ts";
 
@@ -134,8 +133,132 @@ export async function importWorkflowDef(workflowId: string): Promise<WorkflowDef
   return def;
 }
 
+/**
+ * onFail 戦略を検証する（ADR-0025）。
+ *
+ * ワークフロー定義は動的 import で読み込まれ型検査が効かないため、削除済み
+ * フィールド（requeueSource）・未知の値・解決不能な分岐先をロード時に
+ * EngineError で拒否し、無言の挙動変更を排除する。
+ */
+function validateOnFail(step: StepDef, stepIndexByKey: Map<string, number>, source: string): void {
+  const onFail = step.onFail as unknown as Record<string, unknown> | undefined;
+  if (!onFail || typeof onFail !== "object") {
+    throw new EngineError(`Invalid onFail in step "${step.key}" (${source}): must be an object`);
+  }
+  for (const field of Object.keys(onFail)) {
+    if (field === "requeueSource") {
+      // 旧実装は requeueSource === true のときだけ再キューし、false / 未指定は
+      // 失敗元を failed のまま残していた。値によって正しい移行手順が異なるため、
+      // 案内メッセージを値で分岐する（ADR-0025）。
+      if (onFail.requeueSource === true) {
+        throw new EngineError(
+          `Invalid onFail.requeueSource in step "${step.key}" (${source}): requeueSource has been replaced by reset: "downstream". Replace requeueSource: true with reset: "downstream" before deploying this engine version`,
+        );
+      }
+      throw new EngineError(
+        `Invalid onFail.requeueSource in step "${step.key}" (${source}): requeueSource has been removed. Remove the field; the default behavior (the failing step stays failed, no reset) is unchanged`,
+      );
+    }
+    if (field !== "action" && field !== "target" && field !== "reset") {
+      throw new EngineError(`Unknown onFail field "${field}" in step "${step.key}" (${source})`);
+    }
+  }
+
+  const action = onFail.action;
+  if (action !== "retry" && action !== "goto" && action !== "abort" && action !== "escalate") {
+    throw new EngineError(
+      `Invalid onFail.action "${String(action)}" in step "${step.key}" (${source}): must be one of retry | goto | abort | escalate`,
+    );
+  }
+
+  // human_gate の revise は onFail.target を差し戻し先のフォールバックとして
+  // 参照する（confirm.ts の revise 経路）。onFail.reset はゲートではどこからも
+  // 参照されない死んだ設定のため、無言で無視せずロード時に拒否する（ADR-0025）。
+  if (step.type === "human_gate") {
+    if (onFail.reset !== undefined) {
+      throw new EngineError(
+        `Invalid onFail.reset in step "${step.key}" (${source}): reset is not supported on human_gate steps; use humanGate.reviseTargetStep to control revise rewinding`,
+      );
+    }
+    const gateTarget = onFail.target;
+    if (gateTarget !== undefined) {
+      if (typeof gateTarget !== "string" || gateTarget === "") {
+        throw new EngineError(
+          `Invalid onFail.target in step "${step.key}" (${source}): must be a non-empty string`,
+        );
+      }
+      const targetIndex = stepIndexByKey.get(gateTarget);
+      if (targetIndex === undefined) {
+        throw new EngineError(
+          `Invalid onFail.target "${gateTarget}" in step "${step.key}" (${source}): step not found`,
+        );
+      }
+      const gateIndex = stepIndexByKey.get(step.key);
+      if (gateIndex !== undefined && targetIndex > gateIndex) {
+        throw new EngineError(
+          `Invalid onFail.target "${gateTarget}" in step "${step.key}" (${source}): target must not be after the gate step`,
+        );
+      }
+    }
+    return;
+  }
+
+  if (action !== "goto") {
+    // target / reset は goto のときのみ意味を持つ。併記された設定ミスを
+    // 無言で無視せず、ロード時に拒否する（ADR-0025）。
+    if (onFail.reset !== undefined) {
+      throw new EngineError(
+        `Invalid onFail.reset in step "${step.key}" (${source}): reset is only valid when action is "goto"`,
+      );
+    }
+    if (onFail.target !== undefined) {
+      throw new EngineError(
+        `Invalid onFail.target in step "${step.key}" (${source}): target is only valid when action is "goto"`,
+      );
+    }
+    return;
+  }
+
+  const target = onFail.target;
+  if (typeof target !== "string" || target === "") {
+    throw new EngineError(
+      `Invalid onFail.target in step "${step.key}" (${source}): must be a non-empty string when action is "goto"`,
+    );
+  }
+  const targetIndex = stepIndexByKey.get(target);
+  if (targetIndex === undefined) {
+    throw new EngineError(
+      `Invalid onFail.target "${target}" in step "${step.key}" (${source}): step not found`,
+    );
+  }
+  const reset = onFail.reset;
+  if (reset !== undefined && reset !== "downstream") {
+    throw new EngineError(
+      `Invalid onFail.reset "${String(reset)}" in step "${step.key}" (${source}): must be "downstream"`,
+    );
+  }
+  const stepIndex = stepIndexByKey.get(step.key);
+  if (reset === "downstream" && stepIndex !== undefined && targetIndex > stepIndex) {
+    throw new EngineError(
+      `Invalid onFail.target "${target}" in step "${step.key}" (${source}): target must not be after the failing step when reset is "downstream"`,
+    );
+  }
+  // 後方 goto（分岐先が失敗元より前）で reset を省略すると、失敗元が failed の
+  // まま残り、後続が pending なら未解決の失敗を無視して先へ進めてしまう。
+  // 巻き戻しを伴わない後方 goto はロード時に拒否する（ADR-0025）。
+  if (reset !== "downstream" && stepIndex !== undefined && targetIndex < stepIndex) {
+    throw new EngineError(
+      `Invalid onFail.target "${target}" in step "${step.key}" (${source}): backward goto requires reset: "downstream" so the failing step is rewound with the target`,
+    );
+  }
+}
+
 function validateWorkflowDef(def: WorkflowDef, source: string): void {
+  const stepIndexByKey = new Map<string, number>();
+  def.steps.forEach((step, index) => stepIndexByKey.set(step.key, index));
+
   for (const step of def.steps) {
+    validateOnFail(step, stepIndexByKey, source);
     if (step.type !== "human_gate" || !step.humanGate) continue;
     const hg = step.humanGate;
     if (!hg.outcomeQuestionKey || typeof hg.outcomeQuestionKey !== "string") {
@@ -199,6 +322,25 @@ function validateWorkflowDef(def: WorkflowDef, source: string): void {
       throw new EngineError(
         `outcomeQuestion "${hg.outcomeQuestionKey}" in step "${step.key}" (${source}) must be single_choice or choice_with_input`,
       );
+    }
+    if (hg.reviseTargetStep !== undefined) {
+      if (typeof hg.reviseTargetStep !== "string" || hg.reviseTargetStep === "") {
+        throw new EngineError(
+          `Invalid humanGate.reviseTargetStep in step "${step.key}" (${source}): must be a non-empty string`,
+        );
+      }
+      const reviseTargetIndex = stepIndexByKey.get(hg.reviseTargetStep);
+      if (reviseTargetIndex === undefined) {
+        throw new EngineError(
+          `Invalid humanGate.reviseTargetStep "${hg.reviseTargetStep}" in step "${step.key}" (${source}): step not found`,
+        );
+      }
+      const gateStepIndex = stepIndexByKey.get(step.key);
+      if (gateStepIndex !== undefined && reviseTargetIndex > gateStepIndex) {
+        throw new EngineError(
+          `Invalid humanGate.reviseTargetStep "${hg.reviseTargetStep}" in step "${step.key}" (${source}): target must not be after the gate step`,
+        );
+      }
     }
   }
 }
@@ -298,6 +440,29 @@ export function getPreviousAttempts(db: TadoDb, stepId: number): AttemptSummary[
   }));
 }
 
+/**
+ * 指定範囲のステップを pending + retryCount=0 に巻き戻す（ADR-0025）。
+ *
+ * `fromStepIndex` から `toStepIndex`（両端を含む）までの範囲を対象とする。
+ * `toStepIndex` を省略した場合は `fromStepIndex` 以降の全ステップを対象とする
+ * （confirm の revise 巻き戻し）。
+ */
+export function rewindSteps(
+  db: TadoDb,
+  sessionId: string,
+  fromStepIndex: number,
+  toStepIndex?: number,
+): void {
+  const conditions = [eq(steps.sessionId, sessionId), gte(steps.stepIndex, fromStepIndex)];
+  if (toStepIndex !== undefined) {
+    conditions.push(lte(steps.stepIndex, toStepIndex));
+  }
+  db.update(steps)
+    .set({ status: "pending", retryCount: 0 })
+    .where(and(...conditions))
+    .run();
+}
+
 export function getArtifacts(db: TadoDb, sessionId: string): ArtifactRecord[] {
   return db.select().from(artifactsTable).where(eq(artifactsTable.sessionId, sessionId)).all();
 }
@@ -346,6 +511,158 @@ export function registerHookArtifacts(
   }
 }
 
+/**
+ * resultJson をゲート回答として解釈する。オブジェクト以外・壊れた JSON は
+ * 警告して null を返し、読み出し側は当該試行を読み飛ばす。
+ */
+function parseGateAnswers(resultJson: string, stepKey: string): Record<string, GateAnswer> | null {
+  try {
+    const parsed = JSON.parse(resultJson);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, GateAnswer>;
+    }
+    console.warn(
+      `[tado] malformed gateAnswers for step ${stepKey}: not an object, resultJson=${resultJson.slice(0, 200)}`,
+    );
+  } catch (e) {
+    console.warn(
+      `[tado] malformed gateAnswers JSON for step ${stepKey}: ${String(e)}, resultJson=${resultJson.slice(0, 200)}`,
+    );
+  }
+  return null;
+}
+
+/**
+ * ゲートごとの最新試行の回答を収集する（ADR-0024）。
+ *
+ * human_gate ステップの最新試行（attempt_number 最大）に記録された回答のみを
+ * 返す。approve / revise を問わず、ステップの状態や試行の checkStatus には
+ * 依存しないため、revise で巻き戻されたサイクルの再実行中でも回答を参照できる。
+ * 回答がまだ記録されていないゲートは含めない。
+ */
+export function getGateAnswers(db: TadoDb, sessionId: string): GateAnswers {
+  const gateAnswers: GateAnswers = {};
+
+  const gateStepRows = db
+    .select({ id: steps.id, stepKey: steps.stepKey })
+    .from(steps)
+    .where(and(eq(steps.sessionId, sessionId), eq(steps.type, "human_gate")))
+    .all();
+
+  for (const gs of gateStepRows) {
+    const attempt = db
+      .select({ resultJson: stepAttempts.resultJson })
+      .from(stepAttempts)
+      .where(eq(stepAttempts.stepId, gs.id))
+      .orderBy(desc(stepAttempts.attemptNumber))
+      .limit(1)
+      .get();
+    if (!attempt?.resultJson) {
+      continue;
+    }
+    const answers = parseGateAnswers(attempt.resultJson, gs.stepKey);
+    if (answers) {
+      gateAnswers[gs.stepKey] = answers;
+    }
+  }
+
+  return gateAnswers;
+}
+
+/**
+ * セッションの存在を確認した上で、ゲートごとの最新回答を返す（ADR-0024）。
+ *
+ * engine の外側（CLI など）が使う読み出し専用 API。DB のオープンとクローズは
+ * 内部で完結し、存在しないセッションは EngineError として明示する。
+ */
+export function readGateAnswers(sessionId: string): GateAnswers {
+  const db = openSessionDb(sessionId);
+  try {
+    const session = db
+      .select({ id: sessions.id })
+      .from(sessions)
+      .where(eq(sessions.id, sessionId))
+      .get();
+    if (!session) {
+      throw new EngineError(`Session not found: ${sessionId}`);
+    }
+    return getGateAnswers(db, sessionId);
+  } finally {
+    db.$client.close();
+  }
+}
+
+/** human_gate の1試行分の回答（`readGateAnswersHistory` の要素）。 */
+export interface GateAnswersHistoryEntry {
+  stepKey: string;
+  attemptNumber: number;
+  answers: Record<string, GateAnswer>;
+}
+
+/**
+ * human_gate の全試行の回答を attemptNumber 昇順で収集する。
+ *
+ * resultJson が記録済みの試行のみを対象とする（未回答の試行は含めない）。
+ * malformed な JSON は getGateAnswers と同じ方針で警告して読み飛ばす。
+ */
+function getGateAnswersHistory(db: TadoDb, sessionId: string): GateAnswersHistoryEntry[] {
+  const history: GateAnswersHistoryEntry[] = [];
+
+  const gateStepRows = db
+    .select({ id: steps.id, stepKey: steps.stepKey })
+    .from(steps)
+    .where(and(eq(steps.sessionId, sessionId), eq(steps.type, "human_gate")))
+    .orderBy(steps.stepIndex)
+    .all();
+
+  for (const gs of gateStepRows) {
+    const attemptRows = db
+      .select({ attemptNumber: stepAttempts.attemptNumber, resultJson: stepAttempts.resultJson })
+      .from(stepAttempts)
+      .where(eq(stepAttempts.stepId, gs.id))
+      .orderBy(stepAttempts.attemptNumber)
+      .all();
+    for (const attempt of attemptRows) {
+      if (!attempt.resultJson) {
+        continue;
+      }
+      const answers = parseGateAnswers(attempt.resultJson, gs.stepKey);
+      if (answers) {
+        history.push({
+          stepKey: gs.stepKey,
+          attemptNumber: attempt.attemptNumber,
+          answers,
+        });
+      }
+    }
+  }
+
+  return history;
+}
+
+/**
+ * セッションの存在を確認した上で、ゲートごとの全試行の回答履歴を返す。
+ *
+ * engine の外側（CLI など）が使う読み出し専用 API。DB のオープンとクローズは
+ * 内部で完結し、存在しないセッションは EngineError として明示する。
+ */
+export function readGateAnswersHistory(sessionId: string): GateAnswersHistoryEntry[] {
+  const db = openSessionDb(sessionId);
+  try {
+    const session = db
+      .select({ id: sessions.id })
+      .from(sessions)
+      .where(eq(sessions.id, sessionId))
+      .get();
+    if (!session) {
+      throw new EngineError(`Session not found: ${sessionId}`);
+    }
+    return getGateAnswersHistory(db, sessionId);
+  } finally {
+    db.$client.close();
+  }
+}
+
 export function buildConditionCtx(db: TadoDb, sessionId: string): ConditionCtx {
   const session = db
     .select({ sessionDir: sessions.sessionDir })
@@ -355,42 +672,10 @@ export function buildConditionCtx(db: TadoDb, sessionId: string): ConditionCtx {
   if (!session) {
     throw new EngineError(`Session not found: ${sessionId}`);
   }
-  const artifacts = getArtifacts(db, sessionId);
-  const gateAnswers: Record<string, Record<string, GateAnswer>> = {};
-
-  const gateStepRows = db
-    .select({ id: steps.id, stepKey: steps.stepKey })
-    .from(steps)
-    .where(
-      and(eq(steps.sessionId, sessionId), eq(steps.type, "human_gate"), eq(steps.status, "passed")),
-    )
-    .all();
-
-  for (const gs of gateStepRows) {
-    const attempt = db
-      .select({ resultJson: stepAttempts.resultJson })
-      .from(stepAttempts)
-      .where(and(eq(stepAttempts.stepId, gs.id), eq(stepAttempts.checkStatus, "pass")))
-      .orderBy(desc(stepAttempts.attemptNumber))
-      .limit(1)
-      .get();
-    if (attempt?.resultJson) {
-      try {
-        const parsed = JSON.parse(attempt.resultJson);
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          gateAnswers[gs.stepKey] = parsed as Record<string, GateAnswer>;
-        } else {
-          console.warn(
-            `[tado] malformed gateAnswers for step ${gs.stepKey}: not an object, resultJson=${attempt.resultJson.slice(0, 200)}`,
-          );
-        }
-      } catch (e) {
-        console.warn(
-          `[tado] malformed gateAnswers JSON for step ${gs.stepKey}: ${String(e)}, resultJson=${attempt.resultJson.slice(0, 200)}`,
-        );
-      }
-    }
-  }
-
-  return { sessionDir: session.sessionDir, gateAnswers, artifacts };
+  return {
+    sessionDir: session.sessionDir,
+    sessionId,
+    gateAnswers: getGateAnswers(db, sessionId),
+    artifacts: getArtifacts(db, sessionId),
+  };
 }

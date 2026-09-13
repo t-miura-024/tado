@@ -44,6 +44,10 @@ echo '{"stepKey":"...","status":"completed","subagentOutput":"..."}' | tado repo
 # human_gate への回答（人間が自分の端末で実行・TTY 必須）
 tado confirm --session <id>
 
+# 記録済みのゲート回答を読み出す（読み取り専用。--json で機械可読 JSON。
+# 未指定時はゲートごとの最新試行のみ、--all で全試行の回答履歴）
+tado answers --session <id> [--step <key>] [--json] [--all]
+
 # 現在状態の確認
 tado status --session <id>
 
@@ -91,6 +95,10 @@ tado init --workflow my-workflow
 ```
 
 ワークフロー ID はディレクトリ名と一致させる必要があります。不一致の場合はエラーになります。`workflows/<name>/` 配下には `scripts/` や `templates/` などの付随ファイルも配置でき、`index.ts` から相対 import できます。
+
+## 公開契約と内部実装
+
+ワークフロー定義とエージェントが依存してよい公開契約は、フック ctx（`ConditionCtx` / `CheckCtx` / `PromptCtx` / `StepCtx`）・CLI（`tado` サブコマンド）・`WorkflowDef` の3つです。`~/.tado/workflow.db` のスキーマや `gate_events` / `steps` / `step_attempts` などのテーブルは内部実装であり、ワークフローやエージェントが直接読み書きしてはなりません。ゲート回答の参照は ctx の `gateAnswers`、確認・監査は `tado answers` を使ってください。
 
 ## ワークフロー定義の作成方法
 
@@ -211,7 +219,7 @@ import { buildStepPrompt } from "tado/prompt";
 - `outcomeQuestionKey`: ゲート全体の状態遷移（continue/goto/abort）を決める判定設問の `key`
 - `questions`: ゲート設問の配列（`GateQuestion[]`）。各設問は `key` / `title` / `type`（`single_choice` / `free_text` / `choice_with_input`）/ `required` / `placeholder` / `maxLength` / `choices` で構成。`choice_with_input` の選択肢は `input: { required, placeholder, maxLength, title }` で付帯入力を定義でき、選択値に応じて自由入力の要否・必須・文字数・placeholder が切り替わる（例: `revise` は理由必須）
 - `reviseTargetStep`: 判定設問で `revise` に相当する値が選ばれたときに巻き戻るステップの `key`
-- 回答は `Record<questionKey, GateAnswer>` として `gateAnswers` と `gate_events.answersJson` に保存され、`ConditionCtx.gateAnswers[stepKey][questionKey]` で参照できる（旧 `gateChoices` は廃止）
+- 回答は `Record<questionKey, GateAnswer>` として保存され、全フック ctx（condition / check / buildPrompt / beforeStep / afterStep）の `gateAnswers[stepKey][questionKey]` から参照できる。値はゲートごとの最新試行の回答（approve / revise を問わず）で、最新試行が未回答のゲートは含まれない。記録済みの回答は `tado answers` でも確認でき、全試行の履歴は `tado answers --all` で参照できる（旧 `gateChoices` は廃止）
 
 Human Gate への回答は **`tado confirm` サブコマンドでのみ**受け付けます（ADR-0007）。
 LLM が人間の回答を転記する経路は存在せず、`report` で human_gate ステップを報告するとエラーになります。

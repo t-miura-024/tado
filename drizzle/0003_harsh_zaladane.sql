@@ -1,0 +1,1 @@
+ALTER TABLE `steps` ADD `on_fail_reset` text;

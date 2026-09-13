@@ -11,6 +11,8 @@ import {
   migrateDb,
   getPreviousAttempts,
   getArtifacts,
+  getGateAnswers,
+  readGateAnswersHistory,
   buildConditionCtx,
   getTadoHome,
   getWorkflowDbPath,
@@ -103,6 +105,552 @@ describe("ストア", () => {
       const def = await importWorkflowDefFromPath(FIXTURE_WORKFLOW);
       expect(def.id).toBe("test-simple");
       expect(def.steps).toHaveLength(3);
+    });
+  });
+
+  describe("ワークフロー定義検証", () => {
+    function writeWorkflowFile(name: string, content: string): string {
+      fs.mkdirSync(TEST_BASE_DIR, { recursive: true });
+      const filePath = path.join(TEST_BASE_DIR, `${name}.ts`);
+      fs.writeFileSync(filePath, content);
+      return filePath;
+    }
+
+    it("onFailのrequeueSource: trueをreset: downstreamへの置換を促して拒否する", async () => {
+      const filePath = writeWorkflowFile(
+        "onfail-requeue-source",
+        `
+        const def = {
+          id: 'onfail-requeue-source',
+          steps: [
+            {
+              key: 'collect',
+              phase: 'Collect',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'goto', target: 'collect', requeueSource: true },
+              task: { action: 'run_subagent', buildPrompt: () => '' },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+        `,
+      );
+
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(EngineError);
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
+        /requeueSource has been replaced by reset: "downstream"/,
+      );
+      // 移行が完了するまで本エンジンを導入できないことをメッセージで明示する
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
+        /Replace requeueSource: true with reset: "downstream" before deploying this engine version/,
+      );
+    });
+
+    it("onFailのrequeueSource: falseはフィールド削除のみを案内して拒否する", async () => {
+      const filePath = writeWorkflowFile(
+        "onfail-requeue-source-false",
+        `
+        const def = {
+          id: 'onfail-requeue-source-false',
+          steps: [
+            {
+              key: 'collect',
+              phase: 'Collect',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'abort', requeueSource: false },
+              task: { action: 'run_subagent', buildPrompt: () => '' },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+        `,
+      );
+
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(EngineError);
+      // requeueSource: false は旧デフォルトと同じ挙動のため、reset の追加ではなく
+      // フィールド削除のみを案内する
+      let error: Error | undefined;
+      try {
+        await importWorkflowDefFromPath(filePath);
+      } catch (e) {
+        error = e as Error;
+      }
+      expect(error?.message).toMatch(
+        /requeueSource has been removed\. Remove the field; the default behavior \(the failing step stays failed, no reset\) is unchanged/,
+      );
+      expect(error?.message).not.toMatch(/reset: "downstream"/);
+    });
+
+    it("goto以外に指定されたresetを拒否する", async () => {
+      const filePath = writeWorkflowFile(
+        "onfail-non-goto-reset",
+        `
+        const def = {
+          id: 'onfail-non-goto-reset',
+          steps: [
+            {
+              key: 'review',
+              phase: 'Review',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'retry', reset: 'downstream' },
+              task: { action: 'run_subagent', buildPrompt: () => '' },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+        `,
+      );
+
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
+        /Invalid onFail.reset in step "review".*reset is only valid when action is "goto"/,
+      );
+    });
+
+    it("goto以外に指定されたtargetを拒否する", async () => {
+      const filePath = writeWorkflowFile(
+        "onfail-non-goto-target",
+        `
+        const def = {
+          id: 'onfail-non-goto-target',
+          steps: [
+            {
+              key: 'review',
+              phase: 'Review',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'abort', target: 'x' },
+              task: { action: 'run_subagent', buildPrompt: () => '' },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+        `,
+      );
+
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
+        /Invalid onFail.target in step "review".*target is only valid when action is "goto"/,
+      );
+    });
+
+    it("onFailの未知のreset値を拒否する", async () => {
+      const filePath = writeWorkflowFile(
+        "onfail-unknown-reset",
+        `
+        const def = {
+          id: 'onfail-unknown-reset',
+          steps: [
+            {
+              key: 'execute',
+              phase: 'Execute',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'abort' },
+              task: { action: 'run_subagent', buildPrompt: () => '' },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+            {
+              key: 'review',
+              phase: 'Review',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'goto', target: 'execute', reset: 'upstream' },
+              task: { action: 'run_subagent', buildPrompt: () => '' },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+        `,
+      );
+
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
+        /Invalid onFail.reset "upstream"/,
+      );
+    });
+
+    it("onFailのgoto先がstepsに存在しない場合に拒否する", async () => {
+      const filePath = writeWorkflowFile(
+        "onfail-missing-target",
+        `
+        const def = {
+          id: 'onfail-missing-target',
+          steps: [
+            {
+              key: 'review',
+              phase: 'Review',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'goto', target: 'missing_step' },
+              task: { action: 'run_subagent', buildPrompt: () => '' },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+        `,
+      );
+
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
+        /Invalid onFail.target "missing_step".*step not found/,
+      );
+    });
+
+    it("reset指定で分岐先が失敗元より後方の定義を拒否する", async () => {
+      const filePath = writeWorkflowFile(
+        "onfail-forward-target",
+        `
+        const def = {
+          id: 'onfail-forward-target',
+          steps: [
+            {
+              key: 'first',
+              phase: 'First',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'goto', target: 'second', reset: 'downstream' },
+              task: { action: 'run_subagent', buildPrompt: () => '' },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+            {
+              key: 'second',
+              phase: 'Second',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'abort' },
+              task: { action: 'run_subagent', buildPrompt: () => '' },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+        `,
+      );
+
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
+        /target must not be after the failing step when reset is "downstream"/,
+      );
+    });
+
+    it("resetなしの後方gotoをロード時に拒否する", async () => {
+      const filePath = writeWorkflowFile(
+        "onfail-backward-without-reset",
+        `
+        const def = {
+          id: 'onfail-backward-without-reset',
+          steps: [
+            {
+              key: 'execute',
+              phase: 'Execute',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'abort' },
+              task: { action: 'run_subagent', buildPrompt: () => '' },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+            {
+              key: 'review',
+              phase: 'Review',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'goto', target: 'execute' },
+              task: { action: 'run_subagent', buildPrompt: () => '' },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+        `,
+      );
+
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(EngineError);
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
+        /Invalid onFail.target "execute" in step "review".*backward goto requires reset: "downstream"/,
+      );
+    });
+
+    it("reset: downstreamの有効な定義を受理する", async () => {
+      const filePath = writeWorkflowFile(
+        "onfail-valid-reset",
+        `
+        const def = {
+          id: 'onfail-valid-reset',
+          steps: [
+            {
+              key: 'execute',
+              phase: 'Execute',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'abort' },
+              task: { action: 'run_subagent', buildPrompt: () => '' },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+            {
+              key: 'review',
+              phase: 'Review',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'goto', target: 'execute', reset: 'downstream' },
+              task: { action: 'run_subagent', buildPrompt: () => '' },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+        `,
+      );
+
+      const def = await importWorkflowDefFromPath(filePath);
+      expect(def.steps).toHaveLength(2);
+      expect(def.steps[1].onFail.reset).toBe("downstream");
+    });
+
+    it("humanGate.reviseTargetStepがstepsに存在しない場合に拒否する", async () => {
+      const filePath = writeWorkflowFile(
+        "human-gate-missing-revise-target",
+        `
+        const def = {
+          id: 'human-gate-missing-revise-target',
+          steps: [
+            {
+              key: 'gate',
+              phase: 'Gate',
+              type: 'human_gate',
+              maxRetries: 1,
+              onFail: { action: 'escalate' },
+              humanGate: {
+                presentArtifacts: [],
+                outcomeQuestionKey: 'decision',
+                reviseTargetStep: 'ghost',
+                questions: [
+                  {
+                    key: 'decision',
+                    title: '判定',
+                    type: 'single_choice',
+                    choices: [
+                      { value: 'approve', label: 'OK' },
+                      { value: 'revise', label: 'Revise' },
+                    ],
+                  },
+                ],
+              },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+        `,
+      );
+
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
+        /Invalid humanGate.reviseTargetStep "ghost" in step "gate".*step not found/,
+      );
+    });
+
+    it("humanGate.reviseTargetStepがゲートより後方のステップを指す場合に拒否する", async () => {
+      const filePath = writeWorkflowFile(
+        "human-gate-forward-revise-target",
+        `
+        const def = {
+          id: 'human-gate-forward-revise-target',
+          steps: [
+            {
+              key: 'gate',
+              phase: 'Gate',
+              type: 'human_gate',
+              maxRetries: 1,
+              onFail: { action: 'escalate' },
+              humanGate: {
+                presentArtifacts: [],
+                outcomeQuestionKey: 'decision',
+                reviseTargetStep: 'later',
+                questions: [
+                  {
+                    key: 'decision',
+                    title: '判定',
+                    type: 'single_choice',
+                    choices: [
+                      { value: 'approve', label: 'OK' },
+                      { value: 'revise', label: 'Revise' },
+                    ],
+                  },
+                ],
+              },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+            {
+              key: 'later',
+              phase: 'Later',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'abort' },
+              task: { action: 'run_subagent', buildPrompt: () => '' },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+        `,
+      );
+
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
+        /Invalid humanGate.reviseTargetStep "later" in step "gate".*target must not be after the gate step/,
+      );
+    });
+
+    it("human_gateのonFail.targetをreviseの差し戻し先フォールバックとして受理する", async () => {
+      const filePath = writeWorkflowFile(
+        "human-gate-onfail-target",
+        `
+        const def = {
+          id: 'human-gate-onfail-target',
+          steps: [
+            {
+              key: 'execute',
+              phase: 'Execute',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'abort' },
+              task: { action: 'run_subagent', buildPrompt: () => '' },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+            {
+              key: 'gate',
+              phase: 'Gate',
+              type: 'human_gate',
+              maxRetries: 1,
+              onFail: { action: 'escalate', target: 'execute' },
+              humanGate: {
+                presentArtifacts: [],
+                outcomeQuestionKey: 'decision',
+                questions: [
+                  {
+                    key: 'decision',
+                    title: '判定',
+                    type: 'single_choice',
+                    choices: [
+                      { value: 'approve', label: 'OK' },
+                      { value: 'revise', label: 'Revise' },
+                    ],
+                  },
+                ],
+              },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+        `,
+      );
+
+      const def = await importWorkflowDefFromPath(filePath);
+      expect(def.steps[1].onFail.target).toBe("execute");
+    });
+
+    it("human_gateのonFail.resetをreviseTargetStepの使用を促して拒否する", async () => {
+      const filePath = writeWorkflowFile(
+        "human-gate-onfail-reset",
+        `
+        const def = {
+          id: 'human-gate-onfail-reset',
+          steps: [
+            {
+              key: 'execute',
+              phase: 'Execute',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'abort' },
+              task: { action: 'run_subagent', buildPrompt: () => '' },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+            {
+              key: 'gate',
+              phase: 'Gate',
+              type: 'human_gate',
+              maxRetries: 1,
+              onFail: { action: 'goto', target: 'execute', reset: 'downstream' },
+              humanGate: {
+                presentArtifacts: [],
+                outcomeQuestionKey: 'decision',
+                questions: [
+                  {
+                    key: 'decision',
+                    title: '判定',
+                    type: 'single_choice',
+                    choices: [
+                      { value: 'approve', label: 'OK' },
+                      { value: 'revise', label: 'Revise' },
+                    ],
+                  },
+                ],
+              },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+        `,
+      );
+
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
+        /Invalid onFail.reset in step "gate".*reset is not supported on human_gate steps; use humanGate.reviseTargetStep/,
+      );
+    });
+
+    it("human_gateのonFail.targetがゲートより後方の場合は拒否する", async () => {
+      const filePath = writeWorkflowFile(
+        "human-gate-forward-onfail-target",
+        `
+        const def = {
+          id: 'human-gate-forward-onfail-target',
+          steps: [
+            {
+              key: 'gate',
+              phase: 'Gate',
+              type: 'human_gate',
+              maxRetries: 1,
+              onFail: { action: 'escalate', target: 'later' },
+              humanGate: {
+                presentArtifacts: [],
+                outcomeQuestionKey: 'decision',
+                questions: [
+                  {
+                    key: 'decision',
+                    title: '判定',
+                    type: 'single_choice',
+                    choices: [
+                      { value: 'approve', label: 'OK' },
+                      { value: 'revise', label: 'Revise' },
+                    ],
+                  },
+                ],
+              },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+            {
+              key: 'later',
+              phase: 'Later',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'abort' },
+              task: { action: 'run_subagent', buildPrompt: () => '' },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+        `,
+      );
+
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
+        /Invalid onFail.target "later" in step "gate".*target must not be after the gate step/,
+      );
     });
   });
 
@@ -204,7 +752,7 @@ describe("ストア", () => {
 
       const step = afterRaw
         .query(
-          "SELECT step_key, type, status, on_fail_action, on_fail_target FROM steps WHERE session_id = ?",
+          "SELECT step_key, type, status, on_fail_action, on_fail_target, on_fail_reset FROM steps WHERE session_id = ?",
         )
         .get("sid-existing") as Record<string, unknown>;
       expect(step).toBeTruthy();
@@ -213,6 +761,7 @@ describe("ストア", () => {
       expect(step.status).toBe("running");
       expect(step.on_fail_action).toBe("goto");
       expect(step.on_fail_target).toBe("step2");
+      expect(step.on_fail_reset).toBeNull();
 
       const attempt = afterRaw
         .query(
@@ -234,13 +783,17 @@ describe("ストア", () => {
       const migrations = afterRaw
         .query("SELECT COUNT(*) AS cnt FROM __drizzle_migrations")
         .get() as Record<string, unknown>;
-      expect(migrations.cnt).toBe(3);
+      expect(migrations.cnt).toBe(4);
       const columns = afterRaw
         .query("SELECT name FROM pragma_table_info('sessions') ORDER BY name")
         .all() as { name: string }[];
       const columnNames = columns.map((c) => c.name);
       expect(columnNames).toContain("cwd");
       expect(columnNames).toContain("title");
+      const stepColumns = afterRaw
+        .query("SELECT name FROM pragma_table_info('steps') ORDER BY name")
+        .all() as { name: string }[];
+      expect(stepColumns.map((c) => c.name)).toContain("on_fail_reset");
       const migratedSession = afterRaw
         .query("SELECT cwd, title FROM sessions WHERE id = ?")
         .get("sid-existing") as Record<string, unknown>;
@@ -274,7 +827,7 @@ describe("ストア", () => {
       db.$client.close();
     });
 
-    it("ステップのDB行をStepRow（onFailAction/onFailTarget含む）にマッピングする", () => {
+    it("ステップのDB行をStepRow（onFailAction/onFailTarget/onFailReset含む）にマッピングする", () => {
       const dir = newSessionDir("step-row");
       const db = openDb();
       migrateDb(db);
@@ -285,9 +838,9 @@ describe("ストア", () => {
         ["sid-1", "wf-1", "/tmp/wf.ts", dir],
       );
       raw.run(
-        `INSERT INTO steps (session_id, step_key, step_index, phase, type, max_retries, on_fail_action, on_fail_target)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        ["sid-1", "step1", 0, "Phase", "task", 2, "goto", "step3"],
+        `INSERT INTO steps (session_id, step_key, step_index, phase, type, max_retries, on_fail_action, on_fail_target, on_fail_reset)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ["sid-1", "step1", 0, "Phase", "task", 2, "goto", "step3", "downstream"],
       );
       raw.close();
 
@@ -301,6 +854,7 @@ describe("ストア", () => {
       expect(row?.maxRetries).toBe(2);
       expect(row?.onFailAction).toBe("goto");
       expect(row?.onFailTarget).toBe("step3");
+      expect(row?.onFailReset).toBe("downstream");
       db.$client.close();
     });
 
@@ -471,7 +1025,187 @@ describe("ストア", () => {
       expect(ctx.artifacts).toHaveLength(1);
       expect(ctx.artifacts[0].artifactKey).toBe("doc.md");
       expect(ctx.sessionDir).toBe(dir);
+      expect(ctx.sessionId).toBe("sid-1");
       db.$client.close();
+    });
+
+    it("getGateAnswersは最新試行の回答を返す（巻き戻し中でも参照できる）", () => {
+      const dir = newSessionDir("gate-answers-latest");
+      const db = openDb();
+      migrateDb(db);
+      const raw = openRawDb();
+      raw.run(
+        `INSERT INTO sessions (id, workflow_id, workflow_path, session_dir, status)
+         VALUES (?, ?, ?, ?, 'running')`,
+        ["sid-1", "wf-1", "/tmp/wf.ts", dir],
+      );
+      // revise の巻き戻しでゲートは pending に戻っている
+      raw.run(
+        `INSERT INTO steps (session_id, step_key, step_index, phase, type, status, max_retries, on_fail_action)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ["sid-1", "gate_step", 0, "Gate", "human_gate", "pending", 1, "escalate"],
+      );
+      const gateRaw = raw
+        .query("SELECT id FROM steps WHERE session_id = ? AND step_key = ?")
+        .get("sid-1", "gate_step") as Record<string, unknown>;
+      raw.run(
+        "INSERT INTO step_attempts (step_id, attempt_number, result_json, check_status) VALUES (?, ?, ?, ?)",
+        [gateRaw.id as number, 1, JSON.stringify({ decision: { value: "approve" } }), "pass"],
+      );
+      raw.run(
+        "INSERT INTO step_attempts (step_id, attempt_number, result_json, check_status) VALUES (?, ?, ?, ?)",
+        [
+          gateRaw.id as number,
+          2,
+          JSON.stringify({ decision: { value: "revise", input: "要修正" } }),
+          "fail",
+        ],
+      );
+      raw.close();
+
+      const answers = getGateAnswers(db, "sid-1");
+      expect(answers["gate_step"]?.["decision"]).toEqual({ value: "revise", input: "要修正" });
+      db.$client.close();
+    });
+
+    it("getGateAnswersは未回答の最新試行があるゲートを含めない", () => {
+      const dir = newSessionDir("gate-answers-unanswered");
+      const db = openDb();
+      migrateDb(db);
+      const raw = openRawDb();
+      raw.run(
+        `INSERT INTO sessions (id, workflow_id, workflow_path, session_dir, status)
+         VALUES (?, ?, ?, ?, 'running')`,
+        ["sid-1", "wf-1", "/tmp/wf.ts", dir],
+      );
+      raw.run(
+        `INSERT INTO steps (session_id, step_key, step_index, phase, type, max_retries, on_fail_action)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ["sid-1", "gate_step", 0, "Gate", "human_gate", 1, "escalate"],
+      );
+      const gateRaw = raw
+        .query("SELECT id FROM steps WHERE session_id = ? AND step_key = ?")
+        .get("sid-1", "gate_step") as Record<string, unknown>;
+      raw.run(
+        "INSERT INTO step_attempts (step_id, attempt_number, result_json, check_status) VALUES (?, ?, ?, ?)",
+        [gateRaw.id as number, 1, JSON.stringify({ decision: { value: "approve" } }), "pass"],
+      );
+      // 再実行された最新試行はまだ未回答
+      raw.run("INSERT INTO step_attempts (step_id, attempt_number) VALUES (?, ?)", [
+        gateRaw.id as number,
+        2,
+      ]);
+      raw.close();
+
+      const answers = getGateAnswers(db, "sid-1");
+      expect(answers["gate_step"]).toBeUndefined();
+      db.$client.close();
+    });
+
+    it("getGateAnswersはhuman_gate以外のステップの結果を含めない", () => {
+      const dir = newSessionDir("gate-answers-non-gate");
+      const db = openDb();
+      migrateDb(db);
+      const raw = openRawDb();
+      raw.run(
+        `INSERT INTO sessions (id, workflow_id, workflow_path, session_dir, status)
+         VALUES (?, ?, ?, ?, 'running')`,
+        ["sid-1", "wf-1", "/tmp/wf.ts", dir],
+      );
+      raw.run(
+        `INSERT INTO steps (session_id, step_key, step_index, phase, type, max_retries, on_fail_action)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ["sid-1", "task_step", 0, "Task", "task", 1, "abort"],
+      );
+      const stepRaw = raw
+        .query("SELECT id FROM steps WHERE session_id = ? AND step_key = ?")
+        .get("sid-1", "task_step") as Record<string, unknown>;
+      raw.run(
+        "INSERT INTO step_attempts (step_id, attempt_number, result_json, check_status) VALUES (?, ?, ?, ?)",
+        [stepRaw.id as number, 1, JSON.stringify({ decision: { value: "approve" } }), "pass"],
+      );
+      raw.close();
+
+      expect(getGateAnswers(db, "sid-1")).toEqual({});
+      db.$client.close();
+    });
+
+    it("readGateAnswersHistoryはhuman_gateの全試行の回答をattemptNumber昇順で返す", () => {
+      const dir = newSessionDir("gate-answers-history");
+      const db = openDb();
+      migrateDb(db);
+      const raw = openRawDb();
+      raw.run(
+        `INSERT INTO sessions (id, workflow_id, workflow_path, session_dir, status)
+         VALUES (?, ?, ?, ?, 'running')`,
+        ["sid-1", "wf-1", "/tmp/wf.ts", dir],
+      );
+      raw.run(
+        `INSERT INTO steps (session_id, step_key, step_index, phase, type, max_retries, on_fail_action)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ["sid-1", "gate_step", 0, "Gate", "human_gate", 1, "escalate"],
+      );
+      raw.run(
+        `INSERT INTO steps (session_id, step_key, step_index, phase, type, max_retries, on_fail_action)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ["sid-1", "task_step", 1, "Task", "task", 0, "abort"],
+      );
+      const gateRaw = raw
+        .query("SELECT id FROM steps WHERE session_id = ? AND step_key = ?")
+        .get("sid-1", "gate_step") as Record<string, unknown>;
+      const taskRaw = raw
+        .query("SELECT id FROM steps WHERE session_id = ? AND step_key = ?")
+        .get("sid-1", "task_step") as Record<string, unknown>;
+      raw.run(
+        "INSERT INTO step_attempts (step_id, attempt_number, result_json, check_status) VALUES (?, ?, ?, ?)",
+        [gateRaw.id as number, 1, JSON.stringify({ decision: { value: "approve" } }), "pass"],
+      );
+      // 未回答の試行は履歴に含めない
+      raw.run("INSERT INTO step_attempts (step_id, attempt_number) VALUES (?, ?)", [
+        gateRaw.id as number,
+        2,
+      ]);
+      raw.run(
+        "INSERT INTO step_attempts (step_id, attempt_number, result_json, check_status) VALUES (?, ?, ?, ?)",
+        [
+          gateRaw.id as number,
+          3,
+          JSON.stringify({ decision: { value: "revise", input: "要修正" } }),
+          "fail",
+        ],
+      );
+      // human_gate以外のステップの回答は履歴に含めない
+      raw.run(
+        "INSERT INTO step_attempts (step_id, attempt_number, result_json, check_status) VALUES (?, ?, ?, ?)",
+        [taskRaw.id as number, 1, JSON.stringify({ note: "ignored" }), "pass"],
+      );
+      raw.close();
+      db.$client.close();
+
+      const history = readGateAnswersHistory("sid-1");
+      expect(history).toHaveLength(2);
+      expect(history[0]).toEqual({
+        stepKey: "gate_step",
+        attemptNumber: 1,
+        answers: { decision: { value: "approve" } },
+      });
+      expect(history[1]).toEqual({
+        stepKey: "gate_step",
+        attemptNumber: 3,
+        answers: { decision: { value: "revise", input: "要修正" } },
+      });
+    });
+
+    it("readGateAnswersHistoryは存在しないセッションでEngineErrorをスローする", () => {
+      newSessionDir("gate-answers-history-missing");
+      const db = openDb();
+      migrateDb(db);
+      db.$client.close();
+
+      expect(() => readGateAnswersHistory("no-such-session")).toThrow(EngineError);
+      expect(() => readGateAnswersHistory("no-such-session")).toThrow(
+        "Session not found: no-such-session",
+      );
     });
   });
 });
