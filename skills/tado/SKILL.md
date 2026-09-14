@@ -57,9 +57,17 @@ tado next --session <id>
   "subagentType": "spec-writer",
   "prompt": "## 目的\n...",
   "constraints": { "mustCallTaskTool": true, "readonly": false, "reportAfterCompletion": true },
-  "context": { "sessionDir": "...", "attemptNumber": 1, "retryCount": 0, "maxRetries": 3 }
+  "context": {
+    "sessionDir": "...",
+    "attemptNumber": 1,
+    "retryCount": 0,
+    "maxRetries": 3,
+    "loop": null
+  }
 }
 ```
+
+`context.loop` は実行中ステップが属する最も内側のループの文脈（`{ key, iteration, maxIterations }`）。ループ外では `null`。全フック ctx でも `loop` として参照できる。
 
 **human_gate:**
 
@@ -142,10 +150,10 @@ human_gate の回答を人間から直接受け付ける対話コマンドです
 - 現在のステップが human_gate でない場合はエラーになる
 - TTY なしでの実行試行も `gate_events` テーブルに監査記録として残る
 - 各設問を `clack.select/autocomplete` → 条件付き `clack.text` で順次提示し、進捗 `Qn/M` と設問タイトル・説明を表示する。付帯入力 `input` がある選択肢を選んだ場合は追加入力を求め、必須・文字数バリデーションが即時に行われ未達なら再入力を求める。途中キャンセルは原子的に全破棄して `running` のまま再試行可能
-- 判定設問（`outcomeQuestionKey` で指名）の値で状態遷移する:
-  - `approve` 相当（例: `approve`）: ゲート通過。次のステップへ
-  - `revise` 相当（例: `revise`）: `reviseTargetStep` 以降を pending に戻して巻き戻す
-  - `abort` 相当（例: `abort`）: セッションを中断する
+- 判定設問（`outcomeQuestionKey` で指名）の回答 `value` は文字列の完全一致で判定される。差し戻しとして解釈されるのは値が文字列 `revise` のときだけ、中断は値が文字列 `abort` のときだけである:
+  - 値が `revise`（完全一致）: `reviseTargetStep` 以降を pending + retryCount=0 に戻して巻き戻す。選択肢に `value: "revise"` があるゲートでは `reviseTargetStep` が必須（未指定なら EngineError。ロード時検証も選択肢の `value` が `revise` の場合にしか発火しない）。ループをまたぐ差し戻しはループの反復状態も初期化する
+  - 値が `abort`（完全一致）: セッションを中断する
+  - それ以外の値（`approve`、および `{ value: "rework", label: "差し戻し" }` のような同義語を含む）: すべて承認として扱われ、ゲートを通過する
 
 ### answers
 
@@ -260,9 +268,40 @@ export default def;
 
 全フック（`condition` / `check` / `buildPrompt` / `beforeStep` / `afterStep`）の ctx から `gateAnswers[stepKey][questionKey]` でゲート回答を参照できる。値はゲートごとの最新試行の回答（approve / revise を問わず）で、未回答のゲートは含まれない。
 
-### `onFail` の `goto` と `reset: "downstream"`
+### ループ（`type: "loop"`）
 
-`onFail` に `{ action: "goto", target: "<stepKey>", reset: "downstream" }` を指定すると、分岐先 `target` から失敗元ステップまで（両端を含む）が pending + retryCount=0 に戻り、サイクルが再実行される。`reset` を省略できるのは前方 goto のみで、その場合は失敗元のみ `failed` となり、中間ステップは変更されない。後方 goto（`target` が失敗元ステップより前）で `reset` を省略した定義は、ロード時に EngineError で拒否される。
+`type: "loop"` は `body: StepDef[]` を繰り返す構造ステップ。loop 自身は実行されず、本体のステップが実行対象になる。`maxIterations`（正の整数）と、上限到達時の `onExhausted`（`escalate` / `abort`）を指定する。
+
+```typescript
+{
+  key: "review_cycle",
+  phase: "レビューサイクル",
+  type: "loop",
+  body: [
+    { key: "write_spec", phase: "仕様策定", type: "task", /* ... */ },
+    {
+      key: "review_spec",
+      phase: "レビュー",
+      type: "task",
+      /* ... */
+      check: (ctx: CheckCtx): CheckResult =>
+        ctx.attemptResult.subagentOutput?.includes("LGTM")
+          ? { status: "pass", reasons: ["approved"] }
+          : { status: "continue", reasons: ["revision requested"] },
+    },
+  ],
+  maxIterations: 3,
+  onExhausted: "escalate",
+}
+```
+
+- 本体の `check` が `continue` を返すと、本体全体を pending + retryCount=0 に戻して本体先頭から次イテレーションを実行する。`report` は `nextAction: "repeat"` を返す。`pass` で本体が完了して後続ステップへ進み、`fail` / `error` は通常どおりリトライ / `onFail`（`retry` / `abort` / `escalate`）で処理される
+- ループ外で `continue` を返した場合は EngineError（fail-fast）。`continue` は loop 本体専用
+- `maxIterations` に達すると `onExhausted` が適用される（`escalate` = セッション paused / `abort` = aborted）
+- ネストした loop の `continue` は最内ループに帰属する。外側 loop の巻き戻しでは内側 loop の反復状態も初期化される
+- loop を `parallel` の子（`subtasks`）に置くことはできない（型とロード時検証で拒否）
+- ループ文脈は全フック ctx の `loop`（`{ key, iteration, maxIterations }`、ループ外は `null`）と `next` の `context.loop` から参照できる
+- `onFail` は `retry` / `abort` / `escalate` のみ。`onFail.goto` / `target` / `reset` は撤去済みで、前方ジャンプの代替はない（旧 goto の `reset: "downstream"` は loop の `continue` と human_gate の revise に置き換わった）
 
 最小テンプレートはリポジトリの `examples/simple-workflow.ts` を参照。
 

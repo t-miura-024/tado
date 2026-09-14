@@ -34,9 +34,24 @@ export {
   ARTIFACT_FOLD_THRESHOLD,
   mergeHistory,
   formatHistoryEntry,
+  getEnclosingLoop,
+  formatLoopIteration,
+  layoutWorkflowSteps,
+  getPhaseDepthStyle,
+  groupSessionsByWorkflowId,
+  toWorkflowDetailStep,
   _internal,
 } from "./logic-core.ts";
-export type { Progress, SessionStatus, HistoryEntry } from "./logic-core.ts";
+export type {
+  Progress,
+  SessionStatus,
+  HistoryEntry,
+  LoopStepLike,
+  EnclosingLoopDisplay,
+  CanvasNode,
+  CanvasEdge,
+  CanvasNodeInput,
+} from "./logic-core.ts";
 
 // ---------------------------------------------------------------------------
 // Preview: fs-dependent

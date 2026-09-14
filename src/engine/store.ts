@@ -2,12 +2,21 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Database } from "bun:sqlite";
-import { and, desc, eq, gte, lte } from "drizzle-orm";
+import { and, count, desc, eq, gt, gte, inArray, lte, ne, notInArray, sql } from "drizzle-orm";
 import { drizzle, type BunSQLiteDatabase } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { artifacts as artifactsTable, sessions, stepAttempts, steps } from "./schema.ts";
-import type { GateAnswer, StepDef, WorkflowDef } from "../types/workflow-def.ts";
-import type { ConditionCtx, GateAnswers } from "../types/context.ts";
+import type { StepRow } from "./schema.ts";
+import type {
+  ExecutableStepDef,
+  GateAnswer,
+  LoopStepDef,
+  OnExhaustedStrategy,
+  ParallelStepDef,
+  StepDef,
+  WorkflowDef,
+} from "../types/workflow-def.ts";
+import type { ConditionCtx, GateAnswers, LoopContext } from "../types/context.ts";
 import type { ArtifactInput, ArtifactRecord } from "../types/artifact.ts";
 import type { AttemptSummary } from "../types/result.ts";
 
@@ -133,212 +142,275 @@ export async function importWorkflowDef(workflowId: string): Promise<WorkflowDef
   return def;
 }
 
+/** フラット化したステップ定義。`parentKey` は最内の loop 行の key（ルート直下は null）。 */
+export interface FlattenedStepDef {
+  def: StepDef;
+  parentKey: string | null;
+}
+
 /**
- * onFail 戦略を検証する（ADR-0025）。
+ * ネストした loop 本体を DFS 先行順に平坦化する。
+ *
+ * init の steps 行採番とロード時検証が同じ順序を共有し、親子関係
+ * （`parentStepId`）と stepIndex の対応を一致させる。
+ */
+export function flattenStepDefs(steps: StepDef[]): FlattenedStepDef[] {
+  const flattened: FlattenedStepDef[] = [];
+  const visit = (list: StepDef[], parentKey: string | null): void => {
+    for (const step of list) {
+      flattened.push({ def: step, parentKey });
+      if (step.type === "loop") {
+        visit(step.body ?? [], step.key);
+      }
+    }
+  };
+  visit(steps, null);
+  return flattened;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * onFail 戦略を検証する。
  *
  * ワークフロー定義は動的 import で読み込まれ型検査が効かないため、削除済み
- * フィールド（requeueSource）・未知の値・解決不能な分岐先をロード時に
+ * フィールド（goto の target / reset・旧 requeueSource）や未知の値をロード時に
  * EngineError で拒否し、無言の挙動変更を排除する。
  */
-function validateOnFail(step: StepDef, stepIndexByKey: Map<string, number>, source: string): void {
-  const onFail = step.onFail as unknown as Record<string, unknown> | undefined;
-  if (!onFail || typeof onFail !== "object") {
+function validateOnFail(step: ExecutableStepDef, source: string): void {
+  const onFail = (step as { onFail?: unknown }).onFail;
+  if (!isRecord(onFail)) {
     throw new EngineError(`Invalid onFail in step "${step.key}" (${source}): must be an object`);
   }
   for (const field of Object.keys(onFail)) {
-    if (field === "requeueSource") {
-      // 旧実装は requeueSource === true のときだけ再キューし、false / 未指定は
-      // 失敗元を failed のまま残していた。値によって正しい移行手順が異なるため、
-      // 案内メッセージを値で分岐する（ADR-0025）。
-      if (onFail.requeueSource === true) {
-        throw new EngineError(
-          `Invalid onFail.requeueSource in step "${step.key}" (${source}): requeueSource has been replaced by reset: "downstream". Replace requeueSource: true with reset: "downstream" before deploying this engine version`,
-        );
-      }
+    if (field === "action") {
+      continue;
+    }
+    if (field === "target" || field === "reset" || field === "requeueSource") {
       throw new EngineError(
-        `Invalid onFail.requeueSource in step "${step.key}" (${source}): requeueSource has been removed. Remove the field; the default behavior (the failing step stays failed, no reset) is unchanged`,
+        `Invalid onFail.${field} in step "${step.key}" (${source}): onFail.goto has been removed; use type: "loop" for repetition and humanGate.reviseTargetStep for revise`,
       );
     }
-    if (field !== "action" && field !== "target" && field !== "reset") {
-      throw new EngineError(`Unknown onFail field "${field}" in step "${step.key}" (${source})`);
-    }
+    throw new EngineError(`Unknown onFail field "${field}" in step "${step.key}" (${source})`);
   }
 
-  const action = onFail.action;
-  if (action !== "retry" && action !== "goto" && action !== "abort" && action !== "escalate") {
+  const action = onFail["action"];
+  if (action !== "retry" && action !== "abort" && action !== "escalate") {
     throw new EngineError(
-      `Invalid onFail.action "${String(action)}" in step "${step.key}" (${source}): must be one of retry | goto | abort | escalate`,
-    );
-  }
-
-  // human_gate の revise は onFail.target を差し戻し先のフォールバックとして
-  // 参照する（confirm.ts の revise 経路）。onFail.reset はゲートではどこからも
-  // 参照されない死んだ設定のため、無言で無視せずロード時に拒否する（ADR-0025）。
-  if (step.type === "human_gate") {
-    if (onFail.reset !== undefined) {
-      throw new EngineError(
-        `Invalid onFail.reset in step "${step.key}" (${source}): reset is not supported on human_gate steps; use humanGate.reviseTargetStep to control revise rewinding`,
-      );
-    }
-    const gateTarget = onFail.target;
-    if (gateTarget !== undefined) {
-      if (typeof gateTarget !== "string" || gateTarget === "") {
-        throw new EngineError(
-          `Invalid onFail.target in step "${step.key}" (${source}): must be a non-empty string`,
-        );
-      }
-      const targetIndex = stepIndexByKey.get(gateTarget);
-      if (targetIndex === undefined) {
-        throw new EngineError(
-          `Invalid onFail.target "${gateTarget}" in step "${step.key}" (${source}): step not found`,
-        );
-      }
-      const gateIndex = stepIndexByKey.get(step.key);
-      if (gateIndex !== undefined && targetIndex > gateIndex) {
-        throw new EngineError(
-          `Invalid onFail.target "${gateTarget}" in step "${step.key}" (${source}): target must not be after the gate step`,
-        );
-      }
-    }
-    return;
-  }
-
-  if (action !== "goto") {
-    // target / reset は goto のときのみ意味を持つ。併記された設定ミスを
-    // 無言で無視せず、ロード時に拒否する（ADR-0025）。
-    if (onFail.reset !== undefined) {
-      throw new EngineError(
-        `Invalid onFail.reset in step "${step.key}" (${source}): reset is only valid when action is "goto"`,
-      );
-    }
-    if (onFail.target !== undefined) {
-      throw new EngineError(
-        `Invalid onFail.target in step "${step.key}" (${source}): target is only valid when action is "goto"`,
-      );
-    }
-    return;
-  }
-
-  const target = onFail.target;
-  if (typeof target !== "string" || target === "") {
-    throw new EngineError(
-      `Invalid onFail.target in step "${step.key}" (${source}): must be a non-empty string when action is "goto"`,
-    );
-  }
-  const targetIndex = stepIndexByKey.get(target);
-  if (targetIndex === undefined) {
-    throw new EngineError(
-      `Invalid onFail.target "${target}" in step "${step.key}" (${source}): step not found`,
-    );
-  }
-  const reset = onFail.reset;
-  if (reset !== undefined && reset !== "downstream") {
-    throw new EngineError(
-      `Invalid onFail.reset "${String(reset)}" in step "${step.key}" (${source}): must be "downstream"`,
-    );
-  }
-  const stepIndex = stepIndexByKey.get(step.key);
-  if (reset === "downstream" && stepIndex !== undefined && targetIndex > stepIndex) {
-    throw new EngineError(
-      `Invalid onFail.target "${target}" in step "${step.key}" (${source}): target must not be after the failing step when reset is "downstream"`,
-    );
-  }
-  // 後方 goto（分岐先が失敗元より前）で reset を省略すると、失敗元が failed の
-  // まま残り、後続が pending なら未解決の失敗を無視して先へ進めてしまう。
-  // 巻き戻しを伴わない後方 goto はロード時に拒否する（ADR-0025）。
-  if (reset !== "downstream" && stepIndex !== undefined && targetIndex < stepIndex) {
-    throw new EngineError(
-      `Invalid onFail.target "${target}" in step "${step.key}" (${source}): backward goto requires reset: "downstream" so the failing step is rewound with the target`,
+      `Invalid onFail.action "${String(action)}" in step "${step.key}" (${source}): must be one of retry | abort | escalate`,
     );
   }
 }
 
-function validateWorkflowDef(def: WorkflowDef, source: string): void {
-  const stepIndexByKey = new Map<string, number>();
-  def.steps.forEach((step, index) => stepIndexByKey.set(step.key, index));
+/** loop ステップの定義を検証する。 */
+function validateLoop(step: LoopStepDef, source: string): void {
+  if (!Array.isArray(step.body) || step.body.length === 0) {
+    throw new EngineError(
+      `Invalid loop.body in step "${step.key}" (${source}): must be a non-empty array`,
+    );
+  }
+  if (!Number.isInteger(step.maxIterations) || step.maxIterations < 1) {
+    throw new EngineError(
+      `Invalid loop.maxIterations "${String(step.maxIterations)}" in step "${step.key}" (${source}): must be a positive integer`,
+    );
+  }
+  if (step.onExhausted !== "escalate" && step.onExhausted !== "abort") {
+    throw new EngineError(
+      `Invalid loop.onExhausted "${String(step.onExhausted)}" in step "${step.key}" (${source}): must be one of escalate | abort`,
+    );
+  }
+}
 
-  for (const step of def.steps) {
-    validateOnFail(step, stepIndexByKey, source);
-    if (step.type !== "human_gate" || !step.humanGate) continue;
-    const hg = step.humanGate;
-    if (!hg.outcomeQuestionKey || typeof hg.outcomeQuestionKey !== "string") {
+/**
+ * parallel ステップの定義を検証する。
+ *
+ * parallel のサブタスクは task 相当のみとし、loop を置けない（型では
+ * SubtaskConfig が loop を表現できないが、動的 import された定義に対して
+ * ロード時にも拒否する）。
+ */
+function validateParallel(step: ParallelStepDef, source: string): void {
+  if (!step.parallel) {
+    throw new EngineError(
+      `Invalid parallel in step "${step.key}" (${source}): parallel step requires a "parallel" object`,
+    );
+  }
+  if (!Array.isArray(step.parallel.subtasks)) {
+    throw new EngineError(
+      `Invalid parallel.subtasks in step "${step.key}" (${source}): must be an array`,
+    );
+  }
+  for (const subtask of step.parallel.subtasks) {
+    const raw = subtask as unknown;
+    if (isRecord(raw) && (raw.type === "loop" || Array.isArray(raw.body))) {
       throw new EngineError(
-        `Invalid humanGate.outcomeQuestionKey in step "${step.key}" (${source}): must be non-empty string`,
+        `Invalid parallel subtask in step "${step.key}" (${source}): loop cannot be nested in parallel`,
       );
     }
-    if (!Array.isArray(hg.questions) || hg.questions.length === 0) {
+  }
+}
+
+/**
+ * task ステップの定義を検証する。
+ *
+ * 動的 import された定義は型検査が効かないため、`task` の欠落をロード時に
+ * EngineError で拒否する（buildPrompt 参照時の実行時 TypeError を防ぐ）。
+ */
+function validateTask(step: Extract<StepDef, { type: "task" }>, source: string): void {
+  if (!step.task) {
+    throw new EngineError(
+      `Invalid task in step "${step.key}" (${source}): task step requires a "task" object`,
+    );
+  }
+}
+
+/** human_gate ステップの定義を検証する。 */
+function validateHumanGate(
+  step: Extract<StepDef, { type: "human_gate" }>,
+  stepIndexByKey: Map<string, number>,
+  source: string,
+): void {
+  const hg = step.humanGate;
+  if (!hg) {
+    throw new EngineError(
+      `Invalid humanGate in step "${step.key}" (${source}): human_gate step requires a "humanGate" object`,
+    );
+  }
+  if (!Array.isArray(hg.presentArtifacts)) {
+    throw new EngineError(
+      `Invalid humanGate.presentArtifacts in step "${step.key}" (${source}): must be an array`,
+    );
+  }
+  if (!hg.outcomeQuestionKey || typeof hg.outcomeQuestionKey !== "string") {
+    throw new EngineError(
+      `Invalid humanGate.outcomeQuestionKey in step "${step.key}" (${source}): must be non-empty string`,
+    );
+  }
+  if (!Array.isArray(hg.questions) || hg.questions.length === 0) {
+    throw new EngineError(
+      `Invalid humanGate.questions in step "${step.key}" (${source}): must be non-empty array`,
+    );
+  }
+  const keys = new Set<string>();
+  for (const q of hg.questions) {
+    if (!q.key || typeof q.key !== "string") {
+      throw new EngineError(`Invalid GateQuestion.key in step "${step.key}" (${source})`);
+    }
+    if (keys.has(q.key)) {
       throw new EngineError(
-        `Invalid humanGate.questions in step "${step.key}" (${source}): must be non-empty array`,
+        `Duplicate GateQuestion.key "${q.key}" in step "${step.key}" (${source})`,
       );
     }
-    const keys = new Set<string>();
-    for (const q of hg.questions) {
-      if (!q.key || typeof q.key !== "string") {
-        throw new EngineError(`Invalid GateQuestion.key in step "${step.key}" (${source})`);
-      }
-      if (keys.has(q.key)) {
-        throw new EngineError(
-          `Duplicate GateQuestion.key "${q.key}" in step "${step.key}" (${source})`,
-        );
-      }
-      keys.add(q.key);
-      if (q.type !== "single_choice" && q.type !== "free_text" && q.type !== "choice_with_input") {
-        throw new EngineError(
-          `Invalid GateQuestion.type "${q.type}" in step "${step.key}" key "${q.key}" (${source})`,
-        );
-      }
-      if (
-        (q.type === "single_choice" || q.type === "choice_with_input") &&
-        (!q.choices || q.choices.length === 0)
-      ) {
-        throw new EngineError(
-          `GateQuestion "${q.key}" in step "${step.key}" (${source}) requires non-empty choices`,
-        );
-      }
-      if (q.choices) {
-        const cvals = new Set<string>();
-        for (const c of q.choices) {
-          if (!c.value || typeof c.value !== "string") {
-            throw new EngineError(
-              `Invalid GateChoice.value in step "${step.key}" question "${q.key}" (${source})`,
-            );
-          }
-          if (cvals.has(c.value)) {
-            throw new EngineError(
-              `Duplicate GateChoice.value "${c.value}" in step "${step.key}" question "${q.key}" (${source})`,
-            );
-          }
-          cvals.add(c.value);
+    keys.add(q.key);
+    if (q.type !== "single_choice" && q.type !== "free_text" && q.type !== "choice_with_input") {
+      throw new EngineError(
+        `Invalid GateQuestion.type "${q.type}" in step "${step.key}" key "${q.key}" (${source})`,
+      );
+    }
+    if (
+      (q.type === "single_choice" || q.type === "choice_with_input") &&
+      (!q.choices || q.choices.length === 0)
+    ) {
+      throw new EngineError(
+        `GateQuestion "${q.key}" in step "${step.key}" (${source}) requires non-empty choices`,
+      );
+    }
+    if (q.choices) {
+      const cvals = new Set<string>();
+      for (const c of q.choices) {
+        if (!c.value || typeof c.value !== "string") {
+          throw new EngineError(
+            `Invalid GateChoice.value in step "${step.key}" question "${q.key}" (${source})`,
+          );
         }
+        if (cvals.has(c.value)) {
+          throw new EngineError(
+            `Duplicate GateChoice.value "${c.value}" in step "${step.key}" question "${q.key}" (${source})`,
+          );
+        }
+        cvals.add(c.value);
       }
     }
-    if (!keys.has(hg.outcomeQuestionKey)) {
+  }
+  if (!keys.has(hg.outcomeQuestionKey)) {
+    throw new EngineError(
+      `humanGate.outcomeQuestionKey "${hg.outcomeQuestionKey}" not found in questions for step "${step.key}" (${source})`,
+    );
+  }
+  const outcomeQ = hg.questions.find((q) => q.key === hg.outcomeQuestionKey)!;
+  if (outcomeQ.type !== "single_choice" && outcomeQ.type !== "choice_with_input") {
+    throw new EngineError(
+      `outcomeQuestion "${hg.outcomeQuestionKey}" in step "${step.key}" (${source}) must be single_choice or choice_with_input`,
+    );
+  }
+  // revise を選べるゲートは差し戻し先が必須（confirm 実行時ではなくロード時に
+  // fail-fast しないと、人間が全設問に回答した後に回答ごと破棄される）。
+  const offersRevise =
+    (outcomeQ.type === "single_choice" || outcomeQ.type === "choice_with_input") &&
+    (outcomeQ.choices?.some((c) => c.value === "revise") ?? false);
+  if (offersRevise && hg.reviseTargetStep === undefined) {
+    throw new EngineError(
+      `Invalid humanGate.reviseTargetStep in step "${step.key}" (${source}): required because outcomeQuestion "${hg.outcomeQuestionKey}" offers a "revise" choice`,
+    );
+  }
+  if (hg.reviseTargetStep !== undefined) {
+    if (typeof hg.reviseTargetStep !== "string" || hg.reviseTargetStep === "") {
       throw new EngineError(
-        `humanGate.outcomeQuestionKey "${hg.outcomeQuestionKey}" not found in questions for step "${step.key}" (${source})`,
+        `Invalid humanGate.reviseTargetStep in step "${step.key}" (${source}): must be a non-empty string`,
       );
     }
-    const outcomeQ = hg.questions.find((q) => q.key === hg.outcomeQuestionKey)!;
-    if (outcomeQ.type !== "single_choice" && outcomeQ.type !== "choice_with_input") {
+    const reviseTargetIndex = stepIndexByKey.get(hg.reviseTargetStep);
+    if (reviseTargetIndex === undefined) {
       throw new EngineError(
-        `outcomeQuestion "${hg.outcomeQuestionKey}" in step "${step.key}" (${source}) must be single_choice or choice_with_input`,
+        `Invalid humanGate.reviseTargetStep "${hg.reviseTargetStep}" in step "${step.key}" (${source}): step not found`,
       );
     }
-    if (hg.reviseTargetStep !== undefined) {
-      if (typeof hg.reviseTargetStep !== "string" || hg.reviseTargetStep === "") {
+    const gateStepIndex = stepIndexByKey.get(step.key);
+    if (gateStepIndex !== undefined && reviseTargetIndex > gateStepIndex) {
+      throw new EngineError(
+        `Invalid humanGate.reviseTargetStep "${hg.reviseTargetStep}" in step "${step.key}" (${source}): target must not be after the gate step`,
+      );
+    }
+  }
+}
+
+function validateWorkflowDef(def: WorkflowDef, source: string): void {
+  const flattened = flattenStepDefs(def.steps);
+  const stepIndexByKey = new Map<string, number>();
+  flattened.forEach(({ def: step }, index) => {
+    if (!step.key || typeof step.key !== "string") {
+      throw new EngineError(`Invalid step key in ${source}: must be a non-empty string`);
+    }
+    if (stepIndexByKey.has(step.key)) {
+      throw new EngineError(
+        `Duplicate step key "${step.key}" (${source}): step keys must be unique across the whole workflow including loop bodies`,
+      );
+    }
+    stepIndexByKey.set(step.key, index);
+  });
+
+  for (const { def: step } of flattened) {
+    switch (step.type) {
+      case "loop":
+        validateLoop(step, source);
+        break;
+      case "task":
+        validateOnFail(step, source);
+        validateTask(step, source);
+        break;
+      case "human_gate":
+        validateOnFail(step, source);
+        validateHumanGate(step, stepIndexByKey, source);
+        break;
+      case "parallel":
+        validateOnFail(step, source);
+        validateParallel(step, source);
+        break;
+      default: {
+        const rawType = String((step as { type?: unknown }).type);
         throw new EngineError(
-          `Invalid humanGate.reviseTargetStep in step "${step.key}" (${source}): must be a non-empty string`,
-        );
-      }
-      const reviseTargetIndex = stepIndexByKey.get(hg.reviseTargetStep);
-      if (reviseTargetIndex === undefined) {
-        throw new EngineError(
-          `Invalid humanGate.reviseTargetStep "${hg.reviseTargetStep}" in step "${step.key}" (${source}): step not found`,
-        );
-      }
-      const gateStepIndex = stepIndexByKey.get(step.key);
-      if (gateStepIndex !== undefined && reviseTargetIndex > gateStepIndex) {
-        throw new EngineError(
-          `Invalid humanGate.reviseTargetStep "${hg.reviseTargetStep}" in step "${step.key}" (${source}): target must not be after the gate step`,
+          `Invalid step type "${rawType}" in ${source}: must be one of task | human_gate | parallel | loop`,
         );
       }
     }
@@ -361,6 +433,7 @@ export async function importWorkflowDefFromPath(filePath: string): Promise<Workf
 
 export function openDb(): TadoDb {
   const dbPath = getWorkflowDbPath();
+  let db: TadoDb;
   try {
     const sqlite = new Database(dbPath);
     // 以下の PRAGMA（busy_timeout / journal_mode）は Drizzle では表現できない
@@ -370,11 +443,26 @@ export function openDb(): TadoDb {
     if (journalMode.journal_mode !== "wal") {
       sqlite.exec("PRAGMA journal_mode = WAL;");
     }
-    return drizzle(sqlite);
+    db = drizzle(sqlite);
   } catch (error) {
     const reason = error instanceof Error ? `: ${error.message}` : `: ${String(error)}`;
     throw new EngineError(`Unable to open session database: ${dbPath}${reason}`);
   }
+
+  // 全コマンド（next / report / confirm / status / answers / dashboard）が loop
+  // 関連カラムを読み書きするため、旧スキーマの DB でも init を経由せずに読める
+  // よう、接続のたびに未適用の migration を適用する（適用済み管理で冪等）。
+  try {
+    migrateDb(db);
+  } catch (error) {
+    db.$client.close();
+    const reason = error instanceof Error ? `: ${error.message}` : `: ${String(error)}`;
+    throw new EngineError(
+      `Unable to migrate session database: ${dbPath}${reason}. ` +
+        "既存の workflow.db を最新スキーマへ移行できませんでした。ファイルの権限・破損を確認するか、tado init で新しいセッションを作成してください",
+    );
+  }
+  return db;
 }
 
 /**
@@ -418,7 +506,9 @@ export function openSessionDb(sessionId: string): TadoDb {
  *
  * Existing databases (e.g. `~/.tado/workflow.db`) are migrated in place
  * without data loss; the baseline migration is idempotent so it becomes a
- * no-op when the tables already exist.
+ * no-op when the tables already exist. `openDb` calls this on every connection
+ * so all commands (including read-only ones and the dashboard) see the current
+ * schema; drizzle skips migrations that are already recorded as applied.
  */
 export function migrateDb(db: TadoDb): void {
   migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
@@ -441,11 +531,16 @@ export function getPreviousAttempts(db: TadoDb, stepId: number): AttemptSummary[
 }
 
 /**
- * 指定範囲のステップを pending + retryCount=0 に巻き戻す（ADR-0025）。
+ * 指定範囲のステップを pending + retryCount=0 に巻き戻す（ADR-0026）。
  *
  * `fromStepIndex` から `toStepIndex`（両端を含む）までの範囲を対象とする。
  * `toStepIndex` を省略した場合は `fromStepIndex` 以降の全ステップを対象とする
- * （confirm の revise 巻き戻し）。
+ * （confirm の revise 巻き戻し）。範囲内の loop 行は `loopIteration=1` に戻り、
+ * ネストしたループの反復状態も初期化される。
+ *
+ * `toStepIndex` を省略した巻き戻しでは、差し戻し先を本体に含む祖先 loop 行の
+ * 反復状態も初期化する（差し戻し先が loop 本体の内部にある場合、祖先 loop 行は
+ * stepIndex 範囲の外にあり、そのままでは反復予算だけが消費された状態で残る）。
  */
 export function rewindSteps(
   db: TadoDb,
@@ -458,9 +553,338 @@ export function rewindSteps(
     conditions.push(lte(steps.stepIndex, toStepIndex));
   }
   db.update(steps)
-    .set({ status: "pending", retryCount: 0 })
+    .set({ status: "pending", retryCount: 0, loopIteration: 1 })
     .where(and(...conditions))
     .run();
+
+  // 範囲指定時（loop の continue による巻き戻し）は祖先を初期化しない。祖先には
+  // 外側ループが含まれ、外側ループの反復状態は内側ループの巻き戻しで変更しては
+  // ならないため。
+  if (toStepIndex === undefined) {
+    resetEnclosingLoops(db, sessionId, fromStepIndex);
+  }
+}
+
+/** セッションの全ステップ行を stepIndex 順に返す。 */
+function selectStepRows(db: TadoDb, sessionId: string): StepRow[] {
+  return db
+    .select()
+    .from(steps)
+    .where(eq(steps.sessionId, sessionId))
+    .orderBy(steps.stepIndex)
+    .all();
+}
+
+/** `ancestorId` の子孫（ネストした loop 本体を含む）を深さ優先で収集する。 */
+function collectDescendants(rows: StepRow[], ancestorId: number): StepRow[] {
+  const childrenByParent = new Map<number, StepRow[]>();
+  for (const row of rows) {
+    if (row.parentStepId === null) {
+      continue;
+    }
+    const children = childrenByParent.get(row.parentStepId);
+    if (children) {
+      children.push(row);
+    } else {
+      childrenByParent.set(row.parentStepId, [row]);
+    }
+  }
+  const descendants: StepRow[] = [];
+  const visited = new Set<number>();
+  const stack = [...(childrenByParent.get(ancestorId) ?? [])];
+  while (stack.length > 0) {
+    const row = stack.pop()!;
+    // parent_step_id が循環した破損行（手動 UPDATE・移行不具合）で無限に
+    // 辿り続けて書き込みトランザクションのロックを保持し続けないよう fail-fast する。
+    if (visited.has(row.id)) {
+      throw new EngineError(
+        `Cycle detected in steps.parent_step_id chain at step "${row.stepKey}" (id ${row.id}): the session step rows are corrupted`,
+      );
+    }
+    visited.add(row.id);
+    descendants.push(row);
+    stack.push(...(childrenByParent.get(row.id) ?? []));
+  }
+  return descendants;
+}
+
+/**
+ * `step` から親方向に祖先を辿り、各祖先を `visit` に渡す。
+ * 破損した `parent_step_id` 循環を検出したら EngineError で fail-fast する。
+ */
+function visitAncestors(rows: StepRow[], step: StepRow, visit: (ancestor: StepRow) => void): void {
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  const visited = new Set<number>();
+  let current: StepRow | undefined = step;
+  while (current && current.parentStepId !== null) {
+    if (visited.has(current.id)) {
+      throw new EngineError(
+        `Cycle detected in steps.parent_step_id chain at step "${current.stepKey}" (id ${current.id}): the session step rows are corrupted`,
+      );
+    }
+    visited.add(current.id);
+    const parent = byId.get(current.parentStepId);
+    if (!parent) {
+      return;
+    }
+    visit(parent);
+    current = parent;
+  }
+}
+
+/** 指定ステップを包む最も内側の loop 行を返す。ループ外なら null。 */
+function findEnclosingLoopRow(rows: StepRow[], stepKey: string): StepRow | null {
+  const start = rows.find((row) => row.stepKey === stepKey);
+  if (!start) {
+    return null;
+  }
+  let enclosing: StepRow | null = null;
+  visitAncestors(rows, start, (ancestor) => {
+    if (enclosing === null && ancestor.type === "loop") {
+      enclosing = ancestor;
+    }
+  });
+  return enclosing;
+}
+
+/** 指定 stepIndex のステップを包む祖先 loop 行をすべて pending + loopIteration=1 に戻す。 */
+function resetEnclosingLoops(db: TadoDb, sessionId: string, stepIndex: number): void {
+  const rows = selectStepRows(db, sessionId);
+  const start = rows.find((row) => row.stepIndex === stepIndex);
+  if (!start) {
+    return;
+  }
+  visitAncestors(rows, start, (ancestor) => {
+    if (ancestor.type === "loop") {
+      db.update(steps)
+        .set({ status: "pending", retryCount: 0, loopIteration: 1 })
+        .where(and(eq(steps.sessionId, sessionId), eq(steps.id, ancestor.id)))
+        .run();
+    }
+  });
+}
+
+/** 指定ステップを包む最も内側の loop 行を返す（`continue` の帰属先解決）。 */
+export function getInnermostEnclosingLoop(
+  db: TadoDb,
+  sessionId: string,
+  stepKey: string,
+): StepRow | null {
+  return findEnclosingLoopRow(selectStepRows(db, sessionId), stepKey);
+}
+
+/**
+ * loop 行スナップショットの maxIterations を読み出す。
+ *
+ * NULL・非整数・0 以下は移行漏れや手動 UPDATE によるスナップショット欠落として
+ * EngineError で fail-fast する（無言で 1 に丸めると、実在しない上限で
+ * onExhausted が発火して原因が残らない。onFail ドリフト検出と同方針）。
+ */
+export function getLoopMaxIterations(loopRow: Pick<StepRow, "stepKey" | "maxIterations">): number {
+  const value = loopRow.maxIterations;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    throw new EngineError(
+      `Invalid loop snapshot for step "${loopRow.stepKey}": maxIterations is "${String(value)}"; expected a positive integer. Start a new session or repair the step row`,
+    );
+  }
+  return value;
+}
+
+/**
+ * loop 行スナップショットの onExhausted を読み出す。
+ * escalate / abort 以外の欠落・未知値は EngineError で fail-fast する。
+ */
+export function getLoopOnExhausted(
+  loopRow: Pick<StepRow, "stepKey" | "onExhausted">,
+): OnExhaustedStrategy {
+  const value = loopRow.onExhausted;
+  if (value !== "escalate" && value !== "abort") {
+    throw new EngineError(
+      `Invalid loop snapshot for step "${loopRow.stepKey}": onExhausted is "${String(value)}"; expected one of escalate | abort. Start a new session or repair the step row`,
+    );
+  }
+  return value;
+}
+
+/** 指定ステップが属する最も内側のループ文脈を返す。ループ外なら null。 */
+export function getLoopContext(db: TadoDb, sessionId: string, stepKey: string): LoopContext | null {
+  const loop = findEnclosingLoopRow(selectStepRows(db, sessionId), stepKey);
+  if (!loop) {
+    return null;
+  }
+  return {
+    key: loop.stepKey,
+    iteration: loop.loopIteration,
+    maxIterations: getLoopMaxIterations(loop),
+  };
+}
+
+/** loop 本体（全子孫）の stepIndex 範囲。本体行が無ければ null。 */
+export function getLoopBodyRange(
+  db: TadoDb,
+  sessionId: string,
+  loopStepKey: string,
+): { fromStepIndex: number; toStepIndex: number } | null {
+  const rows = selectStepRows(db, sessionId);
+  const loop = rows.find((row) => row.stepKey === loopStepKey && row.type === "loop");
+  if (!loop) {
+    return null;
+  }
+  const descendants = collectDescendants(rows, loop.id);
+  if (descendants.length === 0) {
+    return null;
+  }
+  const indexes = descendants.map((row) => row.stepIndex);
+  return { fromStepIndex: Math.min(...indexes), toStepIndex: Math.max(...indexes) };
+}
+
+/**
+ * 本体の全ステップが終端（passed / skipped）に達した loop 行を確定する。
+ *
+ * 1つでも passed があれば passed、全て skipped なら skipped にする。ネストした
+ * loop は内側から順に確定するため、確定が連鎖する間は繰り返す。loop 行を実行
+ * 対象にしない規則（resolveExecutableStep / resolveNextExecutableStep）と
+ * 合わせて 1 module に閉じる（呼び出し側で確定を忘れない）。
+ */
+function completeFinishedLoops(db: TadoDb, sessionId: string): void {
+  const rows = selectStepRows(db, sessionId);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const loop of rows) {
+      if (loop.type !== "loop" || loop.status !== "pending") {
+        continue;
+      }
+      const descendants = collectDescendants(rows, loop.id);
+      if (descendants.length === 0) {
+        continue;
+      }
+      if (descendants.some((row) => row.status !== "passed" && row.status !== "skipped")) {
+        continue;
+      }
+      const status = descendants.some((row) => row.status === "passed") ? "passed" : "skipped";
+      db.update(steps).set({ status }).where(eq(steps.id, loop.id)).run();
+      loop.status = status;
+      changed = true;
+    }
+  }
+}
+
+/** 指定ステップより後ろで最初の pending な非 loop 行を返す（loop 行は実行対象外）。 */
+function selectNextPendingStep(
+  db: TadoDb,
+  sessionId: string,
+  afterStepIndex: number,
+): StepRow | null {
+  return (
+    db
+      .select()
+      .from(steps)
+      .where(
+        and(
+          eq(steps.sessionId, sessionId),
+          gt(steps.stepIndex, afterStepIndex),
+          eq(steps.status, "pending"),
+          ne(steps.type, "loop"),
+        ),
+      )
+      .orderBy(steps.stepIndex)
+      .limit(1)
+      .get() ?? null
+  );
+}
+
+/**
+ * loop 行の本体先頭から再開する最初の実行可能ステップを解決する
+ * （loop 内再開位置の解決。next / confirm / report で共有する唯一の実装）。
+ * 本体に実行可能な pending ステップが無ければ null。
+ */
+export function findLoopResumeStep(
+  db: TadoDb,
+  sessionId: string,
+  loopRow: Pick<StepRow, "stepIndex">,
+): StepRow | null {
+  return selectNextPendingStep(db, sessionId, loopRow.stepIndex);
+}
+
+/**
+ * 現在地（currentStep）から次に実行する非 loop ステップを解決する。
+ *
+ * - loop 行は実行対象にならない。currentStep が loop 行を指す場合は本体先頭の
+ *   実行可能ステップへ解決する（本体に実行可能なステップが無ければ null）。
+ * - currentStep が未設定・不明な場合は、セッション全体で最初の pending / running
+ *   な非 loop 行を返す。
+ * - 本体が終端に達した loop 行は先に確定する（確定漏れで pending のまま残り、
+ *   「No pending steps found」や完了判定のずれを起こさないようここで所有する）。
+ */
+export function resolveExecutableStep(
+  db: TadoDb,
+  sessionId: string,
+  currentStepKey: string | null,
+): StepRow | null {
+  completeFinishedLoops(db, sessionId);
+  if (currentStepKey) {
+    const row = db
+      .select()
+      .from(steps)
+      .where(and(eq(steps.sessionId, sessionId), eq(steps.stepKey, currentStepKey)))
+      .get();
+    if (row) {
+      if (row.type === "loop") {
+        return findLoopResumeStep(db, sessionId, row);
+      }
+      return row;
+    }
+  }
+  return (
+    db
+      .select()
+      .from(steps)
+      .where(
+        and(
+          eq(steps.sessionId, sessionId),
+          inArray(steps.status, ["pending", "running"]),
+          ne(steps.type, "loop"),
+        ),
+      )
+      .orderBy(steps.stepIndex)
+      .limit(1)
+      .get() ?? null
+  );
+}
+
+/**
+ * `afterStepIndex` より後ろの次に実行する非 loop ステップを解決する。
+ * 本体が終端に達した loop 行の確定もこの関数が所有する。
+ */
+export function resolveNextExecutableStep(
+  db: TadoDb,
+  sessionId: string,
+  afterStepIndex: number,
+): StepRow | null {
+  completeFinishedLoops(db, sessionId);
+  return selectNextPendingStep(db, sessionId, afterStepIndex);
+}
+
+/**
+ * 実行可能なステップが残っていない場合のセッション終端判定。
+ * 全ステップが passed / skipped なら sessions.status を done にして true を返す。
+ * 非終端の行が残っていれば false を返し、呼び出し側は失敗として扱う。
+ */
+export function completeSessionIfDone(db: TadoDb, sessionId: string): boolean {
+  const remaining = db
+    .select({ cnt: count() })
+    .from(steps)
+    .where(and(eq(steps.sessionId, sessionId), notInArray(steps.status, ["passed", "skipped"])))
+    .get();
+  if ((remaining?.cnt ?? 0) > 0) {
+    return false;
+  }
+  db.update(sessions)
+    .set({ status: "done", updatedAt: sql`datetime('now')` })
+    .where(eq(sessions.id, sessionId))
+    .run();
+  return true;
 }
 
 export function getArtifacts(db: TadoDb, sessionId: string): ArtifactRecord[] {
@@ -663,7 +1087,7 @@ export function readGateAnswersHistory(sessionId: string): GateAnswersHistoryEnt
   }
 }
 
-export function buildConditionCtx(db: TadoDb, sessionId: string): ConditionCtx {
+export function buildConditionCtx(db: TadoDb, sessionId: string, stepKey: string): ConditionCtx {
   const session = db
     .select({ sessionDir: sessions.sessionDir })
     .from(sessions)
@@ -676,6 +1100,7 @@ export function buildConditionCtx(db: TadoDb, sessionId: string): ConditionCtx {
     sessionDir: session.sessionDir,
     sessionId,
     gateAnswers: getGateAnswers(db, sessionId),
+    loop: getLoopContext(db, sessionId, stepKey),
     artifacts: getArtifacts(db, sessionId),
   };
 }

@@ -20,13 +20,27 @@ export interface AfterInitResult {
   artifacts?: ArtifactInput[];
 }
 
-/** ワークフローを構成する単一のステップの定義。 */
-export interface StepDef {
+/**
+ * ワークフローを構成する単一のステップの定義。`type` で判別するユニオン。
+ *
+ * `task` / `human_gate` / `parallel` は実行されるステップ、`loop` は本体を
+ * 繰り返す構造ステップで、それ自身は実行されない。
+ */
+export type StepDef = TaskStepDef | HumanGateStepDef | ParallelStepDef | LoopStepDef;
+
+/** 実行されるステップ（task / human_gate / parallel）のユニオン。 */
+export type ExecutableStepDef = TaskStepDef | HumanGateStepDef | ParallelStepDef;
+
+/** 全ステップ型が共通で持つフィールド。 */
+export interface StepDefBase {
   key: string;
   phase: string;
-  type: "task" | "human_gate" | "parallel";
+}
+
+/** task / human_gate / parallel が共通で持つ実行ステップのフィールド。 */
+export interface ExecutableStepDefBase extends StepDefBase {
   maxRetries: number;
-  /** チェック失敗時の振る舞い（リトライ / 分岐 / 中断 / エスカレーション）。 */
+  /** チェック失敗時の振る舞い（リトライ / 中断 / エスカレーション）。 */
   onFail: OnFailStrategy;
   check: (ctx: CheckCtx) => CheckResult;
   /** 指定した場合、この条件が true のときのみステップを実行する。 */
@@ -35,57 +49,79 @@ export interface StepDef {
   beforeStep?: (ctx: StepCtx) => Promise<ArtifactInput[]>;
   /** `check` 前に実行されるフック。返却 artifacts は既存成果物と同名キーを上書きして DB へ登録・マージする。 */
   afterStep?: (ctx: StepCtx) => Promise<ArtifactInput[]>;
-  task?: TaskStepDef;
-  humanGate?: HumanGateStepDef;
-  parallel?: ParallelStepDef;
 }
 
 /** タスクステップの定義。SubAgent 実行などのアクションを指定する。 */
-export interface TaskStepDef {
+export interface TaskStepDef extends ExecutableStepDefBase {
+  type: "task";
+  task: TaskConfig;
+}
+
+/** ヒューマンゲートステップの定義。人間による承認・選択を待つ。 */
+export interface HumanGateStepDef extends ExecutableStepDefBase {
+  type: "human_gate";
+  humanGate: HumanGateConfig;
+}
+
+/** 並列ステップの定義。複数のサブタスクを同時に実行する。 */
+export interface ParallelStepDef extends ExecutableStepDefBase {
+  type: "parallel";
+  parallel: ParallelConfig;
+  /** parallel 実行時に使う action 指定。省略時は run_subagent。 */
+  task?: TaskConfig;
+}
+
+/**
+ * ループステップの定義。本体（`body`）を繰り返す。
+ *
+ * 本体の check が `continue` を返すたびに本体先頭へ巻き戻って次のイテレーション
+ * を実行し、check が `pass` を返すと後続ステップへ脱出する。`maxIterations` に
+ * 達したときは `onExhausted`（escalate / abort）が適用される。loop を parallel の
+ * サブタスクに置くことはできない（型とロード時検証の両方で拒否する）。
+ */
+export interface LoopStepDef extends StepDefBase {
+  type: "loop";
+  body: StepDef[];
+  maxIterations: number;
+  onExhausted: OnExhaustedStrategy;
+}
+
+/** ループの反復上限に達したときの戦略。 */
+export type OnExhaustedStrategy = "escalate" | "abort";
+
+/** タスクステップの実行内容。SubAgent 実行などのアクションを指定する。 */
+export interface TaskConfig {
   action: "run_subagent" | "run_command" | "orchestrate";
   subagentType?: string;
   readonly?: boolean;
   buildPrompt: (ctx: PromptCtx) => string;
 }
 
-/** ヒューマンゲートステップの定義。人間による承認・選択を待つ。 */
-export interface HumanGateStepDef {
+/** ヒューマンゲートの定義。人間による承認・選択を待つ。 */
+export interface HumanGateConfig {
   presentArtifacts: string[];
   outcomeQuestionKey: string;
-  /** 差し戻し時に再実行するステップの key。 */
+  /** 差し戻し（revise）時に再実行するステップの key。revise の選択には必須。 */
   reviseTargetStep?: string;
   questions: GateQuestion[];
 }
 
 /** 並列ステップの定義。複数のサブタスクを同時に実行する。 */
-export interface ParallelStepDef {
-  subtasks: SubtaskDef[];
+export interface ParallelConfig {
+  subtasks: SubtaskConfig[];
 }
 
 /** 並列ステップ内で実行される個別サブタスクの定義。 */
-export interface SubtaskDef {
+export interface SubtaskConfig {
   key: string;
   subagentType: string;
   readonly?: boolean;
   buildPrompt: (ctx: PromptCtx) => string;
 }
 
-/** チェック失敗時の戦略。アクションと分岐先で振る舞いを指定する。 */
+/** チェック失敗時の戦略。 */
 export interface OnFailStrategy {
-  action: "retry" | "goto" | "abort" | "escalate";
-  /**
-   * `goto` 時の分岐先ステップの key。human_gate では confirm の revise が
-   * `humanGate.reviseTargetStep` のフォールバックとして参照する。
-   */
-  target?: string;
-  /**
-   * `goto` 時の巻き戻し範囲。`"downstream"` を指定すると、分岐先 `target` から
-   * 失敗元ステップまでのステップ（両端を含む）が pending + retryCount=0 に戻り、
-   * サイクル全体が再実行される。省略時は失敗元のみ failed となり、中間の
-   * ステップは変更されない。human_gate では指定できず、差し戻しは
-   * `humanGate.reviseTargetStep` を使う。
-   */
-  reset?: "downstream";
+  action: "retry" | "abort" | "escalate";
 }
 
 /** ヒューマンゲート設問の定義。 */

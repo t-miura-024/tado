@@ -1,11 +1,17 @@
 /**
  * ステップ実行の結果および CLI / API の返却値関連の型定義。
  */
+import type { LoopContext } from "./context.ts";
 import type { GateAnswer } from "./workflow-def.ts";
 
-/** ステップの完了チェック結果。 */
+/**
+ * ステップの完了チェック結果。
+ *
+ * `continue` はループ本体の check が返す「次イテレーション要求」で、エンジンは
+ * 本体先頭への巻き戻しを適用する。ループ外で返された場合はエラーとする。
+ */
 export interface CheckResult {
-  status: "pass" | "fail" | "error";
+  status: "pass" | "fail" | "error" | "continue";
   reasons: string[];
 }
 
@@ -71,6 +77,8 @@ export interface NextResult {
     attemptNumber: number;
     retryCount: number;
     maxRetries: number;
+    /** 実行中ステップが属する最も内側のループの文脈。ループ外では null。 */
+    loop: LoopContext | null;
   };
 }
 
@@ -93,8 +101,7 @@ export interface ReportResult {
   sessionId: string;
   stepKey: string;
   checkResult: CheckResult;
-  nextAction: "continue" | "retry" | "goto" | "abort" | "escalate" | "done";
-  targetStep?: string;
+  nextAction: "continue" | "repeat" | "retry" | "abort" | "escalate" | "done";
   message: string;
 }
 
@@ -103,7 +110,7 @@ export interface ConfirmResult {
   sessionId: string;
   stepKey: string;
   answers: Record<string, GateAnswer>;
-  nextAction: "continue" | "goto" | "abort" | "done";
+  nextAction: "continue" | "revise" | "abort" | "done";
   targetStep?: string;
   message: string;
 }

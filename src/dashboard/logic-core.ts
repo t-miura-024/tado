@@ -4,6 +4,13 @@
 // src/dashboard/logic.ts and src/dashboard/client/src/lib/logic.ts to avoid drift.
 // See ADR decision: logic-core is single source of truth for fs-free dashboard helpers.
 
+import type {
+  GateQuestion,
+  OnExhaustedStrategy,
+  OnFailStrategy,
+  StepDef,
+} from "../types/workflow-def.ts";
+
 // Minimal POSIX path shim (browser + node compatible)
 function basename(p: string): string {
   if (!p) return "";
@@ -427,6 +434,200 @@ export function groupSessionsByWorkflowId<T extends { workflowId: string }>(
 }
 
 // ---------------------------------------------------------------------------
+// Loop display helpers
+// ---------------------------------------------------------------------------
+
+/** ループ所属・反復表示に必要な step 行の最小形。 */
+export interface LoopStepLike {
+  id: number;
+  stepKey: string;
+  type: string;
+  parentStepId: number | null;
+  loopIteration: number;
+  maxIterations: number | null;
+}
+
+/** 実行中ステップを包む最も内側のループの表示情報。 */
+export interface EnclosingLoopDisplay {
+  key: string;
+  iteration: number;
+  maxIterations: number | null;
+}
+
+/**
+ * 指定ステップを包む最も内側の loop 行を `parentStepId` の連鎖から解決する。
+ * ループ外のステップは null を返す。loop 行を渡した場合はその外側のループを返す。
+ */
+export function getEnclosingLoop<T extends LoopStepLike>(
+  step: T,
+  allSteps: T[],
+): EnclosingLoopDisplay | null {
+  const byId = new Map<number, T>();
+  for (const s of allSteps) byId.set(s.id, s);
+  const visited = new Set<number>();
+  let parentId = step.parentStepId;
+  while (parentId != null) {
+    if (visited.has(parentId)) return null;
+    visited.add(parentId);
+    const parent = byId.get(parentId);
+    if (!parent) return null;
+    if (parent.type === "loop") {
+      return {
+        key: parent.stepKey,
+        iteration: parent.loopIteration,
+        maxIterations: parent.maxIterations,
+      };
+    }
+    parentId = parent.parentStepId;
+  }
+  return null;
+}
+
+/** 反復状態を `iteration n/m`（上限未設定なら `iteration n`）へ整形する。 */
+export function formatLoopIteration(
+  iteration: number,
+  maxIterations: number | null | undefined,
+): string {
+  return maxIterations == null
+    ? `iteration ${iteration}`
+    : `iteration ${iteration}/${maxIterations}`;
+}
+
+// ---------------------------------------------------------------------------
+// Workflow detail (definition JSON wire types shared by server and client)
+// ---------------------------------------------------------------------------
+
+/** 詳細ペイン・キャンバスへ渡すステップ定義の共通部。loop 本体は平坦化され `parentKey` で親 loop を示す。 */
+export interface WorkflowDetailStepBase {
+  key: string;
+  phase: string;
+  /** このステップを包む最内 loop 行の key（ルート直下は null）。 */
+  parentKey: string | null;
+}
+
+/** 実行されるステップ（task / human_gate / parallel）の詳細定義が共通で持つフィールド。 */
+export interface WorkflowDetailExecutableStepBase extends WorkflowDetailStepBase {
+  maxRetries: number;
+  onFail: OnFailStrategy;
+  hasCondition: boolean;
+  hasBeforeStep: boolean;
+  hasAfterStep: boolean;
+}
+
+export interface WorkflowDetailTaskStep extends WorkflowDetailExecutableStepBase {
+  type: "task";
+  task: { action: string; subagentType?: string; readonly?: boolean };
+}
+
+export interface WorkflowDetailHumanGateStep extends WorkflowDetailExecutableStepBase {
+  type: "human_gate";
+  humanGate: {
+    presentArtifacts: string[];
+    outcomeQuestionKey: string;
+    reviseTargetStep?: string;
+    questions: GateQuestion[];
+  };
+}
+
+export interface WorkflowDetailParallelStep extends WorkflowDetailExecutableStepBase {
+  type: "parallel";
+  task?: { action: string; subagentType?: string; readonly?: boolean };
+  parallel: { subtasks: { key: string; subagentType: string; readonly?: boolean }[] };
+}
+
+export interface WorkflowDetailLoopStep extends WorkflowDetailStepBase {
+  type: "loop";
+  maxIterations: number;
+  onExhausted: OnExhaustedStrategy;
+  /** 直下の本体ステップ key（ネストした loop は本体側の行で表現される）。 */
+  bodyKeys: string[];
+}
+
+export type WorkflowDetailStep =
+  | WorkflowDetailTaskStep
+  | WorkflowDetailHumanGateStep
+  | WorkflowDetailParallelStep
+  | WorkflowDetailLoopStep;
+
+/** `/api/workflows/:id` が返すワークフロー定義の詳細。 */
+export interface WorkflowDetail {
+  id: string;
+  description?: string;
+  workflowPath: string;
+  steps: WorkflowDetailStep[];
+}
+
+/** ステップ定義をダッシュボード表示用の判別ユニオンへ変換する。 */
+export function toWorkflowDetailStep(step: StepDef, parentKey: string | null): WorkflowDetailStep {
+  const base: WorkflowDetailStepBase = { key: step.key, phase: step.phase, parentKey };
+  switch (step.type) {
+    case "task":
+      return {
+        ...base,
+        type: "task",
+        maxRetries: step.maxRetries,
+        onFail: step.onFail,
+        hasCondition: typeof step.condition === "function",
+        hasBeforeStep: typeof step.beforeStep === "function",
+        hasAfterStep: typeof step.afterStep === "function",
+        task: {
+          action: step.task.action,
+          subagentType: step.task.subagentType,
+          readonly: step.task.readonly,
+        },
+      };
+    case "human_gate":
+      return {
+        ...base,
+        type: "human_gate",
+        maxRetries: step.maxRetries,
+        onFail: step.onFail,
+        hasCondition: typeof step.condition === "function",
+        hasBeforeStep: typeof step.beforeStep === "function",
+        hasAfterStep: typeof step.afterStep === "function",
+        humanGate: {
+          presentArtifacts: step.humanGate.presentArtifacts,
+          outcomeQuestionKey: step.humanGate.outcomeQuestionKey,
+          reviseTargetStep: step.humanGate.reviseTargetStep,
+          questions: step.humanGate.questions,
+        },
+      };
+    case "parallel":
+      return {
+        ...base,
+        type: "parallel",
+        maxRetries: step.maxRetries,
+        onFail: step.onFail,
+        hasCondition: typeof step.condition === "function",
+        hasBeforeStep: typeof step.beforeStep === "function",
+        hasAfterStep: typeof step.afterStep === "function",
+        task: step.task
+          ? {
+              action: step.task.action,
+              subagentType: step.task.subagentType,
+              readonly: step.task.readonly,
+            }
+          : undefined,
+        parallel: {
+          subtasks: step.parallel.subtasks.map((st) => ({
+            key: st.key,
+            subagentType: st.subagentType,
+            readonly: st.readonly,
+          })),
+        },
+      };
+    case "loop":
+      return {
+        ...base,
+        type: "loop",
+        maxIterations: step.maxIterations,
+        onExhausted: step.onExhausted,
+        bodyKeys: step.body.map((b) => b.key),
+      };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Canvas layout helpers (fs-free, M3)
 // ---------------------------------------------------------------------------
 
@@ -435,6 +636,8 @@ export interface CanvasNodeInput {
   phase: string | null;
   type: string;
   index: number;
+  /** このステップを包む最内 loop 行の key（ルート直下は null）。 */
+  parentKey?: string | null;
 }
 
 export interface CanvasNode {
@@ -447,11 +650,14 @@ export interface CanvasNode {
   phaseSize: number;
   x: number;
   y: number;
+  parentKey: string | null;
 }
 
 export interface CanvasEdge {
   from: string;
   to: string;
+  /** `loop-back` は loop 本体末尾から loop 行へ戻る反復エッジ（描画側で破線表示）。 */
+  kind?: "flow" | "loop-back";
 }
 
 const CANVAS_NODE_WIDTH = 180;
@@ -508,6 +714,7 @@ export function layoutWorkflowSteps(steps: CanvasNodeInput[]): {
       phaseSize,
       x,
       y,
+      parentKey: s.parentKey ?? null,
     });
   }
 
@@ -555,6 +762,31 @@ export function layoutWorkflowSteps(steps: CanvasNodeInput[]): {
   if (edges.length === 0 && steps.length > 1) {
     for (let i = 0; i < steps.length - 1; i++)
       edges.push({ from: steps[i]!.key, to: steps[i + 1]!.key });
+  }
+
+  // loop 本体末尾から loop 行へ戻る反復エッジ。定義上の繰り返しを破線で識別できるようにする。
+  const inputByKey = new Map<string, CanvasNodeInput>();
+  for (const s of steps) inputByKey.set(s.key, s);
+  for (const loop of steps) {
+    if (loop.type !== "loop") continue;
+    let lastDescendant: CanvasNodeInput | undefined;
+    for (const s of steps) {
+      if (s.key === loop.key) continue;
+      let parent = s.parentKey ?? null;
+      const visited = new Set<string>();
+      while (parent != null && !visited.has(parent)) {
+        if (parent === loop.key) {
+          // steps は平坦化順（DFS 先行順）なので後勝ちが本体末尾になる
+          lastDescendant = s;
+          break;
+        }
+        visited.add(parent);
+        parent = inputByKey.get(parent)?.parentKey ?? null;
+      }
+    }
+    if (lastDescendant) {
+      edges.push({ from: lastDescendant.key, to: loop.key, kind: "loop-back" });
+    }
   }
 
   const maxPhaseIdx = Math.max(...nodes.map((n) => n.phaseIndex));

@@ -10,6 +10,7 @@ export type {
   GateAnswers,
   HookCtxBase,
   InitCtx,
+  LoopContext,
   PromptCtx,
   StepCtx,
 } from "./context.ts";

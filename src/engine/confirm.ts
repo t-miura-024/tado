@@ -1,19 +1,22 @@
 import { spawnSync } from "node:child_process";
 import * as clack from "@clack/prompts";
-import { and, desc, eq, gt, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { gateEvents, sessions, stepAttempts, steps } from "./schema.ts";
 import {
+  flattenStepDefs,
+  findLoopResumeStep,
   getArtifacts,
   importWorkflowDef,
   importWorkflowDefFromPath,
   isPathLike,
   openSessionDb,
+  resolveNextExecutableStep,
   rewindSteps,
   EngineError,
 } from "./store.ts";
 import type { StepRow, TadoDb } from "./store.ts";
 import type { ConfirmResult } from "../types/result.ts";
-import type { GateAnswer, GateQuestion, HumanGateStepDef } from "../types/workflow-def.ts";
+import type { GateAnswer, GateQuestion, HumanGateConfig } from "../types/workflow-def.ts";
 
 /** 人間に提示するゲート内容。 */
 export interface GateView {
@@ -195,7 +198,7 @@ function recordGateEvent(
     .run();
 }
 
-function validateAnswers(hg: HumanGateStepDef, answers: Record<string, GateAnswer>): string | null {
+function validateAnswers(hg: HumanGateConfig, answers: Record<string, GateAnswer>): string | null {
   for (const q of hg.questions) {
     const ans = answers[q.key];
     if (ans === undefined || ans === null) {
@@ -298,11 +301,12 @@ export async function confirm(
     const def = isPath
       ? await importWorkflowDefFromPath(session.workflowPath)
       : await importWorkflowDef(session.workflowPath);
-    const stepDef = def.steps.find((s) => s.key === stepRow.stepKey);
-    const hg = stepDef?.humanGate;
-    if (!hg) {
+    // human_gate は loop 本体の中にも置けるため、平坦化した定義から探す
+    const stepDef = flattenStepDefs(def.steps).find(({ def: s }) => s.key === stepRow.stepKey)?.def;
+    if (!stepDef || stepDef.type !== "human_gate") {
       throw new EngineError(`Step definition not found in workflow: ${stepRow.stepKey}`);
     }
+    const hg = stepDef.humanGate;
 
     const attempt = db
       .select()
@@ -355,6 +359,14 @@ export async function confirm(
     const outcomeValue = typeof outcomeAns === "string" ? outcomeAns : outcomeAns.value;
     const answersJson = JSON.stringify(answers);
 
+    // 差し戻しは reviseTargetStep を必須とする（onFail.target フォールバックは
+    // goto 撤去に伴い削除。ADR-0026）。ゲートイベントを記録する前に拒否する。
+    if (outcomeValue === "revise" && !hg.reviseTargetStep) {
+      throw new EngineError(
+        `Cannot revise: humanGate.reviseTargetStep is required to handle the revise outcome for step "${stepRow.stepKey}" in session ${sessionId}`,
+      );
+    }
+
     const checkStatus = outcomeValue === "abort" || outcomeValue === "revise" ? "fail" : "pass";
     const checkReasons =
       outcomeValue === "approve"
@@ -403,9 +415,9 @@ export async function confirm(
       db.update(steps).set({ status: "passed" }).where(eq(steps.id, stepRow.id)).run();
 
       if (outcomeValue === "revise") {
-        const targetStep = hg.reviseTargetStep ?? stepDef.onFail.target ?? stepRow.stepKey;
+        const targetStep = hg.reviseTargetStep!;
         const targetStepRow = db
-          .select({ stepIndex: steps.stepIndex })
+          .select({ id: steps.id, stepIndex: steps.stepIndex, type: steps.type })
           .from(steps)
           .where(and(eq(steps.sessionId, sessionId), eq(steps.stepKey, targetStep)))
           .get();
@@ -414,9 +426,26 @@ export async function confirm(
             `Cannot revise: target step "${targetStep}" was not found in session ${sessionId} (step "${stepRow.stepKey}")`,
           );
         }
+        // 差し戻し先〜ゲートまでを巻き戻す。範囲内の loop 行は loopIteration=1 に
+        // 戻り、差し戻し先が loop 本体の内部にある場合は祖先 loop 行の反復状態も
+        // 初期化される（ADR-0026）。
         rewindSteps(db, sessionId, targetStepRow.stepIndex);
+
+        // 差し戻し先が loop 行の場合は本体先頭の実行ステップから再開する。
+        // loop 内再開位置の解決は store.findLoopResumeStep に集約されている。
+        let resumeStepKey = targetStep;
+        if (targetStepRow.type === "loop") {
+          const firstStep = findLoopResumeStep(db, sessionId, targetStepRow);
+          if (!firstStep) {
+            throw new EngineError(
+              `Cannot revise: loop "${targetStep}" has no executable step in session ${sessionId}`,
+            );
+          }
+          resumeStepKey = firstStep.stepKey;
+        }
+
         db.update(sessions)
-          .set({ currentStep: targetStep, updatedAt: sql`datetime('now')` })
+          .set({ currentStep: resumeStepKey, updatedAt: sql`datetime('now')` })
           .where(eq(sessions.id, sessionId))
           .run();
         db.$client.exec("COMMIT");
@@ -424,25 +453,15 @@ export async function confirm(
           sessionId,
           stepKey: stepRow.stepKey,
           answers,
-          nextAction: "goto",
+          nextAction: "revise",
           targetStep,
-          message: `User requested revision. Going to: ${targetStep}`,
+          message: `User requested revision. Rewinding to: ${targetStep}`,
         };
       }
 
-      const nextStep = db
-        .select()
-        .from(steps)
-        .where(
-          and(
-            eq(steps.sessionId, sessionId),
-            gt(steps.stepIndex, stepRow.stepIndex),
-            eq(steps.status, "pending"),
-          ),
-        )
-        .orderBy(steps.stepIndex)
-        .limit(1)
-        .get();
+      // このゲートの承認で本体が完了した loop 行の確定と次ステップの解決は
+      // store.resolveNextExecutableStep に集約されている（loop 行は実行対象外）。
+      const nextStep = resolveNextExecutableStep(db, sessionId, stepRow.stepIndex);
 
       if (nextStep) {
         db.update(sessions)

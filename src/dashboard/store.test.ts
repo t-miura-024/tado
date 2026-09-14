@@ -218,6 +218,48 @@ describe("dashboard store", () => {
     expect(prog.text).toBe("1/2");
   });
 
+  it("loop 行の反復状態（parent_step_id / loop_iteration / max_iterations）を読み込む", () => {
+    const db = setupDb();
+    const raw = new Database(getWorkflowDbPath());
+    raw.run(
+      `INSERT INTO sessions (id, workflow_id, workflow_path, session_dir, cwd, title, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        "s1",
+        "wf1",
+        "/tmp/wf/wf1/index.ts",
+        path.join(TEST_BASE, "s1"),
+        "/tmp/proj",
+        "t1",
+        "running",
+        "2026-01-01 10:00:00",
+      ],
+    );
+    raw.run(
+      `INSERT INTO steps (session_id, step_key, step_index, type, status, max_retries, loop_iteration, max_iterations, on_exhausted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ["s1", "work_loop", 0, "loop", "pending", 0, 2, 5, "escalate"],
+    );
+    const loopRow = raw
+      .query(`SELECT id FROM steps WHERE session_id = ? AND step_key = ?`)
+      .get("s1", "work_loop") as { id: number };
+    raw.run(
+      `INSERT INTO steps (session_id, step_key, step_index, type, status, max_retries, parent_step_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ["s1", "work", 1, "task", "running", 3, loopRow.id],
+    );
+    raw.close();
+    db.$client.close();
+
+    const snap = loadDashboardSnapshot("/tmp/proj");
+    const steps = snap.stepsBySession.get("s1")!;
+    expect(steps[0].type).toBe("loop");
+    expect(steps[0].loopIteration).toBe(2);
+    expect(steps[0].maxIterations).toBe(5);
+    expect(steps[0].onExhausted).toBe("escalate");
+    expect(steps[0].parentStepId).toBeNull();
+    // 本体ステップは最内 loop 行を親に持ち、反復状態は loop 行側で保持される
+    expect(steps[1].parentStepId).toBe(loopRow.id);
+    expect(steps[1].maxIterations).toBeNull();
+  });
+
   it("workflow ファイル不在は checkWorkflowFileExists で検出できる", () => {
     const missing = "/tmp/not-exist-zzz/index.ts";
     expect(checkWorkflowFileExists(missing)).toBe(false);

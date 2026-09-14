@@ -4,9 +4,9 @@ import { eq } from "drizzle-orm";
 import type { InitResult } from "../types/result.ts";
 import {
   EngineError,
+  flattenStepDefs,
   importWorkflowDef,
   isPathLike,
-  migrateDb,
   openDb,
   getSessionDir,
   resolveWorkflowPath,
@@ -77,7 +77,6 @@ export async function init(
   fs.mkdirSync(sessionDir, { recursive: true });
 
   const db = openDb();
-  migrateDb(db);
 
   const resolvedCwd = path.resolve(cwd ?? process.cwd());
 
@@ -93,21 +92,31 @@ export async function init(
     })
     .run();
 
-  for (let i = 0; i < def.steps.length; i++) {
-    const step = def.steps[i];
-    db.insert(steps)
+  // loop 本体を DFS 先行順に平坦化し、loop 行と本体行を親子関係付きで採番する。
+  // loop 行は stepIndex と parent_step_id を持ち、本体行の parent は最内 loop 行になる。
+  const flattened = flattenStepDefs(def.steps);
+  const stepIdByKey = new Map<string, number>();
+  for (let i = 0; i < flattened.length; i++) {
+    const { def: step, parentKey } = flattened[i];
+    const parentStepId = parentKey === null ? null : (stepIdByKey.get(parentKey) ?? null);
+    const inserted = db
+      .insert(steps)
       .values({
         sessionId: sid,
         stepKey: step.key,
         stepIndex: i,
         phase: step.phase ?? null,
         type: step.type,
-        maxRetries: step.maxRetries,
-        onFailAction: step.onFail.action,
-        onFailTarget: step.onFail.target ?? null,
-        onFailReset: step.onFail.reset ?? null,
+        maxRetries: step.type === "loop" ? 0 : step.maxRetries,
+        onFailAction: step.type === "loop" ? null : step.onFail.action,
+        parentStepId,
+        loopIteration: 1,
+        maxIterations: step.type === "loop" ? step.maxIterations : null,
+        onExhausted: step.type === "loop" ? step.onExhausted : null,
       })
-      .run();
+      .returning({ id: steps.id })
+      .get();
+    stepIdByKey.set(step.key, inserted.id);
   }
 
   let artifactDbPath: string | null = null;
@@ -124,9 +133,9 @@ export async function init(
       db.update(sessions).set({ artifactDbPath }).where(eq(sessions.id, sid)).run();
     }
 
-    if (afterResult.artifacts && afterResult.artifacts.length > 0 && def.steps.length > 0) {
+    if (afterResult.artifacts && afterResult.artifacts.length > 0 && flattened.length > 0) {
       const now = new Date().toISOString().replace("T", " ").substring(0, 19);
-      const firstStep = def.steps[0];
+      const firstStep = flattened[0].def;
       for (const a of afterResult.artifacts) {
         db.insert(artifacts)
           .values({
