@@ -29,6 +29,20 @@
       "when": 1789262704607,
       "tag": "0003_harsh_zaladane",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1789357084354,
+      "tag": "0004_chunky_red_ghost",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1789357165464,
+      "tag": "0005_fearless_maestro",
+      "breakpoints": true
     }
   ]
 }

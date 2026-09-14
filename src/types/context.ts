@@ -8,12 +8,21 @@ import type { GateAnswer } from "./workflow-def.ts";
 /** ゲートごとの最新回答（`stepKey` → `questionKey` → `GateAnswer`）。 */
 export type GateAnswers = Record<string, Record<string, GateAnswer>>;
 
+/** 実行中ステップが属する最も内側のループの文脈。ループ外では null。 */
+export interface LoopContext {
+  key: string;
+  iteration: number;
+  maxIterations: number;
+}
+
 /** 全フック（condition / check / buildPrompt / beforeStep / afterStep）が共通で受け取るコンテキスト。 */
 export interface HookCtxBase {
   sessionDir: string;
   sessionId: string;
   /** ゲートごとの最新試行の回答（approve / revise を問わず）。未回答のゲートは含まれない。 */
   gateAnswers: GateAnswers;
+  /** 実行中ステップが属する最も内側のループの文脈。ループ外のステップでは null。 */
+  loop: LoopContext | null;
 }
 
 /** ステップの `condition` 判定に渡されるコンテキスト。 */

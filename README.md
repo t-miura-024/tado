@@ -116,20 +116,25 @@ tado init --workflow my-workflow
 
 ### StepDef の構造
 
-| フィールド    | 型                                           | 説明                                                  |
-| ------------- | -------------------------------------------- | ----------------------------------------------------- |
-| `key`         | `string`                                     | ステップ識別子（ワークフロー内で一意）                |
-| `phase`       | `string`                                     | フェーズ名（表示用）                                  |
-| `type`        | `"task" \| "human_gate" \| "parallel"`       | ステップの種類                                        |
-| `maxRetries`  | `number`                                     | 最大リトライ回数                                      |
-| `onFail`      | `OnFailStrategy`                             | 失敗時戦略（`retry` / `goto` / `abort` / `escalate`） |
-| `check`       | `(ctx: CheckCtx) => CheckResult`             | 完了検証関数（`pass` / `fail` / `error` を返す）      |
-| `condition?`  | `(ctx: ConditionCtx) => boolean`             | ステップ実行条件（`false` ならスキップ）              |
-| `beforeStep?` | `(ctx: StepCtx) => Promise<ArtifactInput[]>` | プロンプト生成前に実行されるフック                    |
-| `afterStep?`  | `(ctx: StepCtx) => Promise<ArtifactInput[]>` | `check` の前に実行されるフック                        |
-| `task?`       | `TaskStepDef`                                | `type: "task"` のときの定義                           |
-| `humanGate?`  | `HumanGateStepDef`                           | `type: "human_gate"` のときの定義                     |
-| `parallel?`   | `ParallelStepDef`                            | `type: "parallel"` のときの定義                       |
+`StepDef` は `type` で判別するユニオンです。`task` / `human_gate` / `parallel` は実行されるステップ、`loop` は本体を繰り返す構造ステップで、それ自身は実行されません。
+
+| フィールド      | 型                                               | 説明                                                                                       |
+| --------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| `key`           | `string`                                         | ステップ識別子（ワークフロー内で一意）                                                     |
+| `phase`         | `string`                                         | フェーズ名（表示用）                                                                       |
+| `type`          | `"task" \| "human_gate" \| "parallel" \| "loop"` | ステップの種類                                                                             |
+| `maxRetries`    | `number`                                         | 最大リトライ回数（実行ステップのみ）                                                       |
+| `onFail`        | `OnFailStrategy`                                 | 失敗時戦略（`retry` / `abort` / `escalate`。実行ステップのみ）                             |
+| `check`         | `(ctx: CheckCtx) => CheckResult`                 | 完了検証関数（`pass` / `fail` / `error` / `continue` を返す。`continue` は loop 本体のみ） |
+| `condition?`    | `(ctx: ConditionCtx) => boolean`                 | ステップ実行条件（`false` ならスキップ）                                                   |
+| `beforeStep?`   | `(ctx: StepCtx) => Promise<ArtifactInput[]>`     | プロンプト生成前に実行されるフック                                                         |
+| `afterStep?`    | `(ctx: StepCtx) => Promise<ArtifactInput[]>`     | `check` の前に実行されるフック                                                             |
+| `task?`         | `TaskConfig`                                     | `type: "task"` のときの定義                                                                |
+| `humanGate?`    | `HumanGateConfig`                                | `type: "human_gate"` のときの定義                                                          |
+| `parallel?`     | `ParallelConfig`                                 | `type: "parallel"` のときの定義                                                            |
+| `body`          | `StepDef[]`                                      | `type: "loop"` のときの本体ステップ列                                                      |
+| `maxIterations` | `number`                                         | `type: "loop"` のときの最大反復回数                                                        |
+| `onExhausted`   | `OnExhaustedStrategy`                            | `type: "loop"` の上限到達時戦略（`escalate` / `abort`）                                    |
 
 ### ステップタイプ
 
@@ -179,7 +184,7 @@ import { buildStepPrompt } from "tado/prompt";
 
 - `task.action`: `run_subagent` / `run_command` / `orchestrate`
 - `buildPrompt(ctx: PromptCtx)`: `next` が呼ばれたときにプロンプトを生成します。`ctx` からは `sessionDir`・`artifactDbPath`・`artifacts` を参照できます。本文は `buildStepPrompt(spec)`（`tado/prompt`）で構築できます。各セクションの中身は行テキストの配列で、そのまま（raw）レンダリングされます。セッション情報・リトライフィードバックはエンジンが自動付与します。
-- `check(ctx: CheckCtx)`: `report` 後に実行される完了検証です。`ctx.attemptResult`（実行結果）や `ctx.sessionDir` を使って判定し、`{ status, reasons }` を返します。
+- `check(ctx: CheckCtx)`: `report` 後に実行される完了検証です。`ctx.attemptResult`（実行結果）や `ctx.sessionDir` を使って判定し、`{ status, reasons }` を返します。loop 本体では `"continue"` を返すと次イテレーションへ巻き戻ります。
 
 #### human_gate
 
@@ -216,9 +221,9 @@ import { buildStepPrompt } from "tado/prompt";
 ```
 
 - `presentArtifacts`: 提示する成果物キーの配列
-- `outcomeQuestionKey`: ゲート全体の状態遷移（continue/goto/abort）を決める判定設問の `key`
+- `outcomeQuestionKey`: ゲート全体の状態遷移を決める判定設問の `key`。回答の `value` が文字列 `revise` と完全一致すれば差し戻し、文字列 `abort` と完全一致すれば中断、それ以外の値はすべて承認（ゲート通過）として扱われる
 - `questions`: ゲート設問の配列（`GateQuestion[]`）。各設問は `key` / `title` / `type`（`single_choice` / `free_text` / `choice_with_input`）/ `required` / `placeholder` / `maxLength` / `choices` で構成。`choice_with_input` の選択肢は `input: { required, placeholder, maxLength, title }` で付帯入力を定義でき、選択値に応じて自由入力の要否・必須・文字数・placeholder が切り替わる（例: `revise` は理由必須）
-- `reviseTargetStep`: 判定設問で `revise` に相当する値が選ばれたときに巻き戻るステップの `key`
+- `reviseTargetStep`: 判定設問の回答 `value` が文字列 `revise` と完全一致したときに巻き戻るステップの `key`（判定設問の選択肢に `value: "revise"` があるゲートでは必須）
 - 回答は `Record<questionKey, GateAnswer>` として保存され、全フック ctx（condition / check / buildPrompt / beforeStep / afterStep）の `gateAnswers[stepKey][questionKey]` から参照できる。値はゲートごとの最新試行の回答（approve / revise を問わず）で、最新試行が未回答のゲートは含まれない。記録済みの回答は `tado answers` でも確認でき、全試行の履歴は `tado answers --all` で参照できる（旧 `gateChoices` は廃止）
 
 Human Gate への回答は **`tado confirm` サブコマンドでのみ**受け付けます（ADR-0007）。
@@ -234,11 +239,44 @@ tado confirm --session <id>
 - `confirm` は stdin が TTY の場合のみ実行できるため、エージェントの Bash ツールからは構造的に実行できません。LLM が人間への案内を省略しても、ゲートは停止するだけで通過しません
 - 承認の成立に加え、TTY なしで拒否された実行試行も `gate_events` テーブルに監査記録として残ります
 - `confirm` は複数設問を `clack.select/autocomplete` → 条件付き `clack.text` で順次提示し、進捗 `Qn/M` と設問タイトル・説明を表示する。必須・文字数バリデーションが即時に行われ、未達なら再入力を求める。途中キャンセルは原子的に全破棄して `running` のまま再試行可能
-- 判定設問で `revise` に相当する値が選ばれると `reviseTargetStep` 以降が pending に戻り、`abort` に相当する値が選ばれるとセッションが中断される（値の判定は `outcomeQuestionKey` で指名された設問の `value` で行う）
+- 判定設問（`outcomeQuestionKey` で指名）の回答 `value` は文字列の完全一致で判定される。値が文字列 `revise` のときだけ差し戻しとして解釈され、`reviseTargetStep` 以降が pending + retryCount=0 に戻る（ループをまたぐ場合はループの反復状態も初期化される）。値が文字列 `abort` のときだけセッションが中断され、それ以外の値はすべて承認として扱われる。`{ value: "rework", label: "差し戻し" }` のような同義語は差し戻しにならず、`reviseTargetStep` の必須検証も選択肢の `value` が `revise` の場合にしか発火しないため、人間の差し戻しが無言で承認として処理される
 
 #### parallel
 
-複数の SubTask を並列に実行するステップです。`parallel.subtasks` に `SubtaskDef`（`key` / `subagentType` / `buildPrompt`）の配列を定義します。`report` 時は `subtaskResults` に各 SubTask の結果をまとめて渡します。
+複数の SubTask を並列に実行するステップです。`parallel.subtasks` に `SubtaskConfig`（`key` / `subagentType` / `buildPrompt`）の配列を定義します。`report` 時は `subtaskResults` に各 SubTask の結果をまとめて渡します。`loop` は `parallel` の子に置けません（型とロード時検証で拒否されます）。
+
+#### loop
+
+`body`（`StepDef[]`）を繰り返す構造ステップです。loop 自身はステップとして実行されず、本体のステップが実行対象になります。
+
+```typescript
+{
+  key: "review_cycle",
+  phase: "レビューサイクル",
+  type: "loop",
+  body: [
+    { key: "write_spec", phase: "仕様策定", type: "task", /* ... */ },
+    {
+      key: "review_spec",
+      phase: "レビュー",
+      type: "task",
+      /* ... */
+      check: (ctx) =>
+        ctx.attemptResult.subagentOutput?.includes("LGTM")
+          ? { status: "pass", reasons: ["approved"] }
+          : { status: "continue", reasons: ["revision requested"] },
+    },
+  ],
+  maxIterations: 3,
+  onExhausted: "escalate",
+}
+```
+
+- 本体の `check` が `"continue"` を返すたびに本体先頭へ巻き戻して（本体全体を pending + retryCount=0 に戻して）次イテレーションを実行します。`"pass"` で本体が完了して後続ステップへ進み、`"fail"` / `"error"` は通常どおりリトライ / `onFail` で処理されます
+- ループ外の `"continue"` はエラー（fail-fast）になります
+- `maxIterations` に達すると `onExhausted`（`escalate` = セッション paused / `abort` = aborted）が適用されます
+- ネストした loop の `"continue"` は最内ループに帰属し、外側 loop の巻き戻しでは内側 loop の反復状態も初期化されます
+- ループ文脈（`iteration` / `maxIterations`）は全フック ctx の `loop` と `next` の `context.loop` から参照できます（ループ外は `null`）
 
 ### ステップフック（beforeStep / afterStep）
 

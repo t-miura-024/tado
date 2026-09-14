@@ -9,11 +9,15 @@ interface StepLike {
   key: string;
   phase: string | null;
   type: string;
+  parentKey?: string | null;
 }
 
 interface StepStatus {
   stepKey: string;
   status: string;
+  /** loop 行の現在イテレーション（loop 以外では未設定/上限なし）。 */
+  loopIteration?: number | null;
+  maxIterations?: number | null;
 }
 
 export interface DefinitionCanvasProps {
@@ -56,7 +60,14 @@ export default function DefinitionCanvas({
   const containerRef = useRef<HTMLDivElement>(null);
 
   const inputs = useMemo(
-    () => workflowSteps.map((s, i) => ({ key: s.key, phase: s.phase, type: s.type, index: i })),
+    () =>
+      workflowSteps.map((s, i) => ({
+        key: s.key,
+        phase: s.phase,
+        type: s.type,
+        index: i,
+        parentKey: s.parentKey ?? null,
+      })),
     [workflowSteps],
   );
   const { nodes, edges, width, height } = useMemo(() => layoutWorkflowSteps(inputs), [inputs]);
@@ -66,6 +77,26 @@ export default function DefinitionCanvas({
     for (const s of stepStatuses ?? []) m.set(s.stepKey, s.status);
     return m;
   }, [stepStatuses]);
+
+  // loop 行の反復状態（maxIterations を持つ行のみ）
+  const loopInfoMap = useMemo(() => {
+    const m = new Map<string, { iteration: number; maxIterations: number }>();
+    for (const s of stepStatuses ?? []) {
+      if (s.maxIterations != null) {
+        m.set(s.stepKey, { iteration: s.loopIteration ?? 1, maxIterations: s.maxIterations });
+      }
+    }
+    return m;
+  }, [stepStatuses]);
+
+  const nodeMap = useMemo(() => {
+    const m = new Map<string, CanvasNode>();
+    for (const n of nodes) m.set(n.key, n);
+    return m;
+  }, [nodes]);
+
+  const flowEdges = useMemo(() => edges.filter((e) => e.kind !== "loop-back"), [edges]);
+  const loopBackEdges = useMemo(() => edges.filter((e) => e.kind === "loop-back"), [edges]);
 
   const phaseList = useMemo(() => {
     const seen = new Map<string, number>();
@@ -188,6 +219,10 @@ export default function DefinitionCanvas({
               <span className="font-mono text-catppuccin-overlay0">depth {idx}</span>
             </span>
           ))}
+          <span className="inline-flex items-center gap-1 text-[11px] text-catppuccin-mauve">
+            <span>↻ loop</span>
+            <span className="text-catppuccin-overlay0">破線=本体末尾から反復</span>
+          </span>
           <span className="ml-auto text-[11px] text-catppuccin-overlay0">
             横=進行(→) 縦=並列 Phase=色/深度 Threeエッジあり
           </span>
@@ -228,33 +263,68 @@ export default function DefinitionCanvas({
             className="absolute inset-0"
             style={{ pointerEvents: "none" }}
           >
-            {(() => {
-              const nodeMap = new Map<string, CanvasNode>();
-              for (const n of nodes) nodeMap.set(n.key, n);
-              return edges.map((e, i) => {
-                const from = nodeMap.get(e.from);
-                const to = nodeMap.get(e.to);
-                if (!from || !to) return null;
-                const x1 = from.x + NODE_W;
-                const y1 = from.y + NODE_H / 2;
-                const x2 = to.x;
-                const y2 = to.y + NODE_H / 2;
-                const mx = (x1 + x2) / 2;
-                const path = `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`;
-                const col = getPhaseColor(to.phase ?? "");
-                return (
-                  <path
-                    key={`${e.from}-${e.to}-${i}`}
-                    d={path}
-                    stroke={col}
-                    strokeWidth={1.4}
-                    fill="none"
-                    opacity={0.45}
-                    strokeDasharray={from.phase === to.phase ? "0" : "0"}
-                  />
-                );
-              });
-            })()}
+            {loopBackEdges.length > 0 && (
+              <defs>
+                <marker
+                  id="loop-back-arrow"
+                  viewBox="0 0 10 10"
+                  refX="9"
+                  refY="5"
+                  markerWidth="6"
+                  markerHeight="6"
+                  orient="auto-start-reverse"
+                >
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill="#cba6f7" />
+                </marker>
+              </defs>
+            )}
+            {flowEdges.map((e, i) => {
+              const from = nodeMap.get(e.from);
+              const to = nodeMap.get(e.to);
+              if (!from || !to) return null;
+              const x1 = from.x + NODE_W;
+              const y1 = from.y + NODE_H / 2;
+              const x2 = to.x;
+              const y2 = to.y + NODE_H / 2;
+              const mx = (x1 + x2) / 2;
+              const path = `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`;
+              const col = getPhaseColor(to.phase ?? "");
+              return (
+                <path
+                  key={`${e.from}-${e.to}-${i}`}
+                  d={path}
+                  stroke={col}
+                  strokeWidth={1.4}
+                  fill="none"
+                  opacity={0.45}
+                  strokeDasharray={from.phase === to.phase ? "0" : "0"}
+                />
+              );
+            })}
+            {/* loop 本体末尾から loop 行へ戻る反復エッジ（破線 + 矢印） */}
+            {loopBackEdges.map((e, i) => {
+              const from = nodeMap.get(e.from);
+              const to = nodeMap.get(e.to);
+              if (!from || !to) return null;
+              const x1 = from.x + NODE_W / 2;
+              const y1 = from.y + NODE_H;
+              const x2 = to.x + NODE_W / 2;
+              const y2 = to.y + NODE_H;
+              const dip = 26;
+              const path = `M ${x1} ${y1} C ${x1} ${y1 + dip}, ${x2} ${y2 + dip}, ${x2} ${y2}`;
+              return (
+                <path
+                  key={`loop-back-${e.from}-${e.to}-${i}`}
+                  d={path}
+                  stroke="#cba6f7"
+                  strokeWidth={1.4}
+                  strokeDasharray="5 4"
+                  fill="none"
+                  opacity={0.8}
+                  markerEnd="url(#loop-back-arrow)"
+                />
+              );
+            })}
           </svg>
 
           {/* Three.js glowing edges overlay */}
@@ -272,6 +342,8 @@ export default function DefinitionCanvas({
             const flowStyle = getFlowNodeStyle({ status, stepKey: n.key }, currentStepKey);
             const isSelected = selectedKey === n.key;
             const isCurrent = flowStyle.isCurrent;
+            const isLoop = n.type === "loop";
+            const loopInfo = loopInfoMap.get(n.key);
             const phaseColor = getPhaseColor(n.phase ?? "");
             const depthOpacity = Math.max(0.9, 1 - n.phaseIndex * 0.06);
             return (
@@ -292,6 +364,8 @@ export default function DefinitionCanvas({
                   borderColor: isSelected ? "#f9e2af" : flowStyle.borderColor,
                   borderWidth: isCurrent || isSelected ? 2 : 1,
                   borderStyle: flowStyle.isSkipped ? "dashed" : "solid",
+                  outline: isLoop ? "1px dashed #cba6f7" : undefined,
+                  outlineOffset: isLoop ? "-4px" : undefined,
                   opacity: depthOpacity,
                   boxShadow: isCurrent
                     ? `0 0 12px ${phaseColor}55, 0 2px 8px rgba(0,0,0,0.35)`
@@ -325,10 +399,25 @@ export default function DefinitionCanvas({
                   {n.key}
                 </div>
                 <div className="flex items-center gap-1 text-[10px]">
-                  <span className="rounded bg-catppuccin-surface1 px-1 py-0.5 font-mono text-catppuccin-subtext0">
-                    {n.type}
+                  <span
+                    className={cn(
+                      "rounded bg-catppuccin-surface1 px-1 py-0.5 font-mono",
+                      isLoop ? "text-catppuccin-mauve" : "text-catppuccin-subtext0",
+                    )}
+                  >
+                    {isLoop ? "↻ loop" : n.type}
                   </span>
-                  <span className="ml-auto font-mono text-catppuccin-overlay0">{status}</span>
+                  {n.parentKey && (
+                    <span
+                      className="truncate rounded bg-catppuccin-surface1 px-1 py-0.5 font-mono text-catppuccin-mauve"
+                      title={`loop 本体: ${n.parentKey}`}
+                    >
+                      ↻ {n.parentKey}
+                    </span>
+                  )}
+                  <span className="ml-auto shrink-0 font-mono text-catppuccin-overlay0">
+                    {loopInfo ? `${loopInfo.iteration}/${loopInfo.maxIterations}` : status}
+                  </span>
                   {isCurrent && <span className="font-bold text-catppuccin-yellow">●</span>}
                 </div>
               </button>
@@ -352,13 +441,14 @@ export default function DefinitionCanvas({
                   preserveAspectRatio="xMidYMid meet"
                 >
                   {edges.map((e, i) => {
-                    const fm = nodes.find((n) => n.key === e.from);
-                    const tm = nodes.find((n) => n.key === e.to);
+                    const fm = nodeMap.get(e.from);
+                    const tm = nodeMap.get(e.to);
                     if (!fm || !tm) return null;
-                    const x1 = fm.x + NODE_W;
-                    const y1 = fm.y + NODE_H / 2;
-                    const x2 = tm.x;
-                    const y2 = tm.y + NODE_H / 2;
+                    const isBack = e.kind === "loop-back";
+                    const x1 = fm.x + (isBack ? NODE_W / 2 : NODE_W);
+                    const y1 = fm.y + (isBack ? NODE_H : NODE_H / 2);
+                    const x2 = tm.x + (isBack ? NODE_W / 2 : 0);
+                    const y2 = tm.y + (isBack ? NODE_H : NODE_H / 2);
                     return (
                       <line
                         key={`mm-${i}`}
@@ -366,9 +456,10 @@ export default function DefinitionCanvas({
                         y1={y1}
                         x2={x2}
                         y2={y2}
-                        stroke={getPhaseColor(tm.phase ?? "")}
-                        strokeWidth={1.2}
-                        opacity={0.5}
+                        stroke={isBack ? "#cba6f7" : getPhaseColor(tm.phase ?? "")}
+                        strokeWidth={isBack ? 1 : 1.2}
+                        strokeDasharray={isBack ? "3 2" : undefined}
+                        opacity={isBack ? 0.9 : 0.5}
                       />
                     );
                   })}

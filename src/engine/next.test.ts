@@ -7,6 +7,7 @@ import {
   init,
   next,
   report,
+  status,
   confirm,
   EngineError,
   getWorkflowDbPath,
@@ -766,6 +767,206 @@ describe("next", () => {
         .get(sessionId, "step2_conditional") as Record<string, unknown>;
       expect(s2.status).toBe("skipped");
       db.close();
+    });
+  });
+
+  describe("ループステップ", () => {
+    it("loop行を飛ばして本体先頭から実行し、next返却値にループ文脈を含める", async () => {
+      const loop_next_test_workflow_content = `
+        const def = {
+          id: 'loop-next-test',
+          steps: [
+            {
+              key: 'before_task',
+              phase: 'Before',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'abort' },
+              task: { action: 'run_subagent', subagentType: 'test', buildPrompt: () => 'before' },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+            {
+              key: 'work_loop',
+              phase: 'Loop',
+              type: 'loop',
+              maxIterations: 4,
+              onExhausted: 'escalate',
+              body: [
+                {
+                  key: 'loop_task',
+                  phase: 'LoopTask',
+                  type: 'task',
+                  maxRetries: 0,
+                  onFail: { action: 'abort' },
+                  task: { action: 'run_subagent', subagentType: 'test', buildPrompt: (ctx) => 'iteration=' + (ctx.loop ? ctx.loop.iteration : 'none') + '/' + (ctx.loop ? ctx.loop.maxIterations : 'none') },
+                  check: () => ({ status: 'pass', reasons: [] }),
+                },
+              ],
+            },
+            {
+              key: 'after_task',
+              phase: 'After',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'abort' },
+              task: { action: 'run_subagent', subagentType: 'test', buildPrompt: () => 'after' },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+      `;
+      setupWorkflowFromContent("loop-next-test", loop_next_test_workflow_content);
+      const { sessionId } = await init("loop-next-test", { title: "test-title" });
+
+      await next(sessionId);
+      await report(sessionId, {
+        stepKey: "before_task",
+        status: "completed",
+        subagentOutput: "done",
+      });
+
+      // loop 行ではなく本体先頭のステップが返る
+      const result = await next(sessionId);
+      expect(result.stepKey).toBe("loop_task");
+      expect(result.stepType).toBe("task");
+      expect(result.context.loop).toEqual({ key: "work_loop", iteration: 1, maxIterations: 4 });
+      expect(result.prompt).toContain("iteration=1/4");
+
+      const db = new Database(getWorkflowDbPath());
+      const loopRow = db
+        .query("SELECT status FROM steps WHERE session_id = ? AND step_key = ?")
+        .get(sessionId, "work_loop") as Record<string, unknown>;
+      expect(loopRow.status).toBe("pending");
+      db.close();
+
+      await report(sessionId, {
+        stepKey: "loop_task",
+        status: "completed",
+        subagentOutput: "done",
+      });
+      const nextResult = await next(sessionId);
+      expect(nextResult.stepKey).toBe("after_task");
+      expect(nextResult.context.loop).toBeNull();
+    });
+
+    it("conditionがfalseの本体ステップをスキップしてloopを完了させる", async () => {
+      const loop_condition_test_workflow_content = `
+        const def = {
+          id: 'loop-condition-test',
+          steps: [
+            {
+              key: 'work_loop',
+              phase: 'Loop',
+              type: 'loop',
+              maxIterations: 2,
+              onExhausted: 'abort',
+              body: [
+                {
+                  key: 'skip_me',
+                  phase: 'Skip',
+                  type: 'task',
+                  maxRetries: 0,
+                  onFail: { action: 'abort' },
+                  condition: () => false,
+                  task: { action: 'run_subagent', subagentType: 'test', buildPrompt: () => 'skip' },
+                  check: () => ({ status: 'pass', reasons: [] }),
+                },
+                {
+                  key: 'run_me',
+                  phase: 'Run',
+                  type: 'task',
+                  maxRetries: 0,
+                  onFail: { action: 'abort' },
+                  condition: () => true,
+                  task: { action: 'run_subagent', subagentType: 'test', buildPrompt: () => 'run' },
+                  check: () => ({ status: 'pass', reasons: [] }),
+                },
+              ],
+            },
+            {
+              key: 'after_task',
+              phase: 'After',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'abort' },
+              task: { action: 'run_subagent', subagentType: 'test', buildPrompt: () => 'after' },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+      `;
+      setupWorkflowFromContent("loop-condition-test", loop_condition_test_workflow_content);
+      const { sessionId } = await init("loop-condition-test", { title: "test-title" });
+
+      // skip_me は condition=false でスキップされ、run_me が返る
+      const first = await next(sessionId);
+      expect(first.stepKey).toBe("run_me");
+
+      const db = new Database(getWorkflowDbPath());
+      const skipped = db
+        .query("SELECT status FROM steps WHERE session_id = ? AND step_key = ?")
+        .get(sessionId, "skip_me") as Record<string, unknown>;
+      expect(skipped.status).toBe("skipped");
+      db.close();
+
+      await report(sessionId, { stepKey: "run_me", status: "completed", subagentOutput: "done" });
+
+      // 本体が完了した loop は passed になり、後続ステップへ進む
+      const after = await next(sessionId);
+      expect(after.stepKey).toBe("after_task");
+
+      const s = status(sessionId);
+      expect(s.steps.find((step) => step.key === "work_loop")?.status).toBe("passed");
+    });
+
+    it("parent_step_idが循環した破損セッションでEngineErrorを返しトランザクションを残さない", async () => {
+      const cycle_next_workflow_content = `
+        const def = {
+          id: 'cycle-next-test',
+          steps: [
+            {
+              key: 'work_loop',
+              phase: 'Loop',
+              type: 'loop',
+              maxIterations: 2,
+              onExhausted: 'abort',
+              body: [
+                {
+                  key: 'loop_task',
+                  phase: 'LoopTask',
+                  type: 'task',
+                  maxRetries: 0,
+                  onFail: { action: 'abort' },
+                  task: { action: 'run_subagent', subagentType: 'test', buildPrompt: () => 'loop' },
+                  check: () => ({ status: 'pass', reasons: [] }),
+                },
+              ],
+            },
+          ],
+        };
+        export default def;
+      `;
+      setupWorkflowFromContent("cycle-next-test", cycle_next_workflow_content);
+      const { sessionId } = await init("cycle-next-test", { title: "test-title" });
+
+      // loop 行の親を自分の本体に向けて循環させる（破損 DB の再現）。
+      // ガードが無いと BEGIN IMMEDIATE 内で無限ループしロックを保持し続ける。
+      const raw = new Database(getWorkflowDbPath());
+      raw.run(
+        "UPDATE steps SET parent_step_id = (SELECT id FROM steps WHERE session_id = ? AND step_key = ?) WHERE session_id = ? AND step_key = ?",
+        [sessionId, "loop_task", sessionId, "work_loop"],
+      );
+      raw.close();
+
+      await expect(next(sessionId)).rejects.toThrow(
+        /Cycle detected in steps\.parent_step_id chain/,
+      );
+
+      // トランザクションはロールバックされ、セッションは running のまま
+      const s = status(sessionId);
+      expect(s.sessionStatus).toBe("running");
     });
   });
 

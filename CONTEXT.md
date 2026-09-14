@@ -21,8 +21,20 @@ _Avoid_: approve コマンド, 承認 API
 _Avoid_: スキップ（単独で使う）
 
 **巻き戻し（rewind）**:
-`onFail` の `goto` に `reset: "downstream"` を指定すると、分岐先から失敗元までのステップが pending + retryCount=0 に戻り、サイクル全体が再実行される意味論。confirm の revise 巻き戻しと同一機構を一般化したもの。
+対象範囲のステップを pending + retryCount=0 に戻す機構。loop の `continue` と human_gate の revise が共有し、goto は廃止された。
 _Avoid_: リセット（汎用）, 再実行（単独）
+
+**ループ（loop）**:
+`type: "loop"` のステップ。`body: StepDef[]` の本体を持ち、本体の check が `continue` を返すたびに本体先頭へ巻き戻して再実行する。`maxIterations` に達すると `onExhausted`（escalate / abort）が適用される。
+_Avoid_: goto ループ, サイクル, リトライ
+
+**continue（継続ステータス）**:
+ループ本体の check が返す「次イテレーション要求」。エンジンは本体先頭への巻き戻しを適用する。ループ外で返された場合はエラーとする。
+_Avoid_: repeat（判定側の語として）, 継続（単独で使う）
+
+**repeat（nextAction）**:
+report が `continue` の判定に基づく巻き戻しを適用したことを表す遷移値。判定（continue）と適用された遷移（repeat）を区別する。
+_Avoid_: continue（nextAction として流用すること）, goto
 
 **ワークフロー（Workflow）**:
 tado エンジンが実行する `WorkflowDef` で定義された一連のステップ列。`id` で識別される。

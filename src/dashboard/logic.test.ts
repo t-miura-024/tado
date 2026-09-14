@@ -8,10 +8,12 @@ import {
   checkArtifactExists,
   formatArtifact,
   formatHistoryEntry,
+  formatLoopIteration,
   formatPreviewError,
   getDisplayBasename,
   getDisplayTitle,
   getEffectivePath,
+  getEnclosingLoop,
   getFlowNodeStyle,
   getPreviewReason,
   getPreviewResult,
@@ -20,15 +22,19 @@ import {
   isBinaryHeader,
   isPreviewableExtension,
   isSkippedStatus,
+  layoutWorkflowSteps,
   mergeHistory,
   selectInitialSession,
   truncatePreview,
+  toWorkflowDetailStep,
   PREVIEWABLE_EXTENSIONS,
   PREVIEW_MAX_BYTES,
   PREVIEW_MAX_LINES,
   _internal,
 } from "./logic.ts";
+import type { CanvasNodeInput, LoopStepLike } from "./logic.ts";
 import type { GateEventRow, SessionRow, StepAttemptRow } from "../engine/schema.ts";
+import type { StepDef } from "../types/workflow-def.ts";
 
 function makeSession(overrides: Partial<SessionRow> & Pick<SessionRow, "id">): SessionRow {
   return {
@@ -695,6 +701,267 @@ describe("dashboard logic", () => {
       expect(formatHistoryEntry(entry)).toBe(
         "2026-01-01 11:00:00 [gate] gate1 confirmed answers: decision: approve",
       );
+    });
+  });
+
+  describe("getEnclosingLoop", () => {
+    function makeLoopStep(
+      overrides: Partial<LoopStepLike> & Pick<LoopStepLike, "id" | "stepKey">,
+    ): LoopStepLike {
+      return {
+        id: overrides.id,
+        stepKey: overrides.stepKey,
+        type: overrides.type ?? "task",
+        parentStepId: overrides.parentStepId ?? null,
+        loopIteration: overrides.loopIteration ?? 1,
+        maxIterations: overrides.maxIterations ?? null,
+      };
+    }
+
+    it("直接の親が loop ならその反復状態を返す", () => {
+      const loop = makeLoopStep({
+        id: 1,
+        stepKey: "work_loop",
+        type: "loop",
+        loopIteration: 2,
+        maxIterations: 4,
+      });
+      const body = makeLoopStep({ id: 2, stepKey: "work", parentStepId: 1 });
+      const display = getEnclosingLoop(body, [loop, body]);
+      expect(display).toEqual({ key: "work_loop", iteration: 2, maxIterations: 4 });
+    });
+
+    it("ネスト loop の内側ステップには最内 loop を返す", () => {
+      const outer = makeLoopStep({
+        id: 1,
+        stepKey: "outer_loop",
+        type: "loop",
+        loopIteration: 3,
+        maxIterations: 5,
+      });
+      const inner = makeLoopStep({
+        id: 2,
+        stepKey: "inner_loop",
+        type: "loop",
+        parentStepId: 1,
+        loopIteration: 2,
+        maxIterations: 3,
+      });
+      const innerBody = makeLoopStep({ id: 3, stepKey: "inner_task", parentStepId: 2 });
+      const display = getEnclosingLoop(innerBody, [outer, inner, innerBody]);
+      expect(display).toEqual({ key: "inner_loop", iteration: 2, maxIterations: 3 });
+    });
+
+    it("内側 loop 行自身には外側 loop を返す", () => {
+      const outer = makeLoopStep({ id: 1, stepKey: "outer_loop", type: "loop" });
+      const inner = makeLoopStep({
+        id: 2,
+        stepKey: "inner_loop",
+        type: "loop",
+        parentStepId: 1,
+      });
+      expect(getEnclosingLoop(inner, [outer, inner])).toEqual({
+        key: "outer_loop",
+        iteration: 1,
+        maxIterations: null,
+      });
+    });
+
+    it("ルート直下のステップは null", () => {
+      const step = makeLoopStep({ id: 1, stepKey: "prepare" });
+      expect(getEnclosingLoop(step, [step])).toBeNull();
+    });
+
+    it("親 id が一覧に無ければ null", () => {
+      const body = makeLoopStep({ id: 2, stepKey: "work", parentStepId: 99 });
+      expect(getEnclosingLoop(body, [body])).toBeNull();
+    });
+
+    it("循環参照は null で打ち切る", () => {
+      const a = makeLoopStep({ id: 1, stepKey: "a", parentStepId: 2 });
+      const b = makeLoopStep({ id: 2, stepKey: "b", parentStepId: 1 });
+      expect(getEnclosingLoop(a, [a, b])).toBeNull();
+    });
+  });
+
+  describe("formatLoopIteration", () => {
+    it("上限ありは n/m 形式", () => {
+      expect(formatLoopIteration(2, 3)).toBe("iteration 2/3");
+    });
+    it("上限なしは n のみ", () => {
+      expect(formatLoopIteration(2, null)).toBe("iteration 2");
+    });
+  });
+
+  describe("layoutWorkflowSteps（loop 表現）", () => {
+    const withLoop: CanvasNodeInput[] = [
+      { key: "prepare", phase: "Prep", type: "task", index: 0, parentKey: null },
+      { key: "work_loop", phase: "Loop", type: "loop", index: 1, parentKey: null },
+      { key: "work", phase: "Work", type: "task", index: 2, parentKey: "work_loop" },
+      { key: "review", phase: "Work", type: "task", index: 3, parentKey: "work_loop" },
+      { key: "done", phase: "Done", type: "task", index: 4, parentKey: null },
+    ];
+
+    it("parentKey をノードへ引き継ぐ", () => {
+      const { nodes } = layoutWorkflowSteps(withLoop);
+      const byKey = new Map(nodes.map((n) => [n.key, n]));
+      expect(byKey.get("work")?.parentKey).toBe("work_loop");
+      expect(byKey.get("work_loop")?.parentKey).toBeNull();
+      expect(byKey.get("done")?.parentKey).toBeNull();
+    });
+
+    it("loop 本体末尾から loop 行へ loop-back エッジを張る", () => {
+      const { edges } = layoutWorkflowSteps(withLoop);
+      const back = edges.filter((e) => e.kind === "loop-back");
+      expect(back).toEqual([{ from: "review", to: "work_loop", kind: "loop-back" }]);
+    });
+
+    it("loop が無ければ loop-back エッジは張らない", () => {
+      const { edges } = layoutWorkflowSteps([
+        { key: "a", phase: "P", type: "task", index: 0 },
+        { key: "b", phase: "P", type: "task", index: 1 },
+      ]);
+      expect(edges.some((e) => e.kind === "loop-back")).toBe(false);
+    });
+
+    it("ネスト loop では各 loop の本体末尾から戻す", () => {
+      const nested: CanvasNodeInput[] = [
+        { key: "outer_loop", phase: "Outer", type: "loop", index: 0, parentKey: null },
+        { key: "inner_loop", phase: "Inner", type: "loop", index: 1, parentKey: "outer_loop" },
+        { key: "inner_task", phase: "Inner", type: "task", index: 2, parentKey: "inner_loop" },
+        { key: "outer_task", phase: "Outer", type: "task", index: 3, parentKey: "outer_loop" },
+      ];
+      const { edges } = layoutWorkflowSteps(nested);
+      const back = edges.filter((e) => e.kind === "loop-back");
+      expect(back).toEqual([
+        { from: "outer_task", to: "outer_loop", kind: "loop-back" },
+        { from: "inner_task", to: "inner_loop", kind: "loop-back" },
+      ]);
+    });
+  });
+
+  describe("toWorkflowDetailStep", () => {
+    it("task は hook 有無と task 設定、parentKey を写す", () => {
+      const step = toWorkflowDetailStep(
+        {
+          key: "work",
+          phase: "Work",
+          type: "task",
+          maxRetries: 1,
+          onFail: { action: "retry" },
+          condition: () => true,
+          afterStep: async () => [],
+          task: { action: "run_subagent", subagentType: "tester", buildPrompt: () => "p" },
+          check: () => ({ status: "pass", reasons: [] }),
+        } satisfies StepDef,
+        "work_loop",
+      );
+      expect(step).toMatchObject({
+        type: "task",
+        key: "work",
+        phase: "Work",
+        parentKey: "work_loop",
+        maxRetries: 1,
+        onFail: { action: "retry" },
+        hasCondition: true,
+        hasBeforeStep: false,
+        hasAfterStep: true,
+        task: { action: "run_subagent", subagentType: "tester" },
+      });
+    });
+
+    it("human_gate は GateQuestion を型を保ったまま写す", () => {
+      const step = toWorkflowDetailStep(
+        {
+          key: "review_gate",
+          phase: "Review",
+          type: "human_gate",
+          maxRetries: 0,
+          onFail: { action: "abort" },
+          humanGate: {
+            presentArtifacts: ["plan"],
+            outcomeQuestionKey: "decision",
+            reviseTargetStep: "plan",
+            questions: [
+              {
+                key: "decision",
+                title: "判定",
+                type: "single_choice",
+                choices: [{ value: "revise", label: "差し戻し" }],
+              },
+            ],
+          },
+          check: () => ({ status: "pass", reasons: [] }),
+        } satisfies StepDef,
+        null,
+      );
+      expect(step).toMatchObject({ type: "human_gate", parentKey: null, maxRetries: 0 });
+      if (step.type !== "human_gate") throw new Error("human_gate へ narrow できない");
+      expect(step.humanGate.questions[0]?.type).toBe("single_choice");
+      expect(step.humanGate.reviseTargetStep).toBe("plan");
+    });
+
+    it("parallel は subtasks を写し buildPrompt を落とす", () => {
+      const step = toWorkflowDetailStep(
+        {
+          key: "fan_out",
+          phase: "Fan",
+          type: "parallel",
+          maxRetries: 0,
+          onFail: { action: "abort" },
+          parallel: {
+            subtasks: [
+              { key: "a", subagentType: "t1", buildPrompt: () => "a" },
+              { key: "b", subagentType: "t2", readonly: true, buildPrompt: () => "b" },
+            ],
+          },
+          check: () => ({ status: "pass", reasons: [] }),
+        } satisfies StepDef,
+        null,
+      );
+      expect(step).toMatchObject({
+        type: "parallel",
+        parallel: {
+          subtasks: [
+            { key: "a", subagentType: "t1" },
+            { key: "b", subagentType: "t2", readonly: true },
+          ],
+        },
+      });
+      if (step.type !== "parallel") throw new Error("parallel へ narrow できない");
+      expect(step.task).toBeUndefined();
+    });
+
+    it("loop は bodyKeys と反復設定を写す", () => {
+      const step = toWorkflowDetailStep(
+        {
+          key: "work_loop",
+          phase: "Loop",
+          type: "loop",
+          maxIterations: 3,
+          onExhausted: "escalate",
+          body: [
+            {
+              key: "plan",
+              phase: "Loop",
+              type: "task",
+              maxRetries: 0,
+              onFail: { action: "retry" },
+              task: { action: "run_subagent", buildPrompt: () => "p" },
+              check: () => ({ status: "continue", reasons: [] }),
+            },
+          ],
+        } satisfies StepDef,
+        null,
+      );
+      expect(step).toMatchObject({
+        type: "loop",
+        key: "work_loop",
+        parentKey: null,
+        maxIterations: 3,
+        onExhausted: "escalate",
+        bodyKeys: ["plan"],
+      });
     });
   });
 });

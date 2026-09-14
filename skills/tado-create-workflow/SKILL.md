@@ -20,7 +20,7 @@ tado の `WorkflowDef` を対話的に設計し、`{TADO_HOME}/workflows/<workfl
 ## 参照ファイル
 
 - `examples/simple-workflow.ts` — 唯一の雛形参照。`WorkflowDef` の最小構成（`task` → `human_gate`）を示す。コメントの `tado init` 例は本Skillの前提（ID解決）に合わせて読み替える。
-- `src/types/workflow-def.ts` — `WorkflowDef` / `StepDef` / `TaskStepDef` / `HumanGateStepDef` / `ParallelStepDef` / `SubtaskDef` / `OnFailStrategy` の型定義。
+- `src/types/workflow-def.ts` — `WorkflowDef` / `StepDef` / `TaskStepDef` / `HumanGateStepDef` / `ParallelStepDef` / `LoopStepDef` / `TaskConfig` / `HumanGateConfig` / `ParallelConfig` / `SubtaskConfig` / `OnFailStrategy` / `OnExhaustedStrategy` の型定義。
 - `src/prompt.ts` — `buildStepPrompt` / `PromptString` / `PromptSection` / `PromptItem` / `StepPromptSpec` の定義とレンダラー。
 - `src/engine/store.ts` — `getTadoHome` / `getWorkflowsDir` / `resolveWorkflowPath` の集約機構。
 
@@ -54,18 +54,19 @@ tado の `WorkflowDef` を対話的に設計し、`{TADO_HOME}/workflows/<workfl
 
 各ステップについて以下を決定する:
 
-- **ステップ種別**: 各ステップの `type`（`task` / `human_gate` / `parallel`）を決定する。
+- **ステップ種別**: 各ステップの `type`（`task` / `human_gate` / `parallel` / `loop`）を決定する。
 - **task の場合**: `action`（`run_subagent` / `run_command` / `orchestrate`）と、必要に応じて `subagentType` を決定する。
   - `run_subagent`: SubAgent にプロンプトを委譲する
   - `run_command`: シェルコマンドを実行する
   - `orchestrate`: オーケストレーターとして複雑な制御を行う
 - **parallel の場合**: `subtasks` の数と、各 subtask の `key` / `subagentType` を決定する。
+- **loop の場合**: `body`（ネストした `StepDef[]`）と `maxIterations`、上限到達時の `onExhausted`（`escalate` / `abort`）を決定する。本体の `check` が `continue` を返すたびに本体先頭へ巻き戻って次イテレーションを実行する。loop を `parallel` の子にはできない。
 - **ステップ間の依存**:
   - `condition` による分岐の有無と判定条件
-  - `reviseTargetStep` による差し戻し先（`human_gate` の `revise` 選択時に戻るステップの `key`）
-  - `onFail` 戦略（`retry` / `goto` / `abort` / `escalate`）と `goto` 時の `target`
-- **`maxRetries` と `onFail`**: 各ステップの `maxRetries`（リトライ上限）と `onFail`（`{ action, target?, reset? }`）を決定する。`goto` 時に `reset: "downstream"` を指定すると、分岐先 `target` から失敗元までのステップが pending + retryCount=0 に巻き戻り、サイクル全体が再実行される。省略時は失敗元のみ `failed` となり中間ステップは変更されない。
-- ラウンド終了時に「各ステップの `key` / `phase` / `type` / `action` / `subtasks` / `condition` / `onFail` / `maxRetries`」の一覧を要約してユーザー確認を取る。
+  - `reviseTargetStep` による差し戻し先（`human_gate` の判定設問で回答 `value` が文字列 `revise` のときに戻るステップの `key`。選択肢に `value: "revise"` があるゲートでは必須）
+  - `onFail` 戦略（`retry` / `abort` / `escalate`）
+- **`maxRetries` と `onFail`**: 各実行ステップの `maxRetries`（リトライ上限）と `onFail`（`{ action }`）を決定する。繰り返しは `onFail` ではなく `type: "loop"` で表現する（`onFail.goto` / `target` / `reset` は撤去済みで、前方ジャンプの代替はない）。
+- ラウンド終了時に「各ステップの `key` / `phase` / `type` / `action` / `subtasks` / `condition` / `onFail` / `maxRetries`（`loop` は `body` / `maxIterations` / `onExhausted`）」の一覧を要約してユーザー確認を取る。
 
 ### Round 3: 各ステップの `buildStepPrompt` 6セクション概要と `check` / `condition` / `beforeStep` / `afterStep` 有無確定
 
@@ -105,21 +106,22 @@ export default def;
 
 ### 各 StepDef に含める雛形
 
-- `key` / `phase` / `type` / `maxRetries` / `onFail` / `task.buildPrompt` / `check` の雛形を必ず含める。
+- 実行ステップ（`task` / `human_gate` / `parallel`）には `key` / `phase` / `type` / `maxRetries` / `onFail` / `task.buildPrompt` / `check` の雛形を必ず含める。
 - `buildStepPrompt` を用いた Section 型対応のプロンプト雛形を含む。コードコメントで以下を明示する:
   - `PromptItem<string|Section>` であること
   - H6キャップ（`######` で止まる）であること
   - 行頭 `#` は `PromptString` 型で拒否されるため `string` に `# 見出し` を直接書かず `Section` の `title` を使うこと
 - `task` の3種別雛形（`run_subagent` / `run_command` / `orchestrate`）をコメントまたはサンプルコードとして含める。実際に選択された `action` に応じた雛形を生成し、他の種別はコメントで例示する。
-- `human_gate` 雛形: `presentArtifacts` / `outcomeQuestionKey` / `questions`（`GateQuestion[]`：`key` / `title` / `type`（`single_choice` / `free_text` / `choice_with_input`）/ `required` / `placeholder` / `maxLength` / `choices`（`value` / `label` / `desc` / `input: { required, placeholder, maxLength, title }`））/ `reviseTargetStep` を含む。例: `decision` 設問を `choice_with_input` で `approve/revise/abort` を定義し `revise` に `input: {required:true, placeholder:"理由", maxLength:500}` を付与する。
+- `human_gate` 雛形: `presentArtifacts` / `outcomeQuestionKey` / `questions`（`GateQuestion[]`：`key` / `title` / `type`（`single_choice` / `free_text` / `choice_with_input`）/ `required` / `placeholder` / `maxLength` / `choices`（`value` / `label` / `desc` / `input: { required, placeholder, maxLength, title }`））/ `reviseTargetStep`（選択肢に `value: "revise"` がある場合は必須）を含む。例: `decision` 設問を `choice_with_input` で `approve/revise/abort` を定義し `revise` に `input: {required:true, placeholder:"理由", maxLength:500}` を付与する。判定は回答 `value` の完全一致で、値が `revise` のときだけ差し戻しとして解釈され、それ以外の値はすべて承認として扱われるため、差し戻しの選択肢には必ず `value: "revise"` を使う。
 - `parallel` の `subtasks` 雛形: 各 subtask の `key` / `subagentType` / `buildPrompt` を含む。
+- `loop` 雛形: `body`（ネストした `StepDef[]`）/ `maxIterations` / `onExhausted`（`escalate` / `abort`）を含む。本体の `check` が `pass` / `continue` を返す例を示し、`continue` で本体先頭へ巻き戻ることをコメントで明示する。loop は `parallel` の `subtasks` に置けない。
 - `condition` / `beforeStep` / `afterStep` は Round 3 で「有り」とされた場合のみ雛形を含め、「無し」の場合はコメントで利用例を示す程度に留める。
 - `import from "tado"` 解決は `{TADO_HOME}/node_modules/tado`（`getTadoHome()` 配下）を前提とし、相対パス `../src/prompt.ts` は用いない。
 - 参照は `examples/simple-workflow.ts` と `src/types/workflow-def.ts` / `src/prompt.ts` のみとする。`docs/adr` の解説は重複させない。
 
 ### 型とプロンプトの正
 
-- 型定義は `src/types/workflow-def.ts` を正とする。`WorkflowDef` / `StepDef` / `TaskStepDef` / `HumanGateStepDef` / `ParallelStepDef` / `SubtaskDef` / `OnFailStrategy` / `GateChoice` を使用する。
+- 型定義は `src/types/workflow-def.ts` を正とする。`WorkflowDef` / `StepDef` / `TaskStepDef` / `HumanGateStepDef` / `ParallelStepDef` / `LoopStepDef` / `TaskConfig` / `HumanGateConfig` / `ParallelConfig` / `SubtaskConfig` / `OnFailStrategy` / `OnExhaustedStrategy` / `GateChoice` を使用する。
 - プロンプト構築は `src/prompt.ts` の `buildStepPrompt` / `PromptItem` / `PromptSection` / `PromptString` を正とする。
 
 ## 生成成果物

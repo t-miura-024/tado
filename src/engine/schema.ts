@@ -2,7 +2,14 @@ import { sql } from "drizzle-orm";
 // drizzle-orm/bun-sqlite only exports the bun:sqlite driver (BunSQLiteDatabase,
 // SQLiteBunSession). Table definition APIs live in drizzle-orm/sqlite-core,
 // which is driver-agnostic and works with the bun-sqlite driver.
-import { check, integer, sqliteTable, text, unique } from "drizzle-orm/sqlite-core";
+import {
+  check,
+  integer,
+  sqliteTable,
+  text,
+  unique,
+  type AnySQLiteColumn,
+} from "drizzle-orm/sqlite-core";
 
 /**
  * Drizzle schema definition.
@@ -52,14 +59,22 @@ export const steps = sqliteTable(
     retryCount: integer("retry_count").notNull().default(0),
     maxRetries: integer("max_retries").notNull().default(3),
     onFailAction: text("on_fail_action"),
-    onFailTarget: text("on_fail_target"),
-    onFailReset: text("on_fail_reset"),
+    /** loop の本体ステップが属する loop 行の id（最内の親）。ルート直下では null。 */
+    parentStepId: integer("parent_step_id").references((): AnySQLiteColumn => steps.id, {
+      onDelete: "cascade",
+    }),
+    /** loop 行の現在のイテレーション（1 始まり）。loop 以外では未使用。 */
+    loopIteration: integer("loop_iteration").notNull().default(1),
+    /** loop 行の反復上限。loop 以外では null。 */
+    maxIterations: integer("max_iterations"),
+    /** loop 行の反復上限到達時の戦略（escalate / abort）。loop 以外では null。 */
+    onExhausted: text("on_exhausted"),
     createdAt: text("created_at")
       .notNull()
       .default(sql`(datetime('now'))`),
   },
   (t) => [
-    check("steps_type_check", sql`${t.type} IN ('task','human_gate','parallel')`),
+    check("steps_type_check", sql`${t.type} IN ('task','human_gate','parallel','loop')`),
     check(
       "steps_status_check",
       sql`${t.status} IN ('pending','running','passed','failed','skipped')`,
@@ -86,7 +101,10 @@ export const stepAttempts = sqliteTable(
     checkStatus: text("check_status"),
   },
   (t) => [
-    check("step_attempts_check_status_check", sql`${t.checkStatus} IN ('pass','fail','error')`),
+    check(
+      "step_attempts_check_status_check",
+      sql`${t.checkStatus} IN ('pass','fail','error','continue')`,
+    ),
     unique("step_attempts_step_id_attempt_number_unique").on(t.stepId, t.attemptNumber),
   ],
 );

@@ -156,7 +156,7 @@ describe("レポート", () => {
     await next(sessionId);
     const result = await confirm(sessionId, mockConfirmDeps("revise"));
 
-    expect(result.nextAction).toBe("goto");
+    expect(result.nextAction).toBe("revise");
     expect(result.targetStep).toBe("step1_task");
   });
 
@@ -238,70 +238,6 @@ describe("レポート", () => {
   });
 
   describe("onFail戦略付きリトライ", () => {
-    it("maxRetries超過後にonFail gotoをサポートする", async () => {
-      const goto_test_workflow_content = `
-        const def = {
-          id: 'goto-test',
-          steps: [
-            {
-              key: 'failing_step',
-              phase: 'test',
-              type: 'task',
-              maxRetries: 1,
-              onFail: { action: 'goto', target: 'fallback_step' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'test',
-              },
-              check: (ctx) => ({ status: 'fail', reasons: ['always fail'] }),
-            },
-            {
-              key: 'fallback_step',
-              phase: 'fallback',
-              type: 'task',
-              maxRetries: 1,
-              onFail: { action: 'abort' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'fallback',
-              },
-              check: (ctx) => ({ status: 'pass', reasons: [] }),
-            },
-          ],
-        };
-        export default def;
-            `;
-      setupWorkflowFromContent("goto-test", goto_test_workflow_content);
-
-      const { sessionId } = await init("goto-test", { title: "test-title" });
-
-      await next(sessionId);
-      const r1 = await report(sessionId, {
-        stepKey: "failing_step",
-        status: "completed",
-        subagentOutput: "failed",
-      });
-
-      expect(r1.nextAction).toBe("retry");
-
-      await next(sessionId);
-      const r2 = await report(sessionId, {
-        stepKey: "failing_step",
-        status: "completed",
-        subagentOutput: "failed again",
-      });
-
-      expect(r2.nextAction).toBe("goto");
-      expect(r2.targetStep).toBe("fallback_step");
-
-      // reset 未指定の goto は失敗元を failed のまま残す
-      const s = status(sessionId);
-      const failingStep = s.steps.find((step) => step.key === "failing_step");
-      expect(failingStep?.status).toBe("failed");
-    });
-
     it("onFail escalateをサポートする", async () => {
       const escalate_test_workflow_content = `
         const def = {
@@ -875,7 +811,7 @@ describe("レポート", () => {
       await next(sessionId);
       const gateResult = await confirm(sessionId, mockConfirmDeps("revise"));
 
-      expect(gateResult.nextAction).toBe("goto");
+      expect(gateResult.nextAction).toBe("revise");
       expect(gateResult.targetStep).toBe("grill");
 
       // Verify all steps from grill onwards are reset to pending
@@ -1001,160 +937,12 @@ describe("レポート", () => {
     });
   });
 
-  describe("onFail reset: downstreamによる巻き戻し", () => {
-    it("失敗時に分岐先から失敗元までをpendingに戻し、サイクルを再実行する", async () => {
-      const reset_test_workflow_content = `
-        let fixPass = false;
+  describe("ループ（type: loop）", () => {
+    it("continueで本体先頭へ巻き戻り、次イテレーションのpassで脱出する", async () => {
+      const loop_rewind_workflow_content = `
+        let reviewRuns = 0;
         const def = {
-          id: 'reset-test',
-          steps: [
-            {
-              key: 'execute',
-              phase: 'Execute',
-              type: 'task',
-              maxRetries: 1,
-              onFail: { action: 'escalate' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'fix the issues',
-              },
-              check: (ctx) => ({ status: 'pass', reasons: [] }),
-            },
-            {
-              key: 'review',
-              phase: 'Review',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'goto', target: 'execute', reset: 'downstream' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'review the work',
-              },
-              check: (ctx) => {
-                if (!fixPass) {
-                  fixPass = true;
-                  return { status: 'fail', reasons: ['must: 3 issues found'] };
-                }
-                return { status: 'pass', reasons: ['must: 0'] };
-              },
-            },
-            {
-              key: 'followup',
-              phase: 'Followup',
-              type: 'human_gate',
-              maxRetries: 1,
-              onFail: { action: 'escalate' },
-              humanGate: {
-                presentArtifacts: [],
-                outcomeQuestionKey: 'decision',
-                questions: [
-                  {
-                    key: 'decision',
-                    title: '判定',
-                    type: 'choice_with_input',
-                    choices: [
-                      { value: 'approve', label: 'OK' },
-                      { value: 'abort', label: 'Abort' },
-                    ],
-                  },
-                ],
-              },
-              check: (ctx) => ({ status: 'pass', reasons: [] }),
-            },
-          ],
-        };
-        export default def;
-            `;
-      setupWorkflowFromContent("reset-test", reset_test_workflow_content);
-
-      const { sessionId } = await init("reset-test", { title: "test-title" });
-
-      // execute → pass
-      await next(sessionId);
-      const r1 = await report(sessionId, {
-        stepKey: "execute",
-        status: "completed",
-        subagentOutput: "work done",
-      });
-      expect(r1.nextAction).toBe("continue");
-
-      // review → fail (must>0), goto execute with reset downstream
-      await next(sessionId);
-      const r2 = await report(sessionId, {
-        stepKey: "review",
-        status: "completed",
-        subagentOutput: "review result with must",
-      });
-      expect(r2.nextAction).toBe("goto");
-      expect(r2.targetStep).toBe("execute");
-      expect(r2.message).toContain("Rewinding steps execute..review to pending");
-
-      // 分岐先〜失敗元が pending + retryCount=0 に巻き戻り、currentStep は分岐先になる
-      const s1 = status(sessionId);
-      expect(s1.currentStep).toBe("execute");
-      const executeStep = s1.steps.find((s) => s.key === "execute");
-      expect(executeStep?.status).toBe("pending");
-      expect(executeStep?.retryCount).toBe(0);
-      const reviewStep = s1.steps.find((s) => s.key === "review");
-      expect(reviewStep?.status).toBe("pending");
-      expect(reviewStep?.retryCount).toBe(0);
-
-      // reset 前の試行は確定済みのまま（未終了 attempt が残らない）
-      const dbAfterReset = new Database(getWorkflowDbPath());
-      const executeAttemptsAfterReset = dbAfterReset
-        .query(
-          "SELECT attempt_number, ended_at FROM step_attempts WHERE step_id = (SELECT id FROM steps WHERE session_id = ? AND step_key = ?) ORDER BY attempt_number",
-        )
-        .all(sessionId, "execute") as Record<string, unknown>[];
-      expect(executeAttemptsAfterReset).toHaveLength(1);
-      expect(executeAttemptsAfterReset[0].attempt_number).toBe(1);
-      expect(executeAttemptsAfterReset[0].ended_at).not.toBeNull();
-      dbAfterReset.close();
-
-      // execute → pass again（サイクルが再実行される）
-      const rerun = await next(sessionId);
-      expect(rerun.stepKey).toBe("execute");
-
-      // 再実行は新しい試行番号で採番され、既存の試行行と一致する
-      const dbAfterRerun = new Database(getWorkflowDbPath());
-      const executeAttemptsAfterRerun = dbAfterRerun
-        .query(
-          "SELECT attempt_number, ended_at FROM step_attempts WHERE step_id = (SELECT id FROM steps WHERE session_id = ? AND step_key = ?) ORDER BY attempt_number",
-        )
-        .all(sessionId, "execute") as Record<string, unknown>[];
-      expect(executeAttemptsAfterRerun).toHaveLength(2);
-      expect(executeAttemptsAfterRerun[0].attempt_number).toBe(1);
-      expect(executeAttemptsAfterRerun[0].ended_at).not.toBeNull();
-      expect(executeAttemptsAfterRerun[1].attempt_number).toBe(2);
-      expect(executeAttemptsAfterRerun[1].ended_at).toBeNull();
-      dbAfterRerun.close();
-
-      const r3 = await report(sessionId, {
-        stepKey: "execute",
-        status: "completed",
-        subagentOutput: "fixes applied",
-      });
-      expect(r3.nextAction).toBe("continue");
-
-      // review → pass (must=0, fixPass=true)
-      const lookAhead = await next(sessionId);
-      expect(lookAhead.stepKey).toBe("review");
-
-      const r4 = await report(sessionId, {
-        stepKey: "review",
-        status: "completed",
-        subagentOutput: "must: 0",
-      });
-      expect(r4.nextAction).toBe("continue");
-      expect(r4.message).toContain("followup");
-    });
-
-    it("巻き戻し範囲外のステップは変更しない", async () => {
-      const reset_range_test_workflow_content = `
-        const def = {
-          id: 'reset-range-test',
+          id: 'loop-rewind-test',
           steps: [
             {
               key: 'intake',
@@ -1162,38 +950,40 @@ describe("レポート", () => {
               type: 'task',
               maxRetries: 0,
               onFail: { action: 'abort' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'intake',
-              },
-              check: (ctx) => ({ status: 'pass', reasons: [] }),
+              task: { action: 'run_subagent', subagentType: 'test', buildPrompt: () => 'intake' },
+              check: () => ({ status: 'pass', reasons: [] }),
             },
             {
-              key: 'execute',
-              phase: 'Execute',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'abort' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'execute',
-              },
-              check: (ctx) => ({ status: 'pass', reasons: [] }),
-            },
-            {
-              key: 'review',
-              phase: 'Review',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'goto', target: 'execute', reset: 'downstream' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'review',
-              },
-              check: (ctx) => ({ status: 'fail', reasons: ['always fail'] }),
+              key: 'work_loop',
+              phase: 'Loop',
+              type: 'loop',
+              maxIterations: 3,
+              onExhausted: 'abort',
+              body: [
+                {
+                  key: 'execute',
+                  phase: 'Execute',
+                  type: 'task',
+                  maxRetries: 0,
+                  onFail: { action: 'abort' },
+                  task: { action: 'run_subagent', subagentType: 'test', buildPrompt: () => 'execute' },
+                  check: () => ({ status: 'pass', reasons: [] }),
+                },
+                {
+                  key: 'review',
+                  phase: 'Review',
+                  type: 'task',
+                  maxRetries: 0,
+                  onFail: { action: 'abort' },
+                  task: { action: 'run_subagent', subagentType: 'test', buildPrompt: () => 'review' },
+                  check: () => {
+                    reviewRuns++;
+                    return reviewRuns === 1
+                      ? { status: 'continue', reasons: ['must: 3 issues'] }
+                      : { status: 'pass', reasons: ['must: 0'] };
+                  },
+                },
+              ],
             },
             {
               key: 'followup',
@@ -1201,98 +991,623 @@ describe("レポート", () => {
               type: 'task',
               maxRetries: 0,
               onFail: { action: 'abort' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'followup',
-              },
-              check: (ctx) => ({ status: 'pass', reasons: [] }),
+              task: { action: 'run_subagent', subagentType: 'test', buildPrompt: () => 'followup' },
+              check: () => ({ status: 'pass', reasons: [] }),
             },
           ],
         };
         export default def;
-            `;
-      setupWorkflowFromContent("reset-range-test", reset_range_test_workflow_content);
+      `;
+      setupWorkflowFromContent("loop-rewind-test", loop_rewind_workflow_content);
 
-      const { sessionId } = await init("reset-range-test", { title: "test-title" });
-
+      const { sessionId } = await init("loop-rewind-test", { title: "test-title" });
       await next(sessionId);
       await report(sessionId, { stepKey: "intake", status: "completed", subagentOutput: "done" });
-      await next(sessionId);
-      await report(sessionId, { stepKey: "execute", status: "completed", subagentOutput: "done" });
-      await next(sessionId);
 
-      // 失敗元より後ろのステップが非 pending でも巻き戻さないことを区別できるよう、
-      // 後続ステップに sentinel を設定しておく
-      const db = new Database(getWorkflowDbPath());
-      db.run(
-        "UPDATE steps SET status = 'passed', retry_count = 5 WHERE session_id = ? AND step_key = ?",
-        [sessionId, "followup"],
-      );
-      db.close();
-
-      const r = await report(sessionId, {
+      // 1周目: execute → review が continue
+      await next(sessionId);
+      await report(sessionId, { stepKey: "execute", status: "completed", subagentOutput: "draft" });
+      await next(sessionId);
+      const repeatResult = await report(sessionId, {
         stepKey: "review",
         status: "completed",
-        subagentOutput: "review result",
+        subagentOutput: "must: 3",
       });
-      expect(r.nextAction).toBe("goto");
-      expect(r.targetStep).toBe("execute");
 
-      const s = status(sessionId);
-      expect(s.currentStep).toBe("execute");
-      const byKey = new Map(s.steps.map((step) => [step.key, step]));
+      expect(repeatResult.checkResult.status).toBe("continue");
+      expect(repeatResult.nextAction).toBe("repeat");
+      expect(repeatResult.message).toContain("iteration 2/3");
 
-      // 分岐先より前は変更しない
-      expect(byKey.get("intake")?.status).toBe("passed");
-      // 分岐先〜失敗元は pending + retryCount=0
-      expect(byKey.get("execute")?.status).toBe("pending");
-      expect(byKey.get("execute")?.retryCount).toBe(0);
-      expect(byKey.get("review")?.status).toBe("pending");
-      expect(byKey.get("review")?.retryCount).toBe(0);
-      // 失敗元より後ろは変更しない
-      expect(byKey.get("followup")?.status).toBe("passed");
-      expect(byKey.get("followup")?.retryCount).toBe(5);
+      // 本体が pending + retryCount=0 に巻き戻り、currentStep は本体先頭になる
+      const s1 = status(sessionId);
+      expect(s1.currentStep).toBe("execute");
+      const byKey1 = new Map(s1.steps.map((step) => [step.key, step]));
+      expect(byKey1.get("execute")?.status).toBe("pending");
+      expect(byKey1.get("execute")?.retryCount).toBe(0);
+      expect(byKey1.get("review")?.status).toBe("pending");
+      expect(byKey1.get("review")?.retryCount).toBe(0);
+      // loop 行は実行されず pending のまま、反復回数だけ進む
+      expect(byKey1.get("work_loop")?.status).toBe("pending");
+      // ループ外のステップは変更しない
+      expect(byKey1.get("intake")?.status).toBe("passed");
+      expect(byKey1.get("followup")?.status).toBe("pending");
+
+      const db = new Database(getWorkflowDbPath());
+      const loopRow = db
+        .query(
+          "SELECT id, loop_iteration, max_iterations, parent_step_id FROM steps WHERE session_id = ? AND step_key = ?",
+        )
+        .get(sessionId, "work_loop") as Record<string, unknown>;
+      expect(loopRow.loop_iteration).toBe(2);
+      expect(loopRow.max_iterations).toBe(3);
+      expect(loopRow.parent_step_id).toBeNull();
+
+      const executeRow = db
+        .query("SELECT parent_step_id FROM steps WHERE session_id = ? AND step_key = ?")
+        .get(sessionId, "execute") as Record<string, unknown>;
+      expect(executeRow.parent_step_id).toBe(loopRow.id);
+
+      const reviewAttempt = db
+        .query(
+          "SELECT check_status FROM step_attempts WHERE step_id = (SELECT id FROM steps WHERE session_id = ? AND step_key = ?) ORDER BY attempt_number DESC LIMIT 1",
+        )
+        .get(sessionId, "review") as Record<string, unknown>;
+      expect(reviewAttempt.check_status).toBe("continue");
+      db.close();
+
+      // 2周目: execute → review が pass → loop は passed になり followup へ抜ける
+      const rerun = await next(sessionId);
+      expect(rerun.stepKey).toBe("execute");
+      await report(sessionId, { stepKey: "execute", status: "completed", subagentOutput: "fix" });
+      await next(sessionId);
+      const passResult = await report(sessionId, {
+        stepKey: "review",
+        status: "completed",
+        subagentOutput: "must: 0",
+      });
+      expect(passResult.checkResult.status).toBe("pass");
+      expect(passResult.nextAction).toBe("continue");
+      expect(passResult.message).toContain("followup");
+
+      const s2 = status(sessionId);
+      expect(s2.steps.find((step) => step.key === "work_loop")?.status).toBe("passed");
+      expect(s2.steps.find((step) => step.key === "followup")?.status).toBe("pending");
+
+      const last = await next(sessionId);
+      expect(last.stepKey).toBe("followup");
+      await report(sessionId, { stepKey: "followup", status: "completed", subagentOutput: "done" });
+      const s3 = status(sessionId);
+      expect(s3.sessionStatus).toBe("done");
     });
 
-    it("resetの巻き戻しはcurrentStep更新と同一トランザクションで確定する", async () => {
-      const reset_atomic_workflow_content = `
+    it("ループ本体のfailはmaxRetries内でリトライされる", async () => {
+      const loop_retry_workflow_content = `
+        let failOnce = true;
         const def = {
-          id: 'reset-atomic-test',
+          id: 'loop-retry-test',
           steps: [
             {
-              key: 'execute',
-              phase: 'Execute',
+              key: 'work_loop',
+              phase: 'Loop',
+              type: 'loop',
+              maxIterations: 2,
+              onExhausted: 'abort',
+              body: [
+                {
+                  key: 'body_task',
+                  phase: 'Body',
+                  type: 'task',
+                  maxRetries: 1,
+                  onFail: { action: 'abort' },
+                  task: { action: 'run_subagent', subagentType: 'test', buildPrompt: () => 'body' },
+                  check: () => {
+                    if (failOnce) {
+                      failOnce = false;
+                      return { status: 'fail', reasons: ['once'] };
+                    }
+                    return { status: 'pass', reasons: [] };
+                  },
+                },
+              ],
+            },
+          ],
+        };
+        export default def;
+      `;
+      setupWorkflowFromContent("loop-retry-test", loop_retry_workflow_content);
+      const { sessionId } = await init("loop-retry-test", { title: "test-title" });
+
+      await next(sessionId);
+      const retried = await report(sessionId, {
+        stepKey: "body_task",
+        status: "completed",
+        subagentOutput: "first",
+      });
+      expect(retried.nextAction).toBe("retry");
+
+      const rerun = await next(sessionId);
+      expect(rerun.stepKey).toBe("body_task");
+      expect(rerun.context.loop).toEqual({ key: "work_loop", iteration: 1, maxIterations: 2 });
+      const passed = await report(sessionId, {
+        stepKey: "body_task",
+        status: "completed",
+        subagentOutput: "second",
+      });
+      expect(passed.nextAction).toBe("done");
+
+      const s = status(sessionId);
+      expect(s.sessionStatus).toBe("done");
+      expect(s.steps.find((step) => step.key === "work_loop")?.status).toBe("passed");
+    });
+
+    it("ループ外のcontinueはfail-fastする", async () => {
+      const continue_outside_workflow_content = `
+        const def = {
+          id: 'continue-outside-test',
+          steps: [
+            {
+              key: 'solo',
+              phase: 'Solo',
               type: 'task',
               maxRetries: 0,
               onFail: { action: 'abort' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'execute',
-              },
-              check: (ctx) => ({ status: 'pass', reasons: [] }),
-            },
-            {
-              key: 'review',
-              phase: 'Review',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'goto', target: 'execute', reset: 'downstream' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'review',
-              },
-              check: (ctx) => ({ status: 'fail', reasons: ['always fail'] }),
+              task: { action: 'run_subagent', subagentType: 'test', buildPrompt: () => 'solo' },
+              check: () => ({ status: 'continue', reasons: ['never valid here'] }),
             },
           ],
         };
         export default def;
-            `;
-      setupWorkflowFromContent("reset-atomic-test", reset_atomic_workflow_content);
+      `;
+      setupWorkflowFromContent("continue-outside-test", continue_outside_workflow_content);
 
-      const { sessionId } = await init("reset-atomic-test", { title: "test-title" });
+      const { sessionId } = await init("continue-outside-test", { title: "test-title" });
+      await next(sessionId);
+
+      await expect(
+        report(sessionId, { stepKey: "solo", status: "completed", subagentOutput: "done" }),
+      ).rejects.toThrow(/continue.*outside a loop/);
+
+      // fail-fast: 失敗元は failed、セッションは aborted になる
+      const s = status(sessionId);
+      expect(s.sessionStatus).toBe("aborted");
+      expect(s.steps.find((step) => step.key === "solo")?.status).toBe("failed");
+    });
+
+    it("maxIterations到達時にonExhausted=escalateを適用する", async () => {
+      const loop_exhaust_escalate_workflow_content = `
+        const def = {
+          id: 'loop-exhaust-escalate-test',
+          steps: [
+            {
+              key: 'retry_loop',
+              phase: 'Loop',
+              type: 'loop',
+              maxIterations: 2,
+              onExhausted: 'escalate',
+              body: [
+                {
+                  key: 'attempt_task',
+                  phase: 'Attempt',
+                  type: 'task',
+                  maxRetries: 0,
+                  onFail: { action: 'abort' },
+                  task: { action: 'run_subagent', subagentType: 'test', buildPrompt: () => 'attempt' },
+                  check: () => ({ status: 'continue', reasons: ['not yet'] }),
+                },
+              ],
+            },
+          ],
+        };
+        export default def;
+      `;
+      setupWorkflowFromContent(
+        "loop-exhaust-escalate-test",
+        loop_exhaust_escalate_workflow_content,
+      );
+      const { sessionId } = await init("loop-exhaust-escalate-test", { title: "test-title" });
+
+      await next(sessionId);
+      const first = await report(sessionId, {
+        stepKey: "attempt_task",
+        status: "completed",
+        subagentOutput: "try 1",
+      });
+      expect(first.nextAction).toBe("repeat");
+
+      await next(sessionId);
+      const exhausted = await report(sessionId, {
+        stepKey: "attempt_task",
+        status: "completed",
+        subagentOutput: "try 2",
+      });
+      expect(exhausted.nextAction).toBe("escalate");
+      expect(exhausted.message).toContain("maxIterations 2");
+
+      const db = new Database(getWorkflowDbPath());
+      const session = db.query("SELECT status FROM sessions WHERE id = ?").get(sessionId) as Record<
+        string,
+        unknown
+      >;
+      expect(session.status).toBe("paused");
+      db.close();
+      const s = status(sessionId);
+      expect(s.steps.find((step) => step.key === "attempt_task")?.status).toBe("failed");
+    });
+
+    it("maxIterations到達時にonExhausted=abortを適用する", async () => {
+      const loop_exhaust_abort_workflow_content = `
+        const def = {
+          id: 'loop-exhaust-abort-test',
+          steps: [
+            {
+              key: 'retry_loop',
+              phase: 'Loop',
+              type: 'loop',
+              maxIterations: 1,
+              onExhausted: 'abort',
+              body: [
+                {
+                  key: 'attempt_task',
+                  phase: 'Attempt',
+                  type: 'task',
+                  maxRetries: 0,
+                  onFail: { action: 'abort' },
+                  task: { action: 'run_subagent', subagentType: 'test', buildPrompt: () => 'attempt' },
+                  check: () => ({ status: 'continue', reasons: ['not yet'] }),
+                },
+              ],
+            },
+          ],
+        };
+        export default def;
+      `;
+      setupWorkflowFromContent("loop-exhaust-abort-test", loop_exhaust_abort_workflow_content);
+      const { sessionId } = await init("loop-exhaust-abort-test", { title: "test-title" });
+
+      await next(sessionId);
+      const exhausted = await report(sessionId, {
+        stepKey: "attempt_task",
+        status: "completed",
+        subagentOutput: "try 1",
+      });
+      expect(exhausted.nextAction).toBe("abort");
+
+      const s = status(sessionId);
+      expect(s.sessionStatus).toBe("aborted");
+      expect(s.steps.find((step) => step.key === "attempt_task")?.status).toBe("failed");
+    });
+
+    it("loop行のmaxIterationsが欠落したスナップショットはEngineErrorで拒否する", async () => {
+      const loop_snapshot_null_workflow_content = `
+        const def = {
+          id: 'loop-snapshot-null-test',
+          steps: [
+            {
+              key: 'retry_loop',
+              phase: 'Loop',
+              type: 'loop',
+              maxIterations: 2,
+              onExhausted: 'abort',
+              body: [
+                {
+                  key: 'attempt_task',
+                  phase: 'Attempt',
+                  type: 'task',
+                  maxRetries: 0,
+                  onFail: { action: 'abort' },
+                  task: { action: 'run_subagent', subagentType: 'test', buildPrompt: () => 'attempt' },
+                  check: () => ({ status: 'continue', reasons: ['not yet'] }),
+                },
+              ],
+            },
+          ],
+        };
+        export default def;
+      `;
+      setupWorkflowFromContent("loop-snapshot-null-test", loop_snapshot_null_workflow_content);
+      const { sessionId } = await init("loop-snapshot-null-test", { title: "test-title" });
+
+      await next(sessionId);
+      // スナップショット欠落（移行漏れ・手動 UPDATE）を再現する
+      const raw = new Database(getWorkflowDbPath());
+      raw.run("UPDATE steps SET max_iterations = NULL WHERE session_id = ? AND step_key = ?", [
+        sessionId,
+        "retry_loop",
+      ]);
+      raw.close();
+
+      // 「上限 1」へ丸めて onExhausted を誤発火させず、EngineError で fail-fast する
+      await expect(
+        report(sessionId, {
+          stepKey: "attempt_task",
+          status: "completed",
+          subagentOutput: "try 1",
+        }),
+      ).rejects.toThrow(
+        /Invalid loop snapshot for step "retry_loop": maxIterations is "null"; expected a positive integer/,
+      );
+    });
+
+    it("loop行のonExhaustedが未知値の場合はEngineErrorで拒否する", async () => {
+      const loop_snapshot_unknown_workflow_content = `
+        const def = {
+          id: 'loop-snapshot-unknown-test',
+          steps: [
+            {
+              key: 'retry_loop',
+              phase: 'Loop',
+              type: 'loop',
+              maxIterations: 1,
+              onExhausted: 'abort',
+              body: [
+                {
+                  key: 'attempt_task',
+                  phase: 'Attempt',
+                  type: 'task',
+                  maxRetries: 0,
+                  onFail: { action: 'abort' },
+                  task: { action: 'run_subagent', subagentType: 'test', buildPrompt: () => 'attempt' },
+                  check: () => ({ status: 'continue', reasons: ['not yet'] }),
+                },
+              ],
+            },
+          ],
+        };
+        export default def;
+      `;
+      setupWorkflowFromContent(
+        "loop-snapshot-unknown-test",
+        loop_snapshot_unknown_workflow_content,
+      );
+      const { sessionId } = await init("loop-snapshot-unknown-test", { title: "test-title" });
+
+      await next(sessionId);
+      // max_iterations はそのままに on_exhausted だけ未知値へ壊す
+      const raw = new Database(getWorkflowDbPath());
+      raw.run("UPDATE steps SET on_exhausted = 'retry' WHERE session_id = ? AND step_key = ?", [
+        sessionId,
+        "retry_loop",
+      ]);
+      raw.close();
+
+      // escalate が無言で abort に丸められない（step は failed に確定する）
+      await expect(
+        report(sessionId, {
+          stepKey: "attempt_task",
+          status: "completed",
+          subagentOutput: "try 1",
+        }),
+      ).rejects.toThrow(
+        /Invalid loop snapshot for step "retry_loop": onExhausted is "retry"; expected one of escalate \| abort/,
+      );
+
+      const s = status(sessionId);
+      expect(s.steps.find((step) => step.key === "attempt_task")?.status).toBe("failed");
+    });
+
+    it("ネストloopのcontinueは最内ループに帰属し、外側の巻き戻しで内側の反復状態が初期化される", async () => {
+      const nested_loop_workflow_content = `
+        let innerRuns = 0;
+        let outerTailRuns = 0;
+        const def = {
+          id: 'nested-loop-test',
+          steps: [
+            {
+              key: 'outer_loop',
+              phase: 'Outer',
+              type: 'loop',
+              maxIterations: 2,
+              onExhausted: 'abort',
+              body: [
+                {
+                  key: 'inner_loop',
+                  phase: 'Inner',
+                  type: 'loop',
+                  maxIterations: 3,
+                  onExhausted: 'abort',
+                  body: [
+                    {
+                      key: 'inner_task',
+                      phase: 'InnerTask',
+                      type: 'task',
+                      maxRetries: 0,
+                      onFail: { action: 'abort' },
+                      task: { action: 'run_subagent', subagentType: 'test', buildPrompt: (ctx) => 'inner loop=' + JSON.stringify(ctx.loop) },
+                      check: () => {
+                        innerRuns++;
+                        return innerRuns === 1
+                          ? { status: 'continue', reasons: ['inner again'] }
+                          : { status: 'pass', reasons: [] };
+                      },
+                    },
+                  ],
+                },
+                {
+                  key: 'outer_tail',
+                  phase: 'OuterTail',
+                  type: 'task',
+                  maxRetries: 0,
+                  onFail: { action: 'abort' },
+                  task: { action: 'run_subagent', subagentType: 'test', buildPrompt: (ctx) => 'outer loop=' + JSON.stringify(ctx.loop) },
+                  check: () => {
+                    outerTailRuns++;
+                    return outerTailRuns === 1
+                      ? { status: 'continue', reasons: ['outer again'] }
+                      : { status: 'pass', reasons: [] };
+                  },
+                },
+              ],
+            },
+          ],
+        };
+        export default def;
+      `;
+      setupWorkflowFromContent("nested-loop-test", nested_loop_workflow_content);
+      const { sessionId } = await init("nested-loop-test", { title: "test-title" });
+
+      // 1周目 inner_task: 最内ループの iteration 1 が ctx.loop から見える
+      const first = await next(sessionId);
+      expect(first.stepKey).toBe("inner_task");
+      expect(first.context.loop).toEqual({ key: "inner_loop", iteration: 1, maxIterations: 3 });
+      expect(first.prompt).toContain('loop={"key":"inner_loop","iteration":1,"maxIterations":3}');
+
+      // inner の continue は最内ループ（inner_loop）に帰属する
+      const innerRepeat = await report(sessionId, {
+        stepKey: "inner_task",
+        status: "completed",
+        subagentOutput: "inner 1",
+      });
+      expect(innerRepeat.nextAction).toBe("repeat");
+      expect(innerRepeat.message).toContain('"inner_loop" iteration 2/3');
+
+      let db = new Database(getWorkflowDbPath());
+      let loopRows = db
+        .query(
+          "SELECT step_key, loop_iteration FROM steps WHERE session_id = ? AND type = 'loop' ORDER BY step_index",
+        )
+        .all(sessionId) as Record<string, unknown>[];
+      db.close();
+      expect(loopRows).toEqual([
+        { step_key: "outer_loop", loop_iteration: 1 },
+        { step_key: "inner_loop", loop_iteration: 2 },
+      ]);
+
+      // 2周目 inner_task: pass して outer_tail へ
+      const second = await next(sessionId);
+      expect(second.stepKey).toBe("inner_task");
+      expect(second.context.loop).toEqual({ key: "inner_loop", iteration: 2, maxIterations: 3 });
+      await report(sessionId, {
+        stepKey: "inner_task",
+        status: "completed",
+        subagentOutput: "inner 2",
+      });
+
+      const tail = await next(sessionId);
+      expect(tail.stepKey).toBe("outer_tail");
+      expect(tail.context.loop).toEqual({ key: "outer_loop", iteration: 1, maxIterations: 2 });
+
+      // outer の continue は inner_loop の反復状態も初期化する
+      const outerRepeat = await report(sessionId, {
+        stepKey: "outer_tail",
+        status: "completed",
+        subagentOutput: "outer 1",
+      });
+      expect(outerRepeat.nextAction).toBe("repeat");
+      expect(outerRepeat.message).toContain('"outer_loop" iteration 2/2');
+
+      db = new Database(getWorkflowDbPath());
+      loopRows = db
+        .query(
+          "SELECT step_key, loop_iteration FROM steps WHERE session_id = ? AND type = 'loop' ORDER BY step_index",
+        )
+        .all(sessionId) as Record<string, unknown>[];
+      db.close();
+      expect(loopRows).toEqual([
+        { step_key: "outer_loop", loop_iteration: 2 },
+        { step_key: "inner_loop", loop_iteration: 1 },
+      ]);
+
+      // 3周目: inner_task(iteration 1) → pass → outer_tail → pass で完了
+      const third = await next(sessionId);
+      expect(third.stepKey).toBe("inner_task");
+      expect(third.context.loop).toEqual({ key: "inner_loop", iteration: 1, maxIterations: 3 });
+      await report(sessionId, {
+        stepKey: "inner_task",
+        status: "completed",
+        subagentOutput: "inner 3",
+      });
+
+      await next(sessionId);
+      const tailPass = await report(sessionId, {
+        stepKey: "outer_tail",
+        status: "completed",
+        subagentOutput: "outer 2",
+      });
+      expect(tailPass.nextAction).toBe("done");
+
+      const s = status(sessionId);
+      expect(s.sessionStatus).toBe("done");
+      expect(s.steps.find((step) => step.key === "outer_loop")?.status).toBe("passed");
+      expect(s.steps.find((step) => step.key === "inner_loop")?.status).toBe("passed");
+    });
+
+    it("本体が全てconditionでスキップされたloopはskippedになる", async () => {
+      const loop_skip_workflow_content = `
+        const def = {
+          id: 'loop-skip-test',
+          steps: [
+            {
+              key: 'maybe_loop',
+              phase: 'Maybe',
+              type: 'loop',
+              maxIterations: 2,
+              onExhausted: 'abort',
+              body: [
+                {
+                  key: 'skippable',
+                  phase: 'Skippable',
+                  type: 'task',
+                  maxRetries: 0,
+                  onFail: { action: 'abort' },
+                  condition: () => false,
+                  task: { action: 'run_subagent', subagentType: 'test', buildPrompt: () => 'skippable' },
+                  check: () => ({ status: 'pass', reasons: [] }),
+                },
+              ],
+            },
+          ],
+        };
+        export default def;
+      `;
+      setupWorkflowFromContent("loop-skip-test", loop_skip_workflow_content);
+      const { sessionId } = await init("loop-skip-test", { title: "test-title" });
+
+      await expect(next(sessionId)).rejects.toThrow("All steps completed");
+
+      const s = status(sessionId);
+      expect(s.sessionStatus).toBe("done");
+      expect(s.steps.find((step) => step.key === "maybe_loop")?.status).toBe("skipped");
+      expect(s.steps.find((step) => step.key === "skippable")?.status).toBe("skipped");
+    });
+
+    it("repeatの巻き戻しはcurrentStep更新と同一トランザクションで確定する", async () => {
+      const loop_atomic_workflow_content = `
+        const def = {
+          id: 'loop-atomic-test',
+          steps: [
+            {
+              key: 'review_loop',
+              phase: 'Loop',
+              type: 'loop',
+              maxIterations: 3,
+              onExhausted: 'abort',
+              body: [
+                {
+                  key: 'execute',
+                  phase: 'Execute',
+                  type: 'task',
+                  maxRetries: 0,
+                  onFail: { action: 'abort' },
+                  task: { action: 'run_subagent', subagentType: 'test', buildPrompt: () => 'execute' },
+                  check: () => ({ status: 'pass', reasons: [] }),
+                },
+                {
+                  key: 'review',
+                  phase: 'Review',
+                  type: 'task',
+                  maxRetries: 0,
+                  onFail: { action: 'abort' },
+                  task: { action: 'run_subagent', subagentType: 'test', buildPrompt: () => 'review' },
+                  check: () => ({ status: 'continue', reasons: ['again'] }),
+                },
+              ],
+            },
+          ],
+        };
+        export default def;
+      `;
+      setupWorkflowFromContent("loop-atomic-test", loop_atomic_workflow_content);
+      const { sessionId } = await init("loop-atomic-test", { title: "test-title" });
 
       await next(sessionId);
       await report(sessionId, { stepKey: "execute", status: "completed", subagentOutput: "done" });
@@ -1301,11 +1616,11 @@ describe("レポート", () => {
       // currentStep の更新を失敗させ、トランザクション途中での失敗を再現する
       const db = new Database(getWorkflowDbPath());
       db.run(`
-        CREATE TRIGGER fail_reset_commit
+        CREATE TRIGGER fail_loop_commit
         BEFORE UPDATE OF current_step ON sessions
         WHEN NEW.current_step = 'execute'
         BEGIN
-          SELECT RAISE(ABORT, 'simulated failure');
+          SELECT RAISE(ABORT, 'simulated loop failure');
         END;
       `);
       db.close();
@@ -1316,10 +1631,10 @@ describe("レポート", () => {
           status: "completed",
           subagentOutput: "review result",
         }),
-      ).rejects.toThrow(/simulated failure/);
+      ).rejects.toThrow(/simulated loop failure/);
 
-      // 巻き戻し（rewindSteps）も currentStep 更新もロールバックされ、
-      // 「steps は pending だが currentStep は失敗元」の半端な状態が残らない
+      // 巻き戻し（rewindSteps）も loop_iteration の更新もロールバックされ、
+      // 「本体は pending だが反復回数だけ進む」半端な状態が残らない
       const verifyDb = new Database(getWorkflowDbPath());
       const sessionRow = verifyDb
         .query("SELECT current_step FROM sessions WHERE id = ?")
@@ -1333,353 +1648,39 @@ describe("レポート", () => {
         .query("SELECT status FROM steps WHERE session_id = ? AND step_key = ?")
         .get(sessionId, "review") as Record<string, unknown>;
       expect(reviewStep.status).toBe("running");
+      const loopRow = verifyDb
+        .query("SELECT loop_iteration FROM steps WHERE session_id = ? AND step_key = ?")
+        .get(sessionId, "review_loop") as Record<string, unknown>;
+      expect(loopRow.loop_iteration).toBe(1);
       verifyDb.close();
     });
 
-    it("リトライ予算超過でreset対象の行がセッションに無い場合はEngineErrorになり失敗元はfailedになる", async () => {
-      const reset_missing_target_workflow_content = `
+    it("定義変更でonFail.actionが食い違う場合はEngineErrorになり失敗元はfailedになる", async () => {
+      const drift_action_workflow_content = `
         const def = {
-          id: 'reset-missing-target-test',
+          id: 'drift-action-test',
           steps: [
-            {
-              key: 'execute',
-              phase: 'Execute',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'abort' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'execute',
-              },
-              check: (ctx) => ({ status: 'pass', reasons: [] }),
-            },
             {
               key: 'review',
               phase: 'Review',
               type: 'task',
               maxRetries: 0,
-              onFail: { action: 'goto', target: 'execute', reset: 'downstream' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'review',
-              },
-              check: (ctx) => ({ status: 'fail', reasons: ['always fail'] }),
+              onFail: { action: 'abort' },
+              task: { action: 'run_subagent', subagentType: 'test', buildPrompt: () => 'review' },
+              check: () => ({ status: 'fail', reasons: ['always fail'] }),
             },
           ],
         };
         export default def;
-            `;
-      setupWorkflowFromContent("reset-missing-target-test", reset_missing_target_workflow_content);
+      `;
+      setupWorkflowFromContent("drift-action-test", drift_action_workflow_content);
 
-      const { sessionId } = await init("reset-missing-target-test", { title: "test-title" });
-
-      await next(sessionId);
-      await report(sessionId, {
-        stepKey: "execute",
-        status: "completed",
-        subagentOutput: "work done",
-      });
+      const { sessionId } = await init("drift-action-test", { title: "test-title" });
       await next(sessionId);
 
-      // 分岐先の行そのものが消えた状態を再現する
+      // セッション作成後に定義の onFail.action とセッション行が食い違った状態を再現する
       const db = new Database(getWorkflowDbPath());
-      db.run("DELETE FROM steps WHERE session_id = ? AND step_key = ?", [sessionId, "execute"]);
-      db.close();
-
-      await expect(
-        report(sessionId, {
-          stepKey: "review",
-          status: "completed",
-          subagentOutput: "review result",
-        }),
-      ).rejects.toThrow(/onFail.target "execute" was not found/);
-
-      // 失敗は確定済みで、失敗元ステップが failed として残る（running 残置を排除）
-      const verifyDb = new Database(getWorkflowDbPath());
-      const sessionRow = verifyDb
-        .query("SELECT current_step FROM sessions WHERE id = ?")
-        .get(sessionId) as Record<string, unknown>;
-      expect(sessionRow.current_step).toBe("review");
-      const reviewStep = verifyDb
-        .query("SELECT status FROM steps WHERE session_id = ? AND step_key = ?")
-        .get(sessionId, "review") as Record<string, unknown>;
-      expect(reviewStep.status).toBe("failed");
-      const reviewAttempt = verifyDb
-        .query(
-          "SELECT ended_at, check_status FROM step_attempts WHERE step_id = (SELECT id FROM steps WHERE session_id = ? AND step_key = ?) ORDER BY attempt_number DESC LIMIT 1",
-        )
-        .get(sessionId, "review") as Record<string, unknown>;
-      expect(reviewAttempt.ended_at).not.toBeNull();
-      expect(reviewAttempt.check_status).toBe("fail");
-      verifyDb.close();
-    });
-
-    it("reset指定で分岐先が失敗元より後方の場合はEngineErrorになり失敗元はfailedになる", async () => {
-      const reset_forward_target_workflow_content = `
-        const def = {
-          id: 'reset-forward-target-test',
-          steps: [
-            {
-              key: 'execute',
-              phase: 'Execute',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'abort' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'execute',
-              },
-              check: (ctx) => ({ status: 'pass', reasons: [] }),
-            },
-            {
-              key: 'review',
-              phase: 'Review',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'goto', target: 'execute', reset: 'downstream' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'review',
-              },
-              check: (ctx) => ({ status: 'fail', reasons: ['always fail'] }),
-            },
-            {
-              key: 'followup',
-              phase: 'Followup',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'abort' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'followup',
-              },
-              check: (ctx) => ({ status: 'pass', reasons: [] }),
-            },
-          ],
-        };
-        export default def;
-            `;
-      setupWorkflowFromContent("reset-forward-target-test", reset_forward_target_workflow_content);
-
-      const { sessionId } = await init("reset-forward-target-test", { title: "test-title" });
-
-      await next(sessionId);
-      await report(sessionId, {
-        stepKey: "execute",
-        status: "completed",
-        subagentOutput: "work done",
-      });
-      await next(sessionId);
-
-      // 分岐先の stepIndex が失敗元より後方へ変わった状態を再現する
-      const db = new Database(getWorkflowDbPath());
-      db.run("UPDATE steps SET step_index = 99 WHERE session_id = ? AND step_key = ?", [
-        sessionId,
-        "execute",
-      ]);
-      db.close();
-
-      await expect(
-        report(sessionId, {
-          stepKey: "review",
-          status: "completed",
-          subagentOutput: "review result",
-        }),
-      ).rejects.toThrow(/is after failing step "review"/);
-
-      // 前方 target の検証失敗でも失敗元ステップは failed に確定する
-      const verifyDb = new Database(getWorkflowDbPath());
-      const sessionRow = verifyDb
-        .query("SELECT current_step FROM sessions WHERE id = ?")
-        .get(sessionId) as Record<string, unknown>;
-      expect(sessionRow.current_step).toBe("review");
-      const reviewStep = verifyDb
-        .query("SELECT status FROM steps WHERE session_id = ? AND step_key = ?")
-        .get(sessionId, "review") as Record<string, unknown>;
-      expect(reviewStep.status).toBe("failed");
-      verifyDb.close();
-    });
-
-    it("reset宣言ステップでもcheckがpassすればonFail.targetがセッションに無くても失敗しない", async () => {
-      const reset_pass_workflow_content = `
-        const def = {
-          id: 'reset-pass-test',
-          steps: [
-            {
-              key: 'execute',
-              phase: 'Execute',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'abort' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'execute',
-              },
-              check: (ctx) => ({ status: 'pass', reasons: [] }),
-            },
-            {
-              key: 'review',
-              phase: 'Review',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'goto', target: 'execute', reset: 'downstream' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'review',
-              },
-              check: (ctx) => ({ status: 'pass', reasons: [] }),
-            },
-          ],
-        };
-        export default def;
-            `;
-      setupWorkflowFromContent("reset-pass-test", reset_pass_workflow_content);
-
-      const { sessionId } = await init("reset-pass-test", { title: "test-title" });
-
-      await next(sessionId);
-      await report(sessionId, { stepKey: "execute", status: "completed", subagentOutput: "done" });
-      await next(sessionId);
-
-      // セッション初期化後に onFail.target が実在しない key へ変わった状態でも、
-      // check が pass する report は reset の解決・検証を行わずに成功する
-      const db = new Database(getWorkflowDbPath());
-      db.run("UPDATE steps SET on_fail_target = 'ghost' WHERE session_id = ? AND step_key = ?", [
-        sessionId,
-        "review",
-      ]);
-      db.close();
-
-      const r = await report(sessionId, {
-        stepKey: "review",
-        status: "completed",
-        subagentOutput: "review result",
-      });
-      expect(r.checkResult.status).toBe("pass");
-      expect(r.nextAction).toBe("done");
-
-      const s = status(sessionId);
-      expect(s.sessionStatus).toBe("done");
-      expect(s.steps.find((step) => step.key === "review")?.status).toBe("passed");
-    });
-
-    it("リトライ予算が残っている間はresetの対象解決をしない", async () => {
-      const reset_retry_workflow_content = `
-        const def = {
-          id: 'reset-retry-test',
-          steps: [
-            {
-              key: 'execute',
-              phase: 'Execute',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'abort' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'execute',
-              },
-              check: (ctx) => ({ status: 'pass', reasons: [] }),
-            },
-            {
-              key: 'review',
-              phase: 'Review',
-              type: 'task',
-              maxRetries: 1,
-              onFail: { action: 'goto', target: 'execute', reset: 'downstream' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'review',
-              },
-              check: (ctx) => ({ status: 'fail', reasons: ['always fail'] }),
-            },
-          ],
-        };
-        export default def;
-            `;
-      setupWorkflowFromContent("reset-retry-test", reset_retry_workflow_content);
-
-      const { sessionId } = await init("reset-retry-test", { title: "test-title" });
-
-      await next(sessionId);
-      await report(sessionId, { stepKey: "execute", status: "completed", subagentOutput: "done" });
-      await next(sessionId);
-
-      // onFail.target が実在しない key へ変わっていても、リトライ予算が残る間は
-      // onFail を適用しないため解決・検証されない
-      const db = new Database(getWorkflowDbPath());
-      db.run("UPDATE steps SET on_fail_target = 'ghost' WHERE session_id = ? AND step_key = ?", [
-        sessionId,
-        "review",
-      ]);
-      db.close();
-
-      const r = await report(sessionId, {
-        stepKey: "review",
-        status: "completed",
-        subagentOutput: "review result",
-      });
-      expect(r.nextAction).toBe("retry");
-      expect(r.message).toContain("Retry 1/1");
-
-      const s = status(sessionId);
-      expect(s.steps.find((step) => step.key === "review")?.status).toBe("pending");
-    });
-
-    it("定義変更でonFail.targetが食い違う場合はEngineErrorになり失敗元はfailedになる", async () => {
-      const drift_target_workflow_content = `
-        const def = {
-          id: 'drift-target-test',
-          steps: [
-            {
-              key: 'execute',
-              phase: 'Execute',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'abort' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'execute',
-              },
-              check: (ctx) => ({ status: 'pass', reasons: [] }),
-            },
-            {
-              key: 'review',
-              phase: 'Review',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'goto', target: 'execute', reset: 'downstream' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'review',
-              },
-              check: (ctx) => ({ status: 'fail', reasons: ['always fail'] }),
-            },
-          ],
-        };
-        export default def;
-            `;
-      setupWorkflowFromContent("drift-target-test", drift_target_workflow_content);
-
-      const { sessionId } = await init("drift-target-test", { title: "test-title" });
-
-      await next(sessionId);
-      await report(sessionId, { stepKey: "execute", status: "completed", subagentOutput: "done" });
-      await next(sessionId);
-
-      // セッション作成後に定義の onFail.target とセッション行が食い違った状態を再現する
-      const db = new Database(getWorkflowDbPath());
-      db.run("UPDATE steps SET on_fail_target = 'ghost' WHERE session_id = ? AND step_key = ?", [
+      db.run("UPDATE steps SET on_fail_action = 'escalate' WHERE session_id = ? AND step_key = ?", [
         sessionId,
         "review",
       ]);
@@ -1692,278 +1693,8 @@ describe("レポート", () => {
           subagentOutput: "review result",
         }),
       ).rejects.toThrow(
-        /onFail drift detected for step "review".*target "execute".*target "ghost"/,
+        /onFail drift detected for step "review".*action "abort".*action "escalate"/,
       );
-
-      const s = status(sessionId);
-      expect(s.steps.find((step) => step.key === "review")?.status).toBe("failed");
-    });
-
-    it("定義変更でonFail.actionが食い違う場合はEngineErrorになり失敗元はfailedになる", async () => {
-      const drift_action_workflow_content = `
-        const def = {
-          id: 'drift-action-test',
-          steps: [
-            {
-              key: 'execute',
-              phase: 'Execute',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'abort' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'execute',
-              },
-              check: (ctx) => ({ status: 'pass', reasons: [] }),
-            },
-            {
-              key: 'review',
-              phase: 'Review',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'goto', target: 'execute', reset: 'downstream' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'review',
-              },
-              check: (ctx) => ({ status: 'fail', reasons: ['always fail'] }),
-            },
-          ],
-        };
-        export default def;
-            `;
-      setupWorkflowFromContent("drift-action-test", drift_action_workflow_content);
-
-      const { sessionId } = await init("drift-action-test", { title: "test-title" });
-
-      await next(sessionId);
-      await report(sessionId, { stepKey: "execute", status: "completed", subagentOutput: "done" });
-      await next(sessionId);
-
-      // セッション作成後に定義の onFail.action とセッション行が食い違った状態を再現する
-      const db = new Database(getWorkflowDbPath());
-      db.run("UPDATE steps SET on_fail_action = 'abort' WHERE session_id = ? AND step_key = ?", [
-        sessionId,
-        "review",
-      ]);
-      db.close();
-
-      await expect(
-        report(sessionId, {
-          stepKey: "review",
-          status: "completed",
-          subagentOutput: "review result",
-        }),
-      ).rejects.toThrow(/onFail drift detected for step "review".*action "goto".*action "abort"/);
-
-      const s = status(sessionId);
-      expect(s.steps.find((step) => step.key === "review")?.status).toBe("failed");
-    });
-
-    it("onFail.resetがstepsにスナップショットされ、定義と一致していればresetが適用される", async () => {
-      const reset_snapshot_workflow_content = `
-        const def = {
-          id: 'reset-snapshot-test',
-          steps: [
-            {
-              key: 'execute',
-              phase: 'Execute',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'abort' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'execute',
-              },
-              check: (ctx) => ({ status: 'pass', reasons: [] }),
-            },
-            {
-              key: 'review',
-              phase: 'Review',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'goto', target: 'execute', reset: 'downstream' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'review',
-              },
-              check: (ctx) => ({ status: 'fail', reasons: ['always fail'] }),
-            },
-          ],
-        };
-        export default def;
-            `;
-      setupWorkflowFromContent("reset-snapshot-test", reset_snapshot_workflow_content);
-
-      const { sessionId } = await init("reset-snapshot-test", { title: "test-title" });
-
-      // init 時点で定義の reset が steps 行へ凍結されている
-      const db = new Database(getWorkflowDbPath());
-      const reviewRow = db
-        .query(
-          "SELECT on_fail_action, on_fail_target, on_fail_reset FROM steps WHERE session_id = ? AND step_key = ?",
-        )
-        .get(sessionId, "review") as Record<string, unknown>;
-      expect(reviewRow.on_fail_action).toBe("goto");
-      expect(reviewRow.on_fail_target).toBe("execute");
-      expect(reviewRow.on_fail_reset).toBe("downstream");
-      db.close();
-
-      await next(sessionId);
-      await report(sessionId, { stepKey: "execute", status: "completed", subagentOutput: "done" });
-      await next(sessionId);
-
-      // 定義とスナップショットが一致するためドリフトにならず、reset が適用される
-      const r = await report(sessionId, {
-        stepKey: "review",
-        status: "completed",
-        subagentOutput: "review result",
-      });
-      expect(r.nextAction).toBe("goto");
-      expect(r.targetStep).toBe("execute");
-      expect(r.message).toContain("Rewinding steps execute..review to pending");
-    });
-
-    it("定義にonFail.resetを追記したドリフトはEngineErrorになり失敗元はfailedになる", async () => {
-      const reset_drift_add_workflow_content = `
-        const def = {
-          id: 'reset-drift-add-test',
-          steps: [
-            {
-              key: 'execute',
-              phase: 'Execute',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'abort' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'execute',
-              },
-              check: (ctx) => ({ status: 'pass', reasons: [] }),
-            },
-            {
-              key: 'review',
-              phase: 'Review',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'goto', target: 'execute', reset: 'downstream' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'review',
-              },
-              check: (ctx) => ({ status: 'fail', reasons: ['always fail'] }),
-            },
-          ],
-        };
-        export default def;
-            `;
-      setupWorkflowFromContent("reset-drift-add-test", reset_drift_add_workflow_content);
-
-      const { sessionId } = await init("reset-drift-add-test", { title: "test-title" });
-
-      await next(sessionId);
-      await report(sessionId, { stepKey: "execute", status: "completed", subagentOutput: "done" });
-      await next(sessionId);
-
-      // マイグレーション前の既存セッション（reset 未指定 = NULL）に、実行中の定義が
-      // reset を追記した状態を再現する。NULL は「reset 未指定」として食い違いになる
-      const db = new Database(getWorkflowDbPath());
-      db.run("UPDATE steps SET on_fail_reset = NULL WHERE session_id = ? AND step_key = ?", [
-        sessionId,
-        "review",
-      ]);
-      db.close();
-
-      await expect(
-        report(sessionId, {
-          stepKey: "review",
-          status: "completed",
-          subagentOutput: "review result",
-        }),
-      ).rejects.toThrow(/onFail drift detected for step "review".*reset "downstream".*reset ""/);
-
-      const s = status(sessionId);
-      expect(s.steps.find((step) => step.key === "review")?.status).toBe("failed");
-    });
-
-    it("定義からonFail.resetを削除したドリフトはEngineErrorになり失敗元はfailedになる", async () => {
-      const reset_drift_remove_workflow_content = `
-        const def = {
-          id: 'reset-drift-remove-test',
-          steps: [
-            {
-              key: 'execute',
-              phase: 'Execute',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'abort' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'execute',
-              },
-              check: (ctx) => ({ status: 'pass', reasons: [] }),
-            },
-            {
-              key: 'review',
-              phase: 'Review',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'goto', target: 'followup' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'review',
-              },
-              check: (ctx) => ({ status: 'fail', reasons: ['always fail'] }),
-            },
-            {
-              key: 'followup',
-              phase: 'Followup',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'abort' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'followup',
-              },
-              check: (ctx) => ({ status: 'pass', reasons: [] }),
-            },
-          ],
-        };
-        export default def;
-            `;
-      setupWorkflowFromContent("reset-drift-remove-test", reset_drift_remove_workflow_content);
-
-      const { sessionId } = await init("reset-drift-remove-test", { title: "test-title" });
-
-      await next(sessionId);
-      await report(sessionId, { stepKey: "execute", status: "completed", subagentOutput: "done" });
-      await next(sessionId);
-
-      // 定義側は reset を削除済み（前方 goto のためロード時検証は通過する）で、
-      // セッション行には作成時の reset が残っている状態を再現する
-      const db = new Database(getWorkflowDbPath());
-      db.run(
-        "UPDATE steps SET on_fail_reset = 'downstream' WHERE session_id = ? AND step_key = ?",
-        [sessionId, "review"],
-      );
-      db.close();
-
-      await expect(
-        report(sessionId, {
-          stepKey: "review",
-          status: "completed",
-          subagentOutput: "review result",
-        }),
-      ).rejects.toThrow(/onFail drift detected for step "review".*reset "".*reset "downstream"/);
 
       const s = status(sessionId);
       expect(s.steps.find((step) => step.key === "review")?.status).toBe("failed");

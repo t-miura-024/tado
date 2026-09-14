@@ -1,7 +1,7 @@
-import { and, desc, eq, gt, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { artifacts as artifactsTable, sessions, stepAttempts, steps } from "./schema.ts";
 import type { CheckCtx, StepCtx } from "../types/context.ts";
-import type { StepDef } from "../types/workflow-def.ts";
+import type { ExecutableStepDef, StepDef } from "../types/workflow-def.ts";
 import type { ReportInput, ReportResult, StatusResult, AttemptResult } from "../types/result.ts";
 import {
   openSessionDb,
@@ -10,26 +10,38 @@ import {
   isPathLike,
   getArtifacts,
   getGateAnswers,
+  getLoopBodyRange,
+  getLoopContext,
+  getLoopMaxIterations,
+  getLoopOnExhausted,
+  getInnermostEnclosingLoop,
   registerHookArtifacts,
+  resolveNextExecutableStep,
+  findLoopResumeStep,
+  flattenStepDefs,
   rewindSteps,
   EngineError,
 } from "./store.ts";
 import type { StepRow, TadoDb } from "./store.ts";
 
+/**
+ * リトライ予算を使い切ったステップの失敗を処理する（onFail: abort / escalate）。
+ *
+ * `continue` はループの巻き戻しとして report 本体が処理するためここには来ない。
+ */
 function handleStepFailure(
   db: TadoDb,
   sessionId: string,
   step: StepRow,
   stepDef: StepDef | undefined,
   input: ReportInput,
-  checkStatus: "pass" | "fail" | "error",
+  checkStatus: "fail" | "error",
   checkReasons: string[],
 ): ReportResult {
   const newRetryCount = step.retryCount + 1;
   const maxRetries = step.maxRetries;
 
-  // リトライ予算が残っている間は onFail を適用しない。onFail のドリフト検証や
-  // reset の対象解決はここで行わない（成功経路・リトライ経路を brick させない）。
+  // リトライ予算が残っている間は onFail を適用しない。
   if (newRetryCount <= maxRetries) {
     db.update(steps)
       .set({ retryCount: newRetryCount, status: "pending" })
@@ -49,90 +61,16 @@ function handleStepFailure(
   }
 
   const onFailAction = step.onFailAction;
-  const onFailTarget = step.onFailTarget;
-  const onFailReset = step.onFailReset ?? null;
-  const defOnFail = stepDef?.onFail;
+  const defOnFail = stepDef && stepDef.type !== "loop" ? stepDef.onFail : undefined;
 
   // セッション作成後にワークフロー定義の onFail が変わったドリフトを、ここで
   // 無言に適用しない。失敗元ステップを failed に確定させてから拒否する。
-  // reset も action/target と同様に steps へスナップショット済みで、定義側が
-  // 後から reset を追記/削除しても適用前に食い違いとして検出する。マイグレーション
-  // 前の既存セッションの NULL は「reset 未指定」として扱う（ADR-0025）。
   const defAction = defOnFail?.action ?? null;
-  const defTarget = defOnFail?.target ?? null;
-  const defReset = defOnFail?.reset ?? null;
-  if (defAction !== onFailAction || defTarget !== onFailTarget || defReset !== onFailReset) {
+  if (defAction !== onFailAction) {
     db.update(steps).set({ status: "failed" }).where(eq(steps.id, step.id)).run();
     throw new EngineError(
-      `onFail drift detected for step "${step.stepKey}" in session ${sessionId}: definition has action "${defAction ?? ""}" target "${defTarget ?? ""}" reset "${defReset ?? ""}", but the session was created with action "${onFailAction ?? ""}" target "${onFailTarget ?? ""}" reset "${onFailReset ?? ""}". Start a new session or restore the original workflow definition`,
+      `onFail drift detected for step "${step.stepKey}" in session ${sessionId}: definition has action "${defAction ?? ""}", but the session was created with action "${onFailAction ?? ""}". Start a new session or restore the original workflow definition`,
     );
-  }
-
-  // reset の適用判定はセッション作成時に凍結したスナップショットを基準にし、
-  // 対象解決・範囲検証はリトライ予算を使い切ったこの時点で行う（ADR-0025）。
-  if (onFailReset === "downstream") {
-    const resetTargetRow = onFailTarget
-      ? db
-          .select({ stepIndex: steps.stepIndex })
-          .from(steps)
-          .where(and(eq(steps.sessionId, sessionId), eq(steps.stepKey, onFailTarget)))
-          .get()
-      : undefined;
-    if (!onFailTarget || !resetTargetRow) {
-      db.update(steps).set({ status: "failed" }).where(eq(steps.id, step.id)).run();
-      throw new EngineError(
-        `Cannot reset downstream: onFail.target "${onFailTarget ?? ""}" was not found in session ${sessionId} (step "${step.stepKey}")`,
-      );
-    }
-    if (resetTargetRow.stepIndex > step.stepIndex) {
-      db.update(steps).set({ status: "failed" }).where(eq(steps.id, step.id)).run();
-      throw new EngineError(
-        `Cannot reset downstream: onFail.target "${onFailTarget}" (stepIndex ${resetTargetRow.stepIndex}) is after failing step "${step.stepKey}" (stepIndex ${step.stepIndex})`,
-      );
-    }
-    // 巻き戻しと currentStep 更新を BEGIN IMMEDIATE / COMMIT で囲み、
-    // 途中で失敗しても「steps は pending だが currentStep は失敗元」という
-    // 半端な状態を残さない（ADR-0025）。
-    db.run(sql`BEGIN IMMEDIATE`);
-    try {
-      rewindSteps(db, sessionId, resetTargetRow.stepIndex, step.stepIndex);
-      db.update(sessions)
-        .set({ currentStep: onFailTarget, updatedAt: sql`datetime('now')` })
-        .where(eq(sessions.id, sessionId))
-        .run();
-      db.run(sql`COMMIT`);
-    } catch (error) {
-      try {
-        db.run(sql`ROLLBACK`);
-      } catch {
-        // ロールバック自体が失敗しても元のエラーを優先する。
-      }
-      throw error;
-    }
-    return {
-      sessionId,
-      stepKey: input.stepKey,
-      checkResult: { status: checkStatus, reasons: checkReasons },
-      nextAction: "goto",
-      targetStep: onFailTarget,
-      message: `Step failed after ${maxRetries} retries. Rewinding steps ${onFailTarget}..${step.stepKey} to pending. Going to: ${onFailTarget}`,
-    };
-  }
-
-  if (onFailAction === "goto" && onFailTarget) {
-    db.update(steps).set({ status: "failed" }).where(eq(steps.id, step.id)).run();
-    db.update(sessions)
-      .set({ currentStep: onFailTarget, updatedAt: sql`datetime('now')` })
-      .where(eq(sessions.id, sessionId))
-      .run();
-    return {
-      sessionId,
-      stepKey: input.stepKey,
-      checkResult: { status: checkStatus, reasons: checkReasons },
-      nextAction: "goto",
-      targetStep: onFailTarget,
-      message: `Step failed after ${maxRetries} retries. Going to: ${onFailTarget}`,
-    };
   }
 
   if (onFailAction === "abort") {
@@ -226,11 +164,19 @@ export async function report(
     );
   }
 
+  // loop 行は実行ステップではない。本体のステップを report する。
+  if (step.type === "loop") {
+    db.$client.close();
+    throw new EngineError(
+      `Loop steps cannot be reported: ${input.stepKey}. Report the loop body steps instead.`,
+    );
+  }
+
   const isPath = isPathLike(resolvedWorkflowPath);
   const def = isPath
     ? await importWorkflowDefFromPath(resolvedWorkflowPath)
     : await importWorkflowDef(resolvedWorkflowPath);
-  const stepDef = def.steps.find((s) => s.key === input.stepKey);
+  const stepDef = flattenStepDefs(def.steps).find(({ def: s }) => s.key === input.stepKey)?.def;
 
   const attempt = db
     .select()
@@ -268,13 +214,17 @@ export async function report(
     }
   }
 
-  let checkStatus: "pass" | "fail" | "error" = "pass";
+  let checkStatus: "pass" | "fail" | "error" | "continue" = "pass";
   let checkReasons: string[] = [];
 
-  if (stepDef) {
+  // loop 行は上のガードで除外済みだが、型上は StepDef ユニオンなので絞り込む
+  const executableStepDef: ExecutableStepDef | undefined =
+    stepDef && stepDef.type !== "loop" ? stepDef : undefined;
+
+  if (executableStepDef) {
     const gateAnswers = getGateAnswers(db, sessionId);
 
-    if (stepDef.afterStep) {
+    if (executableStepDef.afterStep) {
       const stepCtx: StepCtx = {
         sessionDir,
         sessionId,
@@ -282,8 +232,9 @@ export async function report(
         artifacts: getArtifacts(db, sessionId),
         stepKey: step.stepKey,
         attemptNumber: attempt.attemptNumber,
+        loop: getLoopContext(db, sessionId, step.stepKey),
       };
-      const hookArtifacts = await stepDef.afterStep(stepCtx);
+      const hookArtifacts = await executableStepDef.afterStep(stepCtx);
       if (hookArtifacts.length > 0) {
         registerHookArtifacts(db, sessionId, step.stepKey, hookArtifacts, "afterStep");
       }
@@ -303,10 +254,11 @@ export async function report(
       artifactDbPath: session.artifactDbPath ?? undefined,
       attemptResult,
       artifacts,
+      loop: getLoopContext(db, sessionId, step.stepKey),
     };
 
     try {
-      const result = await stepDef.check(checkCtx);
+      const result = await executableStepDef.check(checkCtx);
       checkStatus = result.status;
       checkReasons = result.reasons;
     } catch (e) {
@@ -325,20 +277,9 @@ export async function report(
 
   if (checkStatus === "pass") {
     db.update(steps).set({ status: "passed" }).where(eq(steps.id, step.id)).run();
-
-    const nextStep = db
-      .select()
-      .from(steps)
-      .where(
-        and(
-          eq(steps.sessionId, sessionId),
-          gt(steps.stepIndex, step.stepIndex),
-          eq(steps.status, "pending"),
-        ),
-      )
-      .orderBy(steps.stepIndex)
-      .limit(1)
-      .get();
+    // このパスで本体が完了した loop 行の確定と次ステップの解決は
+    // store.resolveNextExecutableStep に集約されている（loop 行は実行対象外）。
+    const nextStep = resolveNextExecutableStep(db, sessionId, step.stepIndex);
 
     if (nextStep) {
       db.update(sessions)
@@ -367,12 +308,127 @@ export async function report(
         message: "All steps completed. Session done.",
       };
     }
-  } else {
+  }
+
+  if (checkStatus === "continue") {
     try {
-      return handleStepFailure(db, sessionId, step, stepDef, input, checkStatus, checkReasons);
+      return handleLoopContinue(db, sessionId, step, input, checkStatus, checkReasons);
     } finally {
       db.$client.close();
     }
+  }
+
+  try {
+    return handleStepFailure(db, sessionId, step, stepDef, input, checkStatus, checkReasons);
+  } finally {
+    db.$client.close();
+  }
+}
+
+/**
+ * ループ本体の check が `continue` を返したときの次イテレーション適用。
+ *
+ * 失敗元ステップを包む最も内側の loop に帰属させ、本体全体を pending +
+ * retryCount=0 に巻き戻して本体先頭から再開する。ネストした内側 loop の
+ * 反復状態も初期化される。`maxIterations` に達した場合は `onExhausted`
+ * （escalate / abort）を適用する。ループ外で返された `continue` は fail-fast する。
+ */
+function handleLoopContinue(
+  db: TadoDb,
+  sessionId: string,
+  step: StepRow,
+  input: ReportInput,
+  checkStatus: "continue",
+  checkReasons: string[],
+): ReportResult {
+  const loopRow = getInnermostEnclosingLoop(db, sessionId, step.stepKey);
+  if (!loopRow) {
+    db.update(steps).set({ status: "failed" }).where(eq(steps.id, step.id)).run();
+    db.update(sessions)
+      .set({ status: "aborted", updatedAt: sql`datetime('now')` })
+      .where(eq(sessions.id, sessionId))
+      .run();
+    throw new EngineError(
+      `check returned "continue" outside a loop for step "${step.stepKey}" in session ${sessionId}: continue is only valid in a loop body`,
+    );
+  }
+
+  const maxIterations = getLoopMaxIterations(loopRow);
+  const nextIteration = loopRow.loopIteration + 1;
+  if (nextIteration > maxIterations) {
+    db.update(steps).set({ status: "failed" }).where(eq(steps.id, step.id)).run();
+    // 欠落・未知値はより破壊的な abort へ無言で丸めず、EngineError で fail-fast する
+    //（step は failed に確定済み。onFail ドリフト検出と同方針）。
+    const onExhausted = getLoopOnExhausted(loopRow);
+    if (onExhausted === "escalate") {
+      db.update(sessions)
+        .set({ status: "paused", updatedAt: sql`datetime('now')` })
+        .where(eq(sessions.id, sessionId))
+        .run();
+      return {
+        sessionId,
+        stepKey: input.stepKey,
+        checkResult: { status: checkStatus, reasons: checkReasons },
+        nextAction: "escalate",
+        message: `Loop "${loopRow.stepKey}" reached maxIterations ${maxIterations}. Step "${step.stepKey}" failed. Human intervention required.`,
+      };
+    }
+    db.update(sessions)
+      .set({ status: "aborted", updatedAt: sql`datetime('now')` })
+      .where(eq(sessions.id, sessionId))
+      .run();
+    return {
+      sessionId,
+      stepKey: input.stepKey,
+      checkResult: { status: checkStatus, reasons: checkReasons },
+      nextAction: "abort",
+      message: `Loop "${loopRow.stepKey}" reached maxIterations ${maxIterations}. Session aborted.`,
+    };
+  }
+
+  const bodyRange = getLoopBodyRange(db, sessionId, loopRow.stepKey);
+  if (!bodyRange) {
+    db.update(steps).set({ status: "failed" }).where(eq(steps.id, step.id)).run();
+    throw new EngineError(
+      `Cannot rewind loop "${loopRow.stepKey}": loop body is empty (session ${sessionId})`,
+    );
+  }
+
+  // 本体の巻き戻し・反復回数の更新・currentStep 更新を同一トランザクションで
+  // 確定し、途中失敗で半端な状態を残さない。
+  db.run(sql`BEGIN IMMEDIATE`);
+  try {
+    rewindSteps(db, sessionId, bodyRange.fromStepIndex, bodyRange.toStepIndex);
+    db.update(steps).set({ loopIteration: nextIteration }).where(eq(steps.id, loopRow.id)).run();
+
+    // loop 内再開位置の解決は store.findLoopResumeStep に集約されている。
+    const firstStep = findLoopResumeStep(db, sessionId, loopRow);
+    if (!firstStep) {
+      throw new EngineError(
+        `Cannot rewind loop "${loopRow.stepKey}": loop body has no executable step (session ${sessionId})`,
+      );
+    }
+
+    db.update(sessions)
+      .set({ currentStep: firstStep.stepKey, updatedAt: sql`datetime('now')` })
+      .where(eq(sessions.id, sessionId))
+      .run();
+    db.run(sql`COMMIT`);
+
+    return {
+      sessionId,
+      stepKey: input.stepKey,
+      checkResult: { status: checkStatus, reasons: checkReasons },
+      nextAction: "repeat",
+      message: `Check returned continue. Loop "${loopRow.stepKey}" iteration ${nextIteration}/${maxIterations}. Rewinding to loop start: ${firstStep.stepKey}`,
+    };
+  } catch (error) {
+    try {
+      db.run(sql`ROLLBACK`);
+    } catch {
+      // ロールバック自体が失敗しても元のエラーを優先する。
+    }
+    throw error;
   }
 }
 

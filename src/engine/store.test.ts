@@ -12,14 +12,22 @@ import {
   getPreviousAttempts,
   getArtifacts,
   getGateAnswers,
+  readGateAnswers,
   readGateAnswersHistory,
   buildConditionCtx,
   getTadoHome,
   getWorkflowDbPath,
   getWorkflowsDir,
+  getLoopBodyRange,
+  getLoopContext,
   openSessionDb,
+  resolveNextExecutableStep,
+  rewindSteps,
 } from "./store.ts";
+import { init } from "./session.ts";
+import { status } from "./report.ts";
 import { artifacts, sessions, stepAttempts, steps } from "./schema.ts";
+import { createLegacyWorkflowDb } from "./__fixtures__/legacy-db.ts";
 
 const TEST_BASE_DIR = path.join(__dirname, "__test_sessions_store__");
 process.env.TADO_HOME = TEST_BASE_DIR;
@@ -116,7 +124,62 @@ describe("ストア", () => {
       return filePath;
     }
 
-    it("onFailのrequeueSource: trueをreset: downstreamへの置換を促して拒否する", async () => {
+    it("onFail.targetをgoto撤去メッセージで拒否する", async () => {
+      const filePath = writeWorkflowFile(
+        "onfail-target",
+        `
+        const def = {
+          id: 'onfail-target',
+          steps: [
+            {
+              key: 'collect',
+              phase: 'Collect',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'abort', target: 'collect' },
+              task: { action: 'run_subagent', buildPrompt: () => '' },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+        `,
+      );
+
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(EngineError);
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
+        /Invalid onFail.target in step "collect".*onFail.goto has been removed/,
+      );
+    });
+
+    it("onFail.resetをgoto撤去メッセージで拒否する", async () => {
+      const filePath = writeWorkflowFile(
+        "onfail-reset",
+        `
+        const def = {
+          id: 'onfail-reset',
+          steps: [
+            {
+              key: 'collect',
+              phase: 'Collect',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'abort', reset: 'downstream' },
+              task: { action: 'run_subagent', buildPrompt: () => '' },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+        `,
+      );
+
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
+        /Invalid onFail.reset in step "collect".*onFail.goto has been removed/,
+      );
+    });
+
+    it("onFail.requeueSourceをgoto撤去メッセージで拒否する", async () => {
       const filePath = writeWorkflowFile(
         "onfail-requeue-source",
         `
@@ -128,7 +191,7 @@ describe("ストア", () => {
               phase: 'Collect',
               type: 'task',
               maxRetries: 0,
-              onFail: { action: 'goto', target: 'collect', requeueSource: true },
+              onFail: { action: 'abort', requeueSource: true },
               task: { action: 'run_subagent', buildPrompt: () => '' },
               check: () => ({ status: 'pass', reasons: [] }),
             },
@@ -138,66 +201,24 @@ describe("ストア", () => {
         `,
       );
 
-      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(EngineError);
       await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
-        /requeueSource has been replaced by reset: "downstream"/,
-      );
-      // 移行が完了するまで本エンジンを導入できないことをメッセージで明示する
-      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
-        /Replace requeueSource: true with reset: "downstream" before deploying this engine version/,
+        /Invalid onFail.requeueSource in step "collect".*onFail.goto has been removed/,
       );
     });
 
-    it("onFailのrequeueSource: falseはフィールド削除のみを案内して拒否する", async () => {
+    it("onFail.actionのgotoを拒否する", async () => {
       const filePath = writeWorkflowFile(
-        "onfail-requeue-source-false",
+        "onfail-goto-action",
         `
         const def = {
-          id: 'onfail-requeue-source-false',
+          id: 'onfail-goto-action',
           steps: [
             {
               key: 'collect',
               phase: 'Collect',
               type: 'task',
               maxRetries: 0,
-              onFail: { action: 'abort', requeueSource: false },
-              task: { action: 'run_subagent', buildPrompt: () => '' },
-              check: () => ({ status: 'pass', reasons: [] }),
-            },
-          ],
-        };
-        export default def;
-        `,
-      );
-
-      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(EngineError);
-      // requeueSource: false は旧デフォルトと同じ挙動のため、reset の追加ではなく
-      // フィールド削除のみを案内する
-      let error: Error | undefined;
-      try {
-        await importWorkflowDefFromPath(filePath);
-      } catch (e) {
-        error = e as Error;
-      }
-      expect(error?.message).toMatch(
-        /requeueSource has been removed\. Remove the field; the default behavior \(the failing step stays failed, no reset\) is unchanged/,
-      );
-      expect(error?.message).not.toMatch(/reset: "downstream"/);
-    });
-
-    it("goto以外に指定されたresetを拒否する", async () => {
-      const filePath = writeWorkflowFile(
-        "onfail-non-goto-reset",
-        `
-        const def = {
-          id: 'onfail-non-goto-reset',
-          steps: [
-            {
-              key: 'review',
-              phase: 'Review',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'retry', reset: 'downstream' },
+              onFail: { action: 'goto' },
               task: { action: 'run_subagent', buildPrompt: () => '' },
               check: () => ({ status: 'pass', reasons: [] }),
             },
@@ -208,43 +229,16 @@ describe("ストア", () => {
       );
 
       await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
-        /Invalid onFail.reset in step "review".*reset is only valid when action is "goto"/,
+        /Invalid onFail.action "goto" in step "collect".*retry \| abort \| escalate/,
       );
     });
 
-    it("goto以外に指定されたtargetを拒否する", async () => {
+    it("human_gateのonFail.targetも拒否する（フォールバックは撤去済み）", async () => {
       const filePath = writeWorkflowFile(
-        "onfail-non-goto-target",
+        "human-gate-onfail-target",
         `
         const def = {
-          id: 'onfail-non-goto-target',
-          steps: [
-            {
-              key: 'review',
-              phase: 'Review',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'abort', target: 'x' },
-              task: { action: 'run_subagent', buildPrompt: () => '' },
-              check: () => ({ status: 'pass', reasons: [] }),
-            },
-          ],
-        };
-        export default def;
-        `,
-      );
-
-      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
-        /Invalid onFail.target in step "review".*target is only valid when action is "goto"/,
-      );
-    });
-
-    it("onFailの未知のreset値を拒否する", async () => {
-      const filePath = writeWorkflowFile(
-        "onfail-unknown-reset",
-        `
-        const def = {
-          id: 'onfail-unknown-reset',
+          id: 'human-gate-onfail-target',
           steps: [
             {
               key: 'execute',
@@ -256,12 +250,26 @@ describe("ストア", () => {
               check: () => ({ status: 'pass', reasons: [] }),
             },
             {
-              key: 'review',
-              phase: 'Review',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'goto', target: 'execute', reset: 'upstream' },
-              task: { action: 'run_subagent', buildPrompt: () => '' },
+              key: 'gate',
+              phase: 'Gate',
+              type: 'human_gate',
+              maxRetries: 1,
+              onFail: { action: 'escalate', target: 'execute' },
+              humanGate: {
+                presentArtifacts: [],
+                outcomeQuestionKey: 'decision',
+                questions: [
+                  {
+                    key: 'decision',
+                    title: '判定',
+                    type: 'single_choice',
+                    choices: [
+                      { value: 'approve', label: 'OK' },
+                      { value: 'revise', label: 'Revise' },
+                    ],
+                  },
+                ],
+              },
               check: () => ({ status: 'pass', reasons: [] }),
             },
           ],
@@ -271,134 +279,43 @@ describe("ストア", () => {
       );
 
       await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
-        /Invalid onFail.reset "upstream"/,
+        /Invalid onFail.target in step "gate".*onFail.goto has been removed/,
       );
     });
 
-    it("onFailのgoto先がstepsに存在しない場合に拒否する", async () => {
+    it("有効なloop定義とネストloopを受理する", async () => {
       const filePath = writeWorkflowFile(
-        "onfail-missing-target",
+        "valid-loop",
         `
         const def = {
-          id: 'onfail-missing-target',
+          id: 'valid-loop',
           steps: [
             {
-              key: 'review',
-              phase: 'Review',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'goto', target: 'missing_step' },
-              task: { action: 'run_subagent', buildPrompt: () => '' },
-              check: () => ({ status: 'pass', reasons: [] }),
-            },
-          ],
-        };
-        export default def;
-        `,
-      );
-
-      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
-        /Invalid onFail.target "missing_step".*step not found/,
-      );
-    });
-
-    it("reset指定で分岐先が失敗元より後方の定義を拒否する", async () => {
-      const filePath = writeWorkflowFile(
-        "onfail-forward-target",
-        `
-        const def = {
-          id: 'onfail-forward-target',
-          steps: [
-            {
-              key: 'first',
-              phase: 'First',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'goto', target: 'second', reset: 'downstream' },
-              task: { action: 'run_subagent', buildPrompt: () => '' },
-              check: () => ({ status: 'pass', reasons: [] }),
-            },
-            {
-              key: 'second',
-              phase: 'Second',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'abort' },
-              task: { action: 'run_subagent', buildPrompt: () => '' },
-              check: () => ({ status: 'pass', reasons: [] }),
-            },
-          ],
-        };
-        export default def;
-        `,
-      );
-
-      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
-        /target must not be after the failing step when reset is "downstream"/,
-      );
-    });
-
-    it("resetなしの後方gotoをロード時に拒否する", async () => {
-      const filePath = writeWorkflowFile(
-        "onfail-backward-without-reset",
-        `
-        const def = {
-          id: 'onfail-backward-without-reset',
-          steps: [
-            {
-              key: 'execute',
-              phase: 'Execute',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'abort' },
-              task: { action: 'run_subagent', buildPrompt: () => '' },
-              check: () => ({ status: 'pass', reasons: [] }),
-            },
-            {
-              key: 'review',
-              phase: 'Review',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'goto', target: 'execute' },
-              task: { action: 'run_subagent', buildPrompt: () => '' },
-              check: () => ({ status: 'pass', reasons: [] }),
-            },
-          ],
-        };
-        export default def;
-        `,
-      );
-
-      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(EngineError);
-      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
-        /Invalid onFail.target "execute" in step "review".*backward goto requires reset: "downstream"/,
-      );
-    });
-
-    it("reset: downstreamの有効な定義を受理する", async () => {
-      const filePath = writeWorkflowFile(
-        "onfail-valid-reset",
-        `
-        const def = {
-          id: 'onfail-valid-reset',
-          steps: [
-            {
-              key: 'execute',
-              phase: 'Execute',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'abort' },
-              task: { action: 'run_subagent', buildPrompt: () => '' },
-              check: () => ({ status: 'pass', reasons: [] }),
-            },
-            {
-              key: 'review',
-              phase: 'Review',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'goto', target: 'execute', reset: 'downstream' },
-              task: { action: 'run_subagent', buildPrompt: () => '' },
-              check: () => ({ status: 'pass', reasons: [] }),
+              key: 'outer_loop',
+              phase: 'Outer',
+              type: 'loop',
+              maxIterations: 2,
+              onExhausted: 'escalate',
+              body: [
+                {
+                  key: 'inner_loop',
+                  phase: 'Inner',
+                  type: 'loop',
+                  maxIterations: 3,
+                  onExhausted: 'abort',
+                  body: [
+                    {
+                      key: 'inner_task',
+                      phase: 'InnerTask',
+                      type: 'task',
+                      maxRetries: 0,
+                      onFail: { action: 'abort' },
+                      task: { action: 'run_subagent', buildPrompt: () => '' },
+                      check: () => ({ status: 'pass', reasons: [] }),
+                    },
+                  ],
+                },
+              ],
             },
           ],
         };
@@ -407,8 +324,183 @@ describe("ストア", () => {
       );
 
       const def = await importWorkflowDefFromPath(filePath);
-      expect(def.steps).toHaveLength(2);
-      expect(def.steps[1].onFail.reset).toBe("downstream");
+      expect(def.steps).toHaveLength(1);
+      expect(def.steps[0].type).toBe("loop");
+      const outer = def.steps[0];
+      if (outer.type !== "loop") throw new Error("expected loop");
+      expect(outer.body).toHaveLength(1);
+      expect(outer.body[0].type).toBe("loop");
+    });
+
+    it("loopをparallelのサブタスクに置く定義を拒否する", async () => {
+      const filePath = writeWorkflowFile(
+        "loop-in-parallel",
+        `
+        const def = {
+          id: 'loop-in-parallel',
+          steps: [
+            {
+              key: 'par',
+              phase: 'Par',
+              type: 'parallel',
+              maxRetries: 0,
+              onFail: { action: 'abort' },
+              parallel: {
+                subtasks: [
+                  {
+                    key: 'sub',
+                    type: 'loop',
+                    body: [],
+                    maxIterations: 1,
+                    onExhausted: 'abort',
+                  },
+                ],
+              },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+        `,
+      );
+
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
+        /loop cannot be nested in parallel/,
+      );
+    });
+
+    it("loop.bodyが空の定義を拒否する", async () => {
+      const filePath = writeWorkflowFile(
+        "loop-empty-body",
+        `
+        const def = {
+          id: 'loop-empty-body',
+          steps: [
+            {
+              key: 'empty_loop',
+              phase: 'Loop',
+              type: 'loop',
+              maxIterations: 1,
+              onExhausted: 'abort',
+              body: [],
+            },
+          ],
+        };
+        export default def;
+        `,
+      );
+
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
+        /Invalid loop.body in step "empty_loop".*non-empty array/,
+      );
+    });
+
+    it("loop.maxIterationsが正の整数でない定義を拒否する", async () => {
+      const filePath = writeWorkflowFile(
+        "loop-bad-iterations",
+        `
+        const def = {
+          id: 'loop-bad-iterations',
+          steps: [
+            {
+              key: 'bad_loop',
+              phase: 'Loop',
+              type: 'loop',
+              maxIterations: 0,
+              onExhausted: 'abort',
+              body: [
+                {
+                  key: 'task',
+                  phase: 'Task',
+                  type: 'task',
+                  maxRetries: 0,
+                  onFail: { action: 'abort' },
+                  task: { action: 'run_subagent', buildPrompt: () => '' },
+                  check: () => ({ status: 'pass', reasons: [] }),
+                },
+              ],
+            },
+          ],
+        };
+        export default def;
+        `,
+      );
+
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
+        /Invalid loop.maxIterations "0" in step "bad_loop".*positive integer/,
+      );
+    });
+
+    it("loop.onExhaustedがescalate/abort以外の定義を拒否する", async () => {
+      const filePath = writeWorkflowFile(
+        "loop-bad-exhausted",
+        `
+        const def = {
+          id: 'loop-bad-exhausted',
+          steps: [
+            {
+              key: 'bad_loop',
+              phase: 'Loop',
+              type: 'loop',
+              maxIterations: 1,
+              onExhausted: 'retry',
+              body: [
+                {
+                  key: 'task',
+                  phase: 'Task',
+                  type: 'task',
+                  maxRetries: 0,
+                  onFail: { action: 'abort' },
+                  task: { action: 'run_subagent', buildPrompt: () => '' },
+                  check: () => ({ status: 'pass', reasons: [] }),
+                },
+              ],
+            },
+          ],
+        };
+        export default def;
+        `,
+      );
+
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
+        /Invalid loop.onExhausted "retry" in step "bad_loop".*escalate \| abort/,
+      );
+    });
+
+    it("loop本体を含むstep keyの重複を拒否する", async () => {
+      const filePath = writeWorkflowFile(
+        "loop-duplicate-key",
+        `
+        const def = {
+          id: 'loop-duplicate-key',
+          steps: [
+            {
+              key: 'work_loop',
+              phase: 'Loop',
+              type: 'loop',
+              maxIterations: 1,
+              onExhausted: 'abort',
+              body: [
+                {
+                  key: 'work_loop',
+                  phase: 'Duplicate',
+                  type: 'task',
+                  maxRetries: 0,
+                  onFail: { action: 'abort' },
+                  task: { action: 'run_subagent', buildPrompt: () => '' },
+                  check: () => ({ status: 'pass', reasons: [] }),
+                },
+              ],
+            },
+          ],
+        };
+        export default def;
+        `,
+      );
+
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
+        /Duplicate step key "work_loop"/,
+      );
     });
 
     it("humanGate.reviseTargetStepがstepsに存在しない場合に拒否する", async () => {
@@ -504,31 +596,41 @@ describe("ストア", () => {
       );
     });
 
-    it("human_gateのonFail.targetをreviseの差し戻し先フォールバックとして受理する", async () => {
+    it("loop本体のステップをreviseTargetStepで参照できる", async () => {
       const filePath = writeWorkflowFile(
-        "human-gate-onfail-target",
+        "revise-target-in-loop",
         `
         const def = {
-          id: 'human-gate-onfail-target',
+          id: 'revise-target-in-loop',
           steps: [
             {
-              key: 'execute',
-              phase: 'Execute',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'abort' },
-              task: { action: 'run_subagent', buildPrompt: () => '' },
-              check: () => ({ status: 'pass', reasons: [] }),
+              key: 'work_loop',
+              phase: 'Loop',
+              type: 'loop',
+              maxIterations: 2,
+              onExhausted: 'abort',
+              body: [
+                {
+                  key: 'loop_task',
+                  phase: 'LoopTask',
+                  type: 'task',
+                  maxRetries: 0,
+                  onFail: { action: 'abort' },
+                  task: { action: 'run_subagent', buildPrompt: () => '' },
+                  check: () => ({ status: 'pass', reasons: [] }),
+                },
+              ],
             },
             {
               key: 'gate',
               phase: 'Gate',
               type: 'human_gate',
               maxRetries: 1,
-              onFail: { action: 'escalate', target: 'execute' },
+              onFail: { action: 'escalate' },
               humanGate: {
                 presentArtifacts: [],
                 outcomeQuestionKey: 'decision',
+                reviseTargetStep: 'loop_task',
                 questions: [
                   {
                     key: 'decision',
@@ -550,31 +652,22 @@ describe("ストア", () => {
       );
 
       const def = await importWorkflowDefFromPath(filePath);
-      expect(def.steps[1].onFail.target).toBe("execute");
+      expect(def.steps).toHaveLength(2);
     });
 
-    it("human_gateのonFail.resetをreviseTargetStepの使用を促して拒否する", async () => {
+    it("revise選択肢があるのにreviseTargetStepが無い定義を拒否する", async () => {
       const filePath = writeWorkflowFile(
-        "human-gate-onfail-reset",
+        "revise-choice-without-target",
         `
         const def = {
-          id: 'human-gate-onfail-reset',
+          id: 'revise-choice-without-target',
           steps: [
-            {
-              key: 'execute',
-              phase: 'Execute',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'abort' },
-              task: { action: 'run_subagent', buildPrompt: () => '' },
-              check: () => ({ status: 'pass', reasons: [] }),
-            },
             {
               key: 'gate',
               phase: 'Gate',
               type: 'human_gate',
               maxRetries: 1,
-              onFail: { action: 'goto', target: 'execute', reset: 'downstream' },
+              onFail: { action: 'escalate' },
               humanGate: {
                 presentArtifacts: [],
                 outcomeQuestionKey: 'decision',
@@ -599,47 +692,115 @@ describe("ストア", () => {
       );
 
       await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
-        /Invalid onFail.reset in step "gate".*reset is not supported on human_gate steps; use humanGate.reviseTargetStep/,
+        /Invalid humanGate.reviseTargetStep in step "gate".*required because outcomeQuestion "decision" offers a "revise" choice/,
       );
     });
 
-    it("human_gateのonFail.targetがゲートより後方の場合は拒否する", async () => {
+    it("taskフィールド欠落のtaskステップを拒否する", async () => {
       const filePath = writeWorkflowFile(
-        "human-gate-forward-onfail-target",
+        "task-missing-payload",
         `
         const def = {
-          id: 'human-gate-forward-onfail-target',
+          id: 'task-missing-payload',
+          steps: [
+            {
+              key: 'collect',
+              phase: 'Collect',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'abort' },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+        `,
+      );
+
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(EngineError);
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
+        /Invalid task in step "collect".*requires a "task" object/,
+      );
+    });
+
+    it("humanGateフィールド欠落のhuman_gateステップを拒否する", async () => {
+      const filePath = writeWorkflowFile(
+        "human-gate-missing-payload",
+        `
+        const def = {
+          id: 'human-gate-missing-payload',
           steps: [
             {
               key: 'gate',
               phase: 'Gate',
               type: 'human_gate',
               maxRetries: 1,
-              onFail: { action: 'escalate', target: 'later' },
+              onFail: { action: 'escalate' },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+        `,
+      );
+
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(EngineError);
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
+        /Invalid humanGate in step "gate".*requires a "humanGate" object/,
+      );
+    });
+
+    it("parallelフィールド欠落のparallelステップを拒否する", async () => {
+      const filePath = writeWorkflowFile(
+        "parallel-missing-payload",
+        `
+        const def = {
+          id: 'parallel-missing-payload',
+          steps: [
+            {
+              key: 'par',
+              phase: 'Par',
+              type: 'parallel',
+              maxRetries: 0,
+              onFail: { action: 'abort' },
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+        `,
+      );
+
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(EngineError);
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
+        /Invalid parallel in step "par".*requires a "parallel" object/,
+      );
+    });
+
+    it("humanGate.presentArtifacts欠落のhuman_gateステップを拒否する", async () => {
+      const filePath = writeWorkflowFile(
+        "human-gate-missing-present-artifacts",
+        `
+        const def = {
+          id: 'human-gate-missing-present-artifacts',
+          steps: [
+            {
+              key: 'gate',
+              phase: 'Gate',
+              type: 'human_gate',
+              maxRetries: 1,
+              onFail: { action: 'escalate' },
               humanGate: {
-                presentArtifacts: [],
                 outcomeQuestionKey: 'decision',
                 questions: [
                   {
                     key: 'decision',
                     title: '判定',
                     type: 'single_choice',
-                    choices: [
-                      { value: 'approve', label: 'OK' },
-                      { value: 'revise', label: 'Revise' },
-                    ],
+                    choices: [{ value: 'approve', label: 'OK' }],
                   },
                 ],
               },
-              check: () => ({ status: 'pass', reasons: [] }),
-            },
-            {
-              key: 'later',
-              phase: 'Later',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'abort' },
-              task: { action: 'run_subagent', buildPrompt: () => '' },
               check: () => ({ status: 'pass', reasons: [] }),
             },
           ],
@@ -649,7 +810,34 @@ describe("ストア", () => {
       );
 
       await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
-        /Invalid onFail.target "later" in step "gate".*target must not be after the gate step/,
+        /Invalid humanGate.presentArtifacts in step "gate".*must be an array/,
+      );
+    });
+
+    it("parallel.subtasks欠落のparallelステップを拒否する", async () => {
+      const filePath = writeWorkflowFile(
+        "parallel-missing-subtasks",
+        `
+        const def = {
+          id: 'parallel-missing-subtasks',
+          steps: [
+            {
+              key: 'par',
+              phase: 'Par',
+              type: 'parallel',
+              maxRetries: 0,
+              onFail: { action: 'abort' },
+              parallel: {},
+              check: () => ({ status: 'pass', reasons: [] }),
+            },
+          ],
+        };
+        export default def;
+        `,
+      );
+
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
+        /Invalid parallel.subtasks in step "par".*must be an array/,
       );
     });
   });
@@ -708,9 +896,9 @@ describe("ストア", () => {
         ["sid-existing", "wf-1", "/tmp/wf.ts", dir],
       );
       raw.run(
-        `INSERT INTO steps (session_id, step_key, step_index, phase, type, status, max_retries, on_fail_action, on_fail_target)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        ["sid-existing", "step1", 0, "Phase", "task", "running", 2, "goto", "step2"],
+        `INSERT INTO steps (session_id, step_key, step_index, phase, type, status, max_retries, on_fail_action)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ["sid-existing", "step1", 0, "Phase", "task", "running", 2, "abort"],
       );
       const existingStep = raw
         .query("SELECT id FROM steps WHERE session_id = ?")
@@ -752,16 +940,18 @@ describe("ストア", () => {
 
       const step = afterRaw
         .query(
-          "SELECT step_key, type, status, on_fail_action, on_fail_target, on_fail_reset FROM steps WHERE session_id = ?",
+          "SELECT step_key, type, status, on_fail_action, parent_step_id, loop_iteration, max_iterations, on_exhausted FROM steps WHERE session_id = ?",
         )
         .get("sid-existing") as Record<string, unknown>;
       expect(step).toBeTruthy();
       expect(step.step_key).toBe("step1");
       expect(step.type).toBe("task");
       expect(step.status).toBe("running");
-      expect(step.on_fail_action).toBe("goto");
-      expect(step.on_fail_target).toBe("step2");
-      expect(step.on_fail_reset).toBeNull();
+      expect(step.on_fail_action).toBe("abort");
+      expect(step.parent_step_id).toBeNull();
+      expect(step.loop_iteration).toBe(1);
+      expect(step.max_iterations).toBeNull();
+      expect(step.on_exhausted).toBeNull();
 
       const attempt = afterRaw
         .query(
@@ -783,17 +973,41 @@ describe("ストア", () => {
       const migrations = afterRaw
         .query("SELECT COUNT(*) AS cnt FROM __drizzle_migrations")
         .get() as Record<string, unknown>;
-      expect(migrations.cnt).toBe(4);
+      expect(migrations.cnt).toBe(6);
       const columns = afterRaw
         .query("SELECT name FROM pragma_table_info('sessions') ORDER BY name")
         .all() as { name: string }[];
       const columnNames = columns.map((c) => c.name);
       expect(columnNames).toContain("cwd");
       expect(columnNames).toContain("title");
-      const stepColumns = afterRaw
-        .query("SELECT name FROM pragma_table_info('steps') ORDER BY name")
-        .all() as { name: string }[];
-      expect(stepColumns.map((c) => c.name)).toContain("on_fail_reset");
+      const stepColumns = (
+        afterRaw.query("SELECT name FROM pragma_table_info('steps') ORDER BY name").all() as {
+          name: string;
+        }[]
+      ).map((c) => c.name);
+      // goto 用カラムは撤去され、loop 用カラムが追加されている
+      expect(stepColumns).not.toContain("on_fail_target");
+      expect(stepColumns).not.toContain("on_fail_reset");
+      expect(stepColumns).toContain("parent_step_id");
+      expect(stepColumns).toContain("loop_iteration");
+      expect(stepColumns).toContain("max_iterations");
+      expect(stepColumns).toContain("on_exhausted");
+
+      // migration 後の CHECK 制約は loop 型と continue ステータスを受理する
+      afterRaw.run(
+        `INSERT INTO steps (session_id, step_key, step_index, type, max_retries, loop_iteration, max_iterations, on_exhausted)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ["sid-existing", "loop1", 1, "loop", 0, 1, 3, "abort"],
+      );
+      afterRaw.run(
+        "INSERT INTO step_attempts (step_id, attempt_number, check_status) VALUES (?, ?, ?)",
+        [existingStep.id as number, 2, "continue"],
+      );
+      const continueAttempt = afterRaw
+        .query("SELECT check_status FROM step_attempts WHERE step_id = ? AND attempt_number = 2")
+        .get(existingStep.id as number) as Record<string, unknown>;
+      expect(continueAttempt.check_status).toBe("continue");
+
       const migratedSession = afterRaw
         .query("SELECT cwd, title FROM sessions WHERE id = ?")
         .get("sid-existing") as Record<string, unknown>;
@@ -801,6 +1015,123 @@ describe("ストア", () => {
       expect(migratedSession.title).toBeNull();
       afterRaw.close();
       db.$client.close();
+    });
+  });
+
+  describe("旧スキーマDBの自動移行", () => {
+    it("openDb単体で未適用のmigrationを適用する（dashboardのopenDb経路）", () => {
+      const dir = newSessionDir("legacy-open");
+      createLegacyWorkflowDb(TEST_BASE_DIR, {
+        sessionId: "sid-legacy",
+        workflowId: "legacy-wf",
+        workflowPath: "/tmp/legacy-wf.ts",
+        sessionDir: dir,
+        title: "legacy",
+        steps: [
+          {
+            key: "legacy_task",
+            index: 0,
+            phase: "Legacy",
+            type: "task",
+            maxRetries: 2,
+            onFailAction: "abort",
+          },
+        ],
+      });
+
+      // init を経由せず openDb だけを呼ぶ（dashboard の store / server と同じ経路）
+      const db = openDb();
+      try {
+        const columns = db.$client.query("PRAGMA table_info(steps)").all() as { name: string }[];
+        const names = columns.map((c) => c.name);
+        expect(names).toContain("parent_step_id");
+        expect(names).toContain("loop_iteration");
+        expect(names).toContain("max_iterations");
+        expect(names).toContain("on_exhausted");
+
+        // 実行経路が使う全列 SELECT（旧スキーマでは no such column で落ちていた）
+        const rows = db.select().from(steps).where(eq(steps.sessionId, "sid-legacy")).all();
+        expect(rows).toHaveLength(1);
+        expect(rows[0].loopIteration).toBe(1);
+        expect(rows[0].parentStepId).toBeNull();
+        expect(rows[0].maxIterations).toBeNull();
+        expect(rows[0].onExhausted).toBeNull();
+      } finally {
+        db.$client.close();
+      }
+    });
+
+    it("openSessionDb・status・answersは旧スキーマDBで動作する", () => {
+      const dir = newSessionDir("legacy-commands");
+      createLegacyWorkflowDb(TEST_BASE_DIR, {
+        sessionId: "sid-legacy",
+        workflowId: "legacy-wf",
+        workflowPath: "/tmp/legacy-wf.ts",
+        sessionDir: dir,
+        title: "legacy",
+        steps: [
+          {
+            key: "legacy_gate",
+            index: 0,
+            phase: "Gate",
+            type: "human_gate",
+            maxRetries: 1,
+            onFailAction: "escalate",
+          },
+          {
+            key: "legacy_task",
+            index: 1,
+            phase: "Task",
+            type: "task",
+            maxRetries: 0,
+            onFailAction: "abort",
+            status: "passed",
+          },
+        ],
+      });
+
+      // 旧スキーマの制約（pass/fail/error）内の回答を投入する
+      const raw = openRawDb();
+      const gate = raw
+        .query("SELECT id FROM steps WHERE session_id = ? AND step_key = ?")
+        .get("sid-legacy", "legacy_gate") as Record<string, unknown>;
+      raw.run(
+        "INSERT INTO step_attempts (step_id, attempt_number, result_json, check_status) VALUES (?, ?, ?, ?)",
+        [gate.id as number, 1, JSON.stringify({ decision: { value: "approve" } }), "pass"],
+      );
+      raw.close();
+
+      // status（steps 全列 SELECT）
+      const statusResult = status("sid-legacy");
+      expect(statusResult.sessionStatus).toBe("running");
+      expect(statusResult.steps.map((s) => s.key)).toEqual(["legacy_gate", "legacy_task"]);
+
+      // next の実行ステップ解決（全列 SELECT + loop 文脈）
+      const db = openSessionDb("sid-legacy");
+      try {
+        expect(resolveNextExecutableStep(db, "sid-legacy", -1)?.stepKey).toBe("legacy_gate");
+        expect(getLoopContext(db, "sid-legacy", "legacy_gate")).toBeNull();
+      } finally {
+        db.$client.close();
+      }
+
+      // answers（openSessionDb 経由の読み出し）
+      expect(readGateAnswers("sid-legacy")).toEqual({
+        legacy_gate: { decision: { value: "approve" } },
+      });
+    });
+
+    it("migrationを適用できないDBはEngineErrorで案内する", () => {
+      fs.mkdirSync(TEST_BASE_DIR, { recursive: true });
+      // migration 管理テーブルが無いのに 0002 の追加カラムを持つ旧 DB
+      // （migration を適用できず生の SQLITE_ERROR になるケース）
+      const raw = new Database(getWorkflowDbPath());
+      raw.exec("CREATE TABLE sessions (id text PRIMARY KEY NOT NULL, cwd text)");
+      raw.close();
+
+      expect(() => openSessionDb("any-session")).toThrow(EngineError);
+      expect(() => openSessionDb("any-session")).toThrow(/Unable to migrate session database: /);
+      expect(() => openSessionDb("any-session")).toThrow(/tado init/);
     });
   });
 
@@ -827,7 +1158,7 @@ describe("ストア", () => {
       db.$client.close();
     });
 
-    it("ステップのDB行をStepRow（onFailAction/onFailTarget/onFailReset含む）にマッピングする", () => {
+    it("ステップのDB行をStepRow（loop用カラム含む）にマッピングする", () => {
       const dir = newSessionDir("step-row");
       const db = openDb();
       migrateDb(db);
@@ -838,9 +1169,14 @@ describe("ストア", () => {
         ["sid-1", "wf-1", "/tmp/wf.ts", dir],
       );
       raw.run(
-        `INSERT INTO steps (session_id, step_key, step_index, phase, type, max_retries, on_fail_action, on_fail_target, on_fail_reset)
+        `INSERT INTO steps (session_id, step_key, step_index, phase, type, max_retries, on_fail_action)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ["sid-1", "step1", 0, "Phase", "task", 2, "abort"],
+      );
+      raw.run(
+        `INSERT INTO steps (session_id, step_key, step_index, phase, type, max_retries, loop_iteration, max_iterations, on_exhausted)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        ["sid-1", "step1", 0, "Phase", "task", 2, "goto", "step3", "downstream"],
+        ["sid-1", "loop1", 1, "Loop", "loop", 0, 2, 4, "escalate"],
       );
       raw.close();
 
@@ -852,9 +1188,17 @@ describe("ストア", () => {
       expect(row?.status).toBe("pending");
       expect(row?.retryCount).toBe(0);
       expect(row?.maxRetries).toBe(2);
-      expect(row?.onFailAction).toBe("goto");
-      expect(row?.onFailTarget).toBe("step3");
-      expect(row?.onFailReset).toBe("downstream");
+      expect(row?.onFailAction).toBe("abort");
+      expect(row?.parentStepId).toBeNull();
+      expect(row?.loopIteration).toBe(1);
+      expect(row?.maxIterations).toBeNull();
+      expect(row?.onExhausted).toBeNull();
+
+      const loopRow = db.select().from(steps).where(eq(steps.stepKey, "loop1")).get();
+      expect(loopRow?.type).toBe("loop");
+      expect(loopRow?.loopIteration).toBe(2);
+      expect(loopRow?.maxIterations).toBe(4);
+      expect(loopRow?.onExhausted).toBe("escalate");
       db.$client.close();
     });
 
@@ -869,9 +1213,9 @@ describe("ストア", () => {
         ["sid-1", "wf-1", "/tmp/wf.ts", dir],
       );
       raw.run(
-        `INSERT INTO steps (session_id, step_key, step_index, phase, type, max_retries, on_fail_action, on_fail_target)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        ["sid-1", "step1", 0, "Phase", "task", 2, "abort", null],
+        `INSERT INTO steps (session_id, step_key, step_index, phase, type, max_retries, on_fail_action)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ["sid-1", "step1", 0, "Phase", "task", 2, "abort"],
       );
       const stepRaw = raw.query("SELECT id FROM steps WHERE session_id = ?").get("sid-1") as Record<
         string,
@@ -960,9 +1304,9 @@ describe("ストア", () => {
         ["sid-1", "wf-1", "/tmp/wf.ts", dir],
       );
       raw.run(
-        `INSERT INTO steps (session_id, step_key, step_index, phase, type, max_retries, on_fail_action, on_fail_target)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        ["sid-1", "step1", 0, "Phase", "task", 2, "abort", null],
+        `INSERT INTO steps (session_id, step_key, step_index, phase, type, max_retries, on_fail_action)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ["sid-1", "step1", 0, "Phase", "task", 2, "abort"],
       );
       const stepRaw = raw.query("SELECT id FROM steps WHERE session_id = ?").get("sid-1") as Record<
         string,
@@ -999,9 +1343,9 @@ describe("ストア", () => {
         ["sid-1", "wf-1", "/tmp/wf.ts", dir],
       );
       raw.run(
-        `INSERT INTO steps (session_id, step_key, step_index, phase, type, max_retries, on_fail_action, on_fail_target)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        ["sid-1", "gate_step", 0, "Gate", "human_gate", 1, "escalate", null],
+        `INSERT INTO steps (session_id, step_key, step_index, phase, type, max_retries, on_fail_action)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ["sid-1", "gate_step", 0, "Gate", "human_gate", 1, "escalate"],
       );
       raw.run(
         `UPDATE steps SET status = 'passed' WHERE session_id = 'sid-1' AND step_key = 'gate_step'`,
@@ -1019,7 +1363,7 @@ describe("ストア", () => {
       );
       raw.close();
 
-      const ctx = buildConditionCtx(db, "sid-1");
+      const ctx = buildConditionCtx(db, "sid-1", "gate_step");
       const ans = ctx.gateAnswers["gate_step"]?.["decision"] as { value: string };
       expect(ans.value).toBe("approve");
       expect(ctx.artifacts).toHaveLength(1);
@@ -1206,6 +1550,96 @@ describe("ストア", () => {
       expect(() => readGateAnswersHistory("no-such-session")).toThrow(
         "Session not found: no-such-session",
       );
+    });
+  });
+
+  describe("スナップショット破損・parent_step_id循環の防御", () => {
+    function setupLoopWorkflow(id: string): void {
+      const dir = path.join(getWorkflowsDir(), id);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, "index.ts"),
+        `
+        const def = {
+          id: '${id}',
+          steps: [
+            {
+              key: 'work_loop',
+              phase: 'Loop',
+              type: 'loop',
+              maxIterations: 2,
+              onExhausted: 'abort',
+              body: [
+                {
+                  key: 'body_task',
+                  phase: 'Body',
+                  type: 'task',
+                  maxRetries: 0,
+                  onFail: { action: 'abort' },
+                  task: { action: 'run_subagent', buildPrompt: () => 'body' },
+                  check: () => ({ status: 'pass', reasons: [] }),
+                },
+              ],
+            },
+          ],
+        };
+        export default def;
+        `,
+      );
+    }
+
+    it("getLoopContextはmaxIterationsがNULLのloop行をEngineErrorで拒否する", async () => {
+      setupLoopWorkflow("loop-snapshot-null");
+      const { sessionId } = await init("loop-snapshot-null", { title: "test-title" });
+
+      // 移行漏れ・手動 UPDATE によるスナップショット欠落を再現する
+      const raw = openRawDb();
+      raw.run("UPDATE steps SET max_iterations = NULL WHERE session_id = ? AND step_key = ?", [
+        sessionId,
+        "work_loop",
+      ]);
+      raw.close();
+
+      const db = openSessionDb(sessionId);
+      try {
+        expect(() => getLoopContext(db, sessionId, "body_task")).toThrow(EngineError);
+        expect(() => getLoopContext(db, sessionId, "body_task")).toThrow(
+          /Invalid loop snapshot for step "work_loop": maxIterations is "null"; expected a positive integer/,
+        );
+      } finally {
+        db.$client.close();
+      }
+    });
+
+    it("parent_step_idの循環をEngineErrorで拒否する", async () => {
+      setupLoopWorkflow("loop-parent-cycle");
+      const { sessionId } = await init("loop-parent-cycle", { title: "test-title" });
+
+      // loop 行の親を自分の本体に向けて循環させる（破損 DB の再現）
+      const raw = openRawDb();
+      raw.run(
+        "UPDATE steps SET parent_step_id = (SELECT id FROM steps WHERE session_id = ? AND step_key = ?) WHERE session_id = ? AND step_key = ?",
+        [sessionId, "body_task", sessionId, "work_loop"],
+      );
+      raw.close();
+
+      const db = openSessionDb(sessionId);
+      try {
+        expect(() => getLoopContext(db, sessionId, "body_task")).toThrow(
+          /Cycle detected in steps\.parent_step_id chain/,
+        );
+        expect(() => getLoopBodyRange(db, sessionId, "work_loop")).toThrow(
+          /Cycle detected in steps\.parent_step_id chain/,
+        );
+        expect(() => resolveNextExecutableStep(db, sessionId, -1)).toThrow(
+          /Cycle detected in steps\.parent_step_id chain/,
+        );
+        expect(() => rewindSteps(db, sessionId, 0)).toThrow(
+          /Cycle detected in steps\.parent_step_id chain/,
+        );
+      } finally {
+        db.$client.close();
+      }
     });
   });
 });

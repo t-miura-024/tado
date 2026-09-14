@@ -6,9 +6,11 @@ import {
   getPreviewResult,
   resolveArtifactPath,
 } from "./logic.ts";
+import { toWorkflowDetailStep, type WorkflowDetail } from "./logic-core.ts";
 import { loadDashboardSnapshot, type DashboardSnapshot } from "./store.ts";
 import { listWorkflows as listWorkflowsEngine } from "../engine/workflows.ts";
 import {
+  flattenStepDefs,
   getWorkflowDbPath,
   getWorkflowsDir,
   importWorkflowDef,
@@ -23,7 +25,6 @@ import {
   stepAttempts as stepAttemptsTable,
   steps as stepsTable,
 } from "../engine/schema.ts";
-import type { GateQuestion, WorkflowDef } from "../types/workflow-def.ts";
 import { logError, logInfo, logWarn } from "./logger.ts";
 
 const DIST_DIR = path.join(import.meta.dir, "client", "dist");
@@ -124,31 +125,7 @@ export interface WorkflowListItem {
   id: string;
   description?: string;
   workflowPath: string;
-  steps: { key: string; phase: string; type: string }[];
-}
-
-export interface WorkflowDetail {
-  id: string;
-  description?: string;
-  workflowPath: string;
-  steps: {
-    key: string;
-    phase: string;
-    type: string;
-    maxRetries: number;
-    onFail: WorkflowDef["steps"][number]["onFail"];
-    hasCondition: boolean;
-    hasBeforeStep: boolean;
-    hasAfterStep: boolean;
-    task?: { action: string; subagentType?: string; readonly?: boolean };
-    humanGate?: {
-      presentArtifacts: string[];
-      outcomeQuestionKey: string;
-      reviseTargetStep?: string;
-      questions: GateQuestion[];
-    };
-    parallel?: { subtasks: { key: string; subagentType: string; readonly?: boolean }[] };
-  }[];
+  steps: { key: string; phase: string; type: string; parentKey: string | null }[];
 }
 
 const WORKFLOW_ID_RE = /^[a-zA-Z0-9._-]+$/;
@@ -178,7 +155,13 @@ async function listWorkflows(): Promise<{ workflows: WorkflowListItem[]; total: 
         id: def.id,
         description: def.description,
         workflowPath: s.path,
-        steps: def.steps.map((st) => ({ key: st.key, phase: st.phase, type: st.type })),
+        // loop 本体もキャンバスに出すため、エンジンと同じ DFS 先行順で平坦化する
+        steps: flattenStepDefs(def.steps).map(({ def: st, parentKey }) => ({
+          key: st.key,
+          phase: st.phase,
+          type: st.type,
+          parentKey,
+        })),
       });
     } catch {
       // fallback if import fails: use summary as-is
@@ -207,36 +190,9 @@ async function getWorkflowById(id: string): Promise<WorkflowDetail | null> {
       id: def.id,
       description: def.description,
       workflowPath: wp,
-      steps: def.steps.map((s) => ({
-        key: s.key,
-        phase: s.phase,
-        type: s.type,
-        maxRetries: s.maxRetries,
-        onFail: s.onFail,
-        hasCondition: typeof s.condition === "function",
-        hasBeforeStep: typeof s.beforeStep === "function",
-        hasAfterStep: typeof s.afterStep === "function",
-        task: s.task
-          ? { action: s.task.action, subagentType: s.task.subagentType, readonly: s.task.readonly }
-          : undefined,
-        humanGate: s.humanGate
-          ? {
-              presentArtifacts: s.humanGate.presentArtifacts,
-              outcomeQuestionKey: s.humanGate.outcomeQuestionKey,
-              reviseTargetStep: s.humanGate.reviseTargetStep,
-              questions: s.humanGate.questions,
-            }
-          : undefined,
-        parallel: s.parallel
-          ? {
-              subtasks: s.parallel.subtasks.map((st) => ({
-                key: st.key,
-                subagentType: st.subagentType,
-                readonly: st.readonly,
-              })),
-            }
-          : undefined,
-      })),
+      steps: flattenStepDefs(def.steps).map(({ def: step, parentKey }) =>
+        toWorkflowDetailStep(step, parentKey),
+      ),
     };
     return detail;
   } catch (e) {

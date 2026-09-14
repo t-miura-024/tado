@@ -69,6 +69,8 @@ export default function CanvasThreeEdges({
 
       for (let ei = 0; ei < edges.length; ei++) {
         const e = edges[ei]!;
+        // loop-back（反復）エッジは SVG 側の破線表現に任せ、Three の直線オーバーレイには出さない
+        if (e.kind === "loop-back") continue;
         const from = nodeMap.get(e.from);
         const to = nodeMap.get(e.to);
         if (!from || !to) continue;

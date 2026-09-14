@@ -1,8 +1,8 @@
-import type { StepDef } from "../types/workflow-def.ts";
+import type { ExecutableStepDef, StepDef } from "../types/workflow-def.ts";
 import type { GateAnswers, PromptCtx, StepCtx } from "../types/context.ts";
 import type { ArtifactInput, ArtifactRecord } from "../types/artifact.ts";
 import type { AttemptSummary, NextResult, ParallelNextResult } from "../types/result.ts";
-import { and, count, eq, gt, inArray, notInArray, sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { sessions, stepAttempts, steps } from "./schema.ts";
 import {
   openSessionDb,
@@ -12,8 +12,13 @@ import {
   getPreviousAttempts,
   getArtifacts,
   getGateAnswers,
+  getLoopContext,
   registerHookArtifacts,
   buildConditionCtx,
+  resolveExecutableStep,
+  resolveNextExecutableStep,
+  completeSessionIfDone,
+  flattenStepDefs,
   EngineError,
 } from "./store.ts";
 import type { SessionRow, StepRow, TadoDb } from "./store.ts";
@@ -95,13 +100,13 @@ function buildNextResult(
   sessionId: string,
   session: SessionRow,
   currentStep: StepRow,
-  stepDef: StepDef,
+  stepDef: ExecutableStepDef,
   promptCtx: PromptCtx,
   artifacts: ArtifactRecord[],
   attempt: AttemptInfo,
 ): NextResult {
   if (stepDef.type === "human_gate") {
-    const hg = stepDef.humanGate!;
+    const hg = stepDef.humanGate;
     const artifactList = hg.presentArtifacts
       .map((k) => artifacts.find((a) => a.artifactKey === k))
       .filter(Boolean) as ArtifactRecord[];
@@ -183,12 +188,13 @@ function buildNextResult(
         attemptNumber: attempt.attemptNumber,
         retryCount: currentStep.retryCount,
         maxRetries: stepDef.maxRetries,
+        loop: promptCtx.loop,
       },
     };
   }
 
   if (stepDef.type === "parallel") {
-    const pd = stepDef.parallel!;
+    const pd = stepDef.parallel;
     const boilerplate = buildBoilerplate(session.sessionDir, attempt);
     const subtasks = pd.subtasks.map((st) => {
       const stPrompt = appendBoilerplate(st.buildPrompt(promptCtx), boilerplate);
@@ -224,11 +230,12 @@ function buildNextResult(
         attemptNumber: attempt.attemptNumber,
         retryCount: currentStep.retryCount,
         maxRetries: stepDef.maxRetries,
+        loop: promptCtx.loop,
       },
     };
   }
 
-  const taskStep = stepDef.task!;
+  const taskStep = stepDef.task;
   const boilerplate = buildBoilerplate(session.sessionDir, attempt);
   const prompt = appendBoilerplate(taskStep.buildPrompt(promptCtx), boilerplate);
 
@@ -252,6 +259,7 @@ function buildNextResult(
       attemptNumber: attempt.attemptNumber,
       retryCount: currentStep.retryCount,
       maxRetries: stepDef.maxRetries,
+      loop: promptCtx.loop,
     },
   };
 }
@@ -281,7 +289,7 @@ async function runBeforeStep(
   sessionId: string,
   sessionDir: string,
   step: StepRow,
-  stepDef: StepDef,
+  stepDef: ExecutableStepDef,
   attemptNumber: number,
   gateAnswers: GateAnswers,
 ): Promise<ArtifactInput[] | null> {
@@ -296,6 +304,7 @@ async function runBeforeStep(
     artifacts: getArtifacts(db, sessionId),
     stepKey: step.stepKey,
     attemptNumber,
+    loop: getLoopContext(db, sessionId, step.stepKey),
   };
 
   let lastError: unknown;
@@ -367,7 +376,7 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
       ? await importWorkflowDefFromPath(resolvedWorkflowPath)
       : await importWorkflowDef(resolvedWorkflowPath);
     const stepDefsByKey = new Map<string, StepDef>();
-    for (const s of def.steps) {
+    for (const { def: s } of flattenStepDefs(def.steps)) {
       stepDefsByKey.set(s.key, s);
     }
 
@@ -408,52 +417,25 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
         throw new EngineError(`Session is aborted: ${sessionId}`);
       }
 
-      let currentStepRaw: StepRow | undefined;
-
-      if (session.currentStep) {
-        currentStepRaw = db
-          .select()
-          .from(steps)
-          .where(and(eq(steps.sessionId, sessionId), eq(steps.stepKey, session.currentStep)))
-          .get();
-      }
-
-      if (!currentStepRaw) {
-        const row = db
-          .select()
-          .from(steps)
-          .where(and(eq(steps.sessionId, sessionId), inArray(steps.status, ["pending", "running"])))
-          .orderBy(steps.stepIndex)
-          .limit(1)
-          .get();
-        if (row) {
-          currentStepRaw = row;
-        } else {
-          const allDone = db
-            .select({ cnt: count() })
-            .from(steps)
-            .where(
-              and(eq(steps.sessionId, sessionId), notInArray(steps.status, ["passed", "skipped"])),
-            )
-            .get();
-          if ((allDone?.cnt ?? 0) === 0) {
-            db.update(sessions)
-              .set({ status: "done", updatedAt: sql`datetime('now')` })
-              .where(eq(sessions.id, sessionId))
-              .run();
-            commit();
-            throw new EngineError(`All steps completed for session: ${sessionId}`);
-          }
-          throw new EngineError(`No pending steps found for session: ${sessionId}`);
+      // 本体が終端に達した loop 行の確定と「loop 行を実行対象にしない」解決
+      // （loop 内再開は本体先頭）は store.resolveExecutableStep に集約されている。
+      let currentStep = resolveExecutableStep(db, sessionId, session.currentStep);
+      if (!currentStep) {
+        if (completeSessionIfDone(db, sessionId)) {
+          commit();
+          throw new EngineError(`All steps completed for session: ${sessionId}`);
         }
+        throw new EngineError(`No pending steps found for session: ${sessionId}`);
       }
 
-      let currentStep = currentStepRaw;
-      let stepDef = stepDefsByKey.get(currentStep.stepKey);
-
-      if (!stepDef) {
+      const foundStepDef = stepDefsByKey.get(currentStep.stepKey);
+      if (!foundStepDef) {
         throw new EngineError(`Step definition not found in workflow: ${currentStep.stepKey}`);
       }
+      if (foundStepDef.type === "loop") {
+        throw new EngineError(`Loop step cannot be executed directly: ${currentStep.stepKey}`);
+      }
+      let stepDef: ExecutableStepDef = foundStepDef;
 
       if (currentStep.status === "running") {
         // Idempotent resume: the previous `next` committed an attempt but the
@@ -473,7 +455,7 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
 
         const attempt: AttemptInfo = {
           attemptNumber,
-          maxRetries: currentStepRaw.maxRetries,
+          maxRetries: currentStep.maxRetries,
           previousAttempts,
         };
 
@@ -483,6 +465,7 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
           gateAnswers: getGateAnswers(db, sessionId),
           artifactDbPath: session.artifactDbPath ?? undefined,
           artifacts,
+          loop: getLoopContext(db, sessionId, currentStep.stepKey),
         };
 
         const nextResult = buildNextResult(
@@ -501,41 +484,19 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
 
       // Condition evaluation: skip steps whose condition returns false
       while (currentStep.status === "pending" && stepDef.condition) {
-        const conditionCtx = buildConditionCtx(db, sessionId);
+        const conditionCtx = buildConditionCtx(db, sessionId, currentStep.stepKey);
         if (stepDef.condition(conditionCtx)) {
           break;
         }
         // Mark step as skipped
         db.update(steps).set({ status: "skipped" }).where(eq(steps.id, currentStep.id)).run();
 
-        // Find next pending step
-        const nextRow = db
-          .select()
-          .from(steps)
-          .where(
-            and(
-              eq(steps.sessionId, sessionId),
-              gt(steps.stepIndex, currentStep.stepIndex),
-              eq(steps.status, "pending"),
-            ),
-          )
-          .orderBy(steps.stepIndex)
-          .limit(1)
-          .get();
+        // このスキップで本体が終端に達した loop 行の確定と次ステップの解決は
+        // store.resolveNextExecutableStep が所有する（loop 行は実行対象外）。
+        const nextRow = resolveNextExecutableStep(db, sessionId, currentStep.stepIndex);
 
         if (!nextRow) {
-          const allDone = db
-            .select({ cnt: count() })
-            .from(steps)
-            .where(
-              and(eq(steps.sessionId, sessionId), notInArray(steps.status, ["passed", "skipped"])),
-            )
-            .get();
-          if ((allDone?.cnt ?? 0) === 0) {
-            db.update(sessions)
-              .set({ status: "done", updatedAt: sql`datetime('now')` })
-              .where(eq(sessions.id, sessionId))
-              .run();
+          if (completeSessionIfDone(db, sessionId)) {
             commit();
             throw new EngineError(`All steps completed for session: ${sessionId}`);
           }
@@ -543,10 +504,14 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
         }
 
         currentStep = nextRow;
-        stepDef = stepDefsByKey.get(currentStep.stepKey);
-        if (!stepDef) {
+        const nextStepDef = stepDefsByKey.get(currentStep.stepKey);
+        if (!nextStepDef) {
           throw new EngineError(`Step definition not found in workflow: ${currentStep.stepKey}`);
         }
+        if (nextStepDef.type === "loop") {
+          throw new EngineError(`Loop step cannot be executed directly: ${currentStep.stepKey}`);
+        }
+        stepDef = nextStepDef;
       }
 
       const previousAttempts = getPreviousAttempts(db, currentStep.id);
@@ -560,7 +525,7 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
         // synchronous read/allocate/write sequence.
         const attempt: AttemptInfo = {
           attemptNumber,
-          maxRetries: currentStepRaw.maxRetries,
+          maxRetries: currentStep.maxRetries,
           previousAttempts,
         };
 
@@ -570,6 +535,7 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
           gateAnswers,
           artifactDbPath: session.artifactDbPath ?? undefined,
           artifacts,
+          loop: getLoopContext(db, sessionId, currentStep.stepKey),
         };
 
         const nextResult = buildNextResult(
@@ -649,7 +615,7 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
 
       const attempt: AttemptInfo = {
         attemptNumber,
-        maxRetries: currentStepRaw.maxRetries,
+        maxRetries: reStep.maxRetries,
         previousAttempts,
       };
 
@@ -659,6 +625,7 @@ export async function next(sessionId: string, workflowPath?: string): Promise<Ne
         gateAnswers,
         artifactDbPath: reSession.artifactDbPath ?? undefined,
         artifacts: finalArtifacts,
+        loop: getLoopContext(db, sessionId, reStep.stepKey),
       };
 
       const nextResult = buildNextResult(

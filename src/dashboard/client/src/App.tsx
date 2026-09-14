@@ -8,9 +8,12 @@ import {
   formatHistoryEntry,
   mergeHistory,
   formatPreviewError,
+  getEnclosingLoop,
+  formatLoopIteration,
   ARTIFACT_FOLD_THRESHOLD,
   getPreviewReason,
 } from "@/lib/logic";
+import type { WorkflowDetail, WorkflowDetailStep } from "@/lib/logic";
 import { cn } from "@/lib/cn";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -40,6 +43,14 @@ interface StepRow {
   status: string;
   retryCount: number;
   maxRetries: number;
+  /** loop 本体ステップが属する loop 行の id（ルート直下は null）。 */
+  parentStepId: number | null;
+  /** loop 行の現在イテレーション（1 始まり）。 */
+  loopIteration: number;
+  /** loop 行の反復上限（loop 以外は null）。 */
+  maxIterations: number | null;
+  /** loop 行の反復上限到達時の戦略（loop 以外は null）。 */
+  onExhausted: string | null;
 }
 interface ArtifactRow {
   id: number;
@@ -84,30 +95,17 @@ interface WorkflowListItem {
   id: string;
   description?: string;
   workflowPath: string;
-  steps: { key: string; phase: string; type: string }[];
+  steps: { key: string; phase: string; type: string; parentKey?: string | null }[];
 }
-interface WorkflowDetail {
-  id: string;
-  description?: string;
-  workflowPath: string;
-  steps: {
-    key: string;
-    phase: string;
-    type: string;
-    maxRetries: number;
-    onFail: unknown;
-    hasCondition: boolean;
-    hasBeforeStep: boolean;
-    hasAfterStep: boolean;
-    task?: { action: string; subagentType?: string; readonly?: boolean };
-    humanGate?: {
-      presentArtifacts: string[];
-      outcomeQuestionKey: string;
-      reviseTargetStep?: string;
-      questions: unknown[];
-    };
-    parallel?: { subtasks: { key: string; subagentType: string; readonly?: boolean }[] };
-  }[];
+/** workflowDetail が未取得・不一致のときに session スナップショットから表示する最小のステップ定義。 */
+interface SessionStepSummary {
+  key: string;
+  phase: string;
+  type: WorkflowDetailStep["type"];
+  parentKey: string | null;
+  maxRetries: number;
+  maxIterations: number | null;
+  onExhausted: string | null;
 }
 interface PreviewResult {
   ok: boolean;
@@ -140,6 +138,12 @@ function statusBadgeVariant(status: string): string {
     default:
       return "secondary";
   }
+}
+
+const WORKFLOW_STEP_TYPES: readonly string[] = ["task", "human_gate", "parallel", "loop"];
+
+function isWorkflowStepType(value: string): value is WorkflowDetailStep["type"] {
+  return WORKFLOW_STEP_TYPES.includes(value);
 }
 
 export default function App() {
@@ -406,9 +410,23 @@ export default function App() {
   // Canvas workflow steps derivation — loading中は stale fallbackしない
   const canvasWorkflowSteps = useMemo(() => {
     if (workflowDetailLoading) return [];
+    const sessionStepsToCanvas = () => {
+      const stepKeyById = new Map(selectedSteps.map((s) => [s.id, s.stepKey]));
+      return selectedSteps.map((s) => ({
+        key: s.stepKey,
+        phase: s.phase,
+        type: s.type,
+        parentKey: s.parentStepId != null ? (stepKeyById.get(s.parentStepId) ?? null) : null,
+      }));
+    };
     // Prefer workflowDetail if matches selected workflow
     if (workflowDetail && selectedWorkflowId === workflowDetail.id) {
-      return workflowDetail.steps.map((s) => ({ key: s.key, phase: s.phase, type: s.type }));
+      return workflowDetail.steps.map((s) => ({
+        key: s.key,
+        phase: s.phase,
+        type: s.type,
+        parentKey: s.parentKey ?? null,
+      }));
     }
     // selectedWorkflowId がありworkflowDetailがまだ一致しない場合は定義のみ表示（selectedStepsへのフォールバックで異ワークフローの一時表示を防ぐ）
     if (selectedWorkflowId && workflowDetail && workflowDetail.id !== selectedWorkflowId) {
@@ -419,14 +437,25 @@ export default function App() {
       selectedSteps.length > 0 &&
       (!selectedWorkflowId || selectedSession.workflowId === selectedWorkflowId)
     ) {
-      return selectedSteps.map((s) => ({ key: s.stepKey, phase: s.phase, type: s.type }));
+      return sessionStepsToCanvas();
     }
     if (workflowDetail) {
-      return workflowDetail.steps.map((s) => ({ key: s.key, phase: s.phase, type: s.type }));
+      return workflowDetail.steps.map((s) => ({
+        key: s.key,
+        phase: s.phase,
+        type: s.type,
+        parentKey: s.parentKey ?? null,
+      }));
     }
     // fallback to workflow list entry
     const wf = workflows.find((w) => w.id === selectedWorkflowId);
-    if (wf) return wf.steps.map((s) => ({ key: s.key, phase: s.phase, type: s.type }));
+    if (wf)
+      return wf.steps.map((s) => ({
+        key: s.key,
+        phase: s.phase,
+        type: s.type,
+        parentKey: s.parentKey ?? null,
+      }));
     return [];
   }, [
     workflowDetail,
@@ -441,40 +470,51 @@ export default function App() {
     if (selectedSteps.length === 0) return undefined;
     if (selectedSession && selectedWorkflowId && selectedSession.workflowId !== selectedWorkflowId)
       return undefined;
-    return selectedSteps.map((s) => ({ stepKey: s.stepKey, status: s.status }));
+    return selectedSteps.map((s) => ({
+      stepKey: s.stepKey,
+      status: s.status,
+      loopIteration: s.loopIteration,
+      maxIterations: s.maxIterations,
+    }));
   }, [selectedSteps, selectedSession, selectedWorkflowId]);
 
-  // Detail pane: selected step definition
-  const detailStepDef = useMemo(() => {
+  // Detail pane: selected step definition（ワークフロー定義が取得できている場合のみ）
+  const detailStepDef = useMemo<WorkflowDetailStep | null>(() => {
     if (!selectedNodeKey) return null;
-    if (workflowDetail && selectedWorkflowId === workflowDetail.id) {
-      const found = workflowDetail.steps.find((s) => s.key === selectedNodeKey);
-      if (found) return found;
-    }
-    // fallback from session steps? minimal
+    if (!workflowDetail || selectedWorkflowId !== workflowDetail.id) return null;
+    return workflowDetail.steps.find((s) => s.key === selectedNodeKey) ?? null;
+  }, [selectedNodeKey, workflowDetail, selectedWorkflowId]);
+
+  // Detail pane fallback: session スナップショットから分かる範囲の最小定義
+  const detailStepSummary = useMemo<SessionStepSummary | null>(() => {
+    if (!selectedNodeKey) return null;
     const s = selectedSteps.find((x) => x.stepKey === selectedNodeKey);
-    if (s) {
-      return {
-        key: s.stepKey,
-        phase: s.phase ?? "",
-        type: s.type,
-        maxRetries: s.maxRetries,
-        onFail: null,
-        hasCondition: false,
-        hasBeforeStep: false,
-        hasAfterStep: false,
-        task: undefined,
-        humanGate: undefined,
-        parallel: undefined,
-      } as WorkflowDetail["steps"][number];
-    }
-    return null;
-  }, [selectedNodeKey, workflowDetail, selectedWorkflowId, selectedSteps]);
+    if (!s || !isWorkflowStepType(s.type)) return null;
+    const parent =
+      s.parentStepId != null ? selectedSteps.find((x) => x.id === s.parentStepId) : undefined;
+    return {
+      key: s.stepKey,
+      phase: s.phase ?? "",
+      type: s.type,
+      parentKey: parent?.stepKey ?? null,
+      maxRetries: s.maxRetries,
+      maxIterations: s.maxIterations,
+      onExhausted: s.onExhausted,
+    };
+  }, [selectedNodeKey, selectedSteps]);
+
+  const detailStepType = detailStepDef?.type ?? detailStepSummary?.type ?? null;
 
   const detailStepRow = useMemo(() => {
     if (!selectedNodeKey) return null;
     return selectedSteps.find((s) => s.stepKey === selectedNodeKey) ?? null;
   }, [selectedNodeKey, selectedSteps]);
+
+  // 選択中ステップを包む最内ループの反復状態（loop 行自身には外側ループのみ）
+  const detailEnclosingLoop = useMemo(() => {
+    if (!detailStepRow) return null;
+    return getEnclosingLoop(detailStepRow, selectedSteps);
+  }, [detailStepRow, selectedSteps]);
 
   const detailAttempts = useMemo(() => {
     if (!detailStepRow) return [];
@@ -905,12 +945,12 @@ export default function App() {
               <span className="font-mono text-xs font-bold text-catppuccin-text">
                 {selectedNodeKey}
               </span>
-              {detailStepDef && (
+              {detailStepType && (
                 <Badge
                   variant={statusBadgeVariant(detailStepRow?.status ?? "pending") as never}
                   className="text-[11px]"
                 >
-                  {detailStepRow?.status ?? detailStepDef.type}
+                  {detailStepRow?.status ?? detailStepType}
                 </Badge>
               )}
               <button
@@ -964,46 +1004,61 @@ export default function App() {
                       <Badge variant="secondary" className="font-mono text-[11px]">
                         phase: {detailStepDef.phase || "-"}
                       </Badge>
-                      <Badge variant="outline" className="font-mono text-[11px]">
-                        type: {detailStepDef.type}
+                      <Badge
+                        variant={detailStepDef.type === "loop" ? "secondary" : "outline"}
+                        className={cn(
+                          "font-mono text-[11px]",
+                          detailStepDef.type === "loop" ? "text-catppuccin-mauve" : "",
+                        )}
+                      >
+                        {detailStepDef.type === "loop"
+                          ? "↻ type: loop"
+                          : `type: ${detailStepDef.type}`}
                       </Badge>
-                      <span className="font-mono text-[11px] text-catppuccin-overlay0">
-                        maxRetries: {String(detailStepDef.maxRetries)}
-                      </span>
-                      {detailStepDef.hasCondition && (
+                      {detailStepDef.parentKey && (
+                        <span className="rounded bg-catppuccin-surface1 px-1 py-0.5 font-mono text-[11px] text-catppuccin-mauve">
+                          ↻ loop: {detailStepDef.parentKey}
+                        </span>
+                      )}
+                      {detailStepDef.type !== "loop" && (
+                        <span className="font-mono text-[11px] text-catppuccin-overlay0">
+                          maxRetries: {String(detailStepDef.maxRetries)}
+                        </span>
+                      )}
+                      {detailStepDef.type !== "loop" && detailStepDef.hasCondition && (
                         <span className="rounded bg-catppuccin-surface1 px-1 py-0.5 text-[11px]">
                           condition ✓
                         </span>
                       )}
-                      {detailStepDef.hasBeforeStep && (
+                      {detailStepDef.type !== "loop" && detailStepDef.hasBeforeStep && (
                         <span className="rounded bg-catppuccin-surface1 px-1 py-0.5 text-[11px]">
                           beforeStep ✓
                         </span>
                       )}
-                      {detailStepDef.hasAfterStep && (
+                      {detailStepDef.type !== "loop" && detailStepDef.hasAfterStep && (
                         <span className="rounded bg-catppuccin-surface1 px-1 py-0.5 text-[11px]">
                           afterStep ✓
                         </span>
                       )}
                     </div>
-                    {detailStepDef.task && (
-                      <div className="mt-2 rounded bg-catppuccin-base p-2 font-mono text-xs">
-                        <div className="font-semibold text-catppuccin-subtext0">task</div>
-                        <div>action: {truncate(detailStepDef.task.action, 120)}</div>
-                        {detailStepDef.task.subagentType && (
-                          <div>subagent: {detailStepDef.task.subagentType}</div>
-                        )}
-                        {detailStepDef.task.readonly != null && (
-                          <div>readonly: {String(detailStepDef.task.readonly)}</div>
-                        )}
-                      </div>
-                    )}
-                    {detailStepDef.humanGate && (
+                    {(detailStepDef.type === "task" || detailStepDef.type === "parallel") &&
+                      detailStepDef.task && (
+                        <div className="mt-2 rounded bg-catppuccin-base p-2 font-mono text-xs">
+                          <div className="font-semibold text-catppuccin-subtext0">task</div>
+                          <div>action: {truncate(detailStepDef.task.action, 120)}</div>
+                          {detailStepDef.task.subagentType && (
+                            <div>subagent: {detailStepDef.task.subagentType}</div>
+                          )}
+                          {detailStepDef.task.readonly != null && (
+                            <div>readonly: {String(detailStepDef.task.readonly)}</div>
+                          )}
+                        </div>
+                      )}
+                    {detailStepDef.type === "human_gate" && (
                       <div className="mt-2 rounded bg-catppuccin-base p-2 text-xs">
                         <div className="font-semibold text-catppuccin-subtext0">humanGate</div>
                         <div className="font-mono">
-                          present:{" "}
-                          {(detailStepDef.humanGate.presentArtifacts ?? []).join(", ") || "-"}
+                          present: {detailStepDef.humanGate.presentArtifacts.join(", ") || "-"}
                         </div>
                         <div className="font-mono">
                           outcomeKey: {detailStepDef.humanGate.outcomeQuestionKey}
@@ -1014,25 +1069,81 @@ export default function App() {
                           </div>
                         )}
                         <div className="font-mono">
-                          questions: {(detailStepDef.humanGate.questions ?? []).length}
+                          questions: {detailStepDef.humanGate.questions.length}
                         </div>
                       </div>
                     )}
-                    {detailStepDef.parallel && (
+                    {detailStepDef.type === "parallel" && (
                       <div className="mt-2 rounded bg-catppuccin-base p-2 text-xs">
                         <div className="font-semibold text-catppuccin-subtext0">parallel</div>
-                        {(detailStepDef.parallel.subtasks ?? []).map((st) => (
+                        {detailStepDef.parallel.subtasks.map((st) => (
                           <div key={st.key} className="font-mono">
                             - {st.key} ({st.subagentType}) {st.readonly ? "[readonly]" : ""}
                           </div>
                         ))}
                       </div>
                     )}
-                    {detailStepDef.onFail != null && (
+                    {detailStepDef.type === "loop" && (
+                      <div className="mt-2 rounded bg-catppuccin-base p-2 text-xs">
+                        <div className="font-semibold text-catppuccin-mauve">
+                          loop（本体を反復）
+                        </div>
+                        <div className="font-mono">
+                          maxIterations: {detailStepDef.maxIterations}
+                        </div>
+                        <div className="font-mono">onExhausted: {detailStepDef.onExhausted}</div>
+                        <div className="font-mono">
+                          body: {detailStepDef.bodyKeys.join(", ") || "-"}
+                        </div>
+                      </div>
+                    )}
+                    {detailStepDef.type !== "loop" && (
                       <div className="mt-1 font-mono text-[11px] text-catppuccin-overlay0">
                         onFail: {JSON.stringify(detailStepDef.onFail)}
                       </div>
                     )}
+                  </Card>
+                ) : detailStepSummary ? (
+                  <Card className="bg-catppuccin-surface0 p-2">
+                    <div className="flex flex-wrap gap-1.5 text-xs">
+                      <Badge variant="secondary" className="font-mono text-[11px]">
+                        phase: {detailStepSummary.phase || "-"}
+                      </Badge>
+                      <Badge
+                        variant={detailStepSummary.type === "loop" ? "secondary" : "outline"}
+                        className={cn(
+                          "font-mono text-[11px]",
+                          detailStepSummary.type === "loop" ? "text-catppuccin-mauve" : "",
+                        )}
+                      >
+                        {detailStepSummary.type === "loop"
+                          ? "↻ type: loop"
+                          : `type: ${detailStepSummary.type}`}
+                      </Badge>
+                      {detailStepSummary.parentKey && (
+                        <span className="rounded bg-catppuccin-surface1 px-1 py-0.5 font-mono text-[11px] text-catppuccin-mauve">
+                          ↻ loop: {detailStepSummary.parentKey}
+                        </span>
+                      )}
+                      {detailStepSummary.type !== "loop" && (
+                        <span className="font-mono text-[11px] text-catppuccin-overlay0">
+                          maxRetries: {String(detailStepSummary.maxRetries)}
+                        </span>
+                      )}
+                    </div>
+                    {detailStepSummary.type === "loop" && (
+                      <div className="mt-2 rounded bg-catppuccin-base p-2 text-xs">
+                        <div className="font-mono">
+                          maxIterations: {detailStepSummary.maxIterations ?? "-"}
+                        </div>
+                        <div className="font-mono">
+                          onExhausted: {detailStepSummary.onExhausted ?? "-"}
+                        </div>
+                      </div>
+                    )}
+                    <div className="mt-1 font-mono text-[11px] text-catppuccin-overlay0">
+                      source: session snapshot（ワークフロー定義は未取得）
+                    </div>
                   </Card>
                 ) : (
                   <div className="text-xs text-catppuccin-overlay0">(no definition)</div>
@@ -1062,13 +1173,32 @@ export default function App() {
                       >
                         {detailStepRow.status}
                       </span>
-                      <span className="font-mono text-catppuccin-overlay0">
-                        attempts {detailStepRow.retryCount}/{String(detailStepRow.maxRetries)}
-                      </span>
+                      {detailStepRow.type === "loop" ? (
+                        <span className="font-mono text-catppuccin-mauve">
+                          ↻{" "}
+                          {formatLoopIteration(
+                            detailStepRow.loopIteration,
+                            detailStepRow.maxIterations,
+                          )}
+                        </span>
+                      ) : (
+                        <span className="font-mono text-catppuccin-overlay0">
+                          attempts {detailStepRow.retryCount}/{String(detailStepRow.maxRetries)}
+                        </span>
+                      )}
                       <span className="ml-auto font-mono text-[11px] text-catppuccin-subtext0">
                         idx {detailStepRow.stepIndex}
                       </span>
                     </div>
+                    {detailEnclosingLoop && detailStepRow.type !== "loop" && (
+                      <div className="mt-1 font-mono text-[11px] text-catppuccin-mauve">
+                        ↻ loop {detailEnclosingLoop.key}:{" "}
+                        {formatLoopIteration(
+                          detailEnclosingLoop.iteration,
+                          detailEnclosingLoop.maxIterations,
+                        )}
+                      </div>
+                    )}
                     {detailAttempts.length > 0 && (
                       <div className="mt-2">
                         <div className="text-[11px] font-semibold text-catppuccin-subtext0">
@@ -1076,8 +1206,23 @@ export default function App() {
                         </div>
                         <div className="flex flex-col gap-1 font-mono text-[11px]">
                           {detailAttempts.map((a) => (
-                            <div key={a.id} className="truncate text-catppuccin-text">
-                              {a.startedAt ?? ""} #{a.attemptNumber} check:{a.checkStatus ?? "-"}
+                            <div key={a.id} className="truncate">
+                              <span className="text-catppuccin-text">
+                                {a.startedAt ?? ""} #{a.attemptNumber} check:
+                              </span>
+                              <span
+                                className={cn(
+                                  a.checkStatus === "continue"
+                                    ? "text-catppuccin-mauve"
+                                    : a.checkStatus === "pass"
+                                      ? "text-catppuccin-green"
+                                      : a.checkStatus === "fail" || a.checkStatus === "error"
+                                        ? "text-catppuccin-red"
+                                        : "text-catppuccin-text",
+                                )}
+                              >
+                                {a.checkStatus ?? "-"}
+                              </span>
                             </div>
                           ))}
                         </div>
