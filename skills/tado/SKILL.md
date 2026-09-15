@@ -76,7 +76,7 @@ tado next --session <id>
   "stepKey": "approve",
   "stepType": "human_gate",
   "action": "human_gate",
-  "prompt": "## Human Gate: 仕様確認\n\n### 確認する成果物\n...\n\n### 設問一覧 (1件 判定設問: `decision`)\n- 判定設問: `decision`\n\n#### Q1/1: decision - 判定 (type: choice_with_input, 必須)\n- key: `decision`\n- title: \"判定\"\n- type: `choice_with_input`\n- choices:\n  - `approve`: 承認\n  - `revise`: 修正が必要 [input: required: true, placeholder: \"修正理由...\", maxLength: 500]\n  - `abort`: 中断\n\n### 人間の確認が必要です\n...",
+  "prompt": "## Human Gate: 仕様確認\n\n### 確認する成果物\n...\n\n### 設問一覧 (1件 判定設問: `decision`)\n- 判定設問: `decision`\n\n#### Q1/1: decision - 判定 (type: choice_with_input, 必須)\n- key: `decision`\n- title: \"判定\"\n- type: `choice_with_input`\n- choices:\n  - `approve`: 承認\n  - `request_changes`: 修正が必要 [input: required: true, placeholder: \"修正理由...\", maxLength: 500]\n  - `abort`: 中断\n\n### 人間の確認が必要です\n...",
   "constraints": { "mustCallTaskTool": false, "readonly": true, "reportAfterCompletion": false }
 }
 ```
@@ -150,10 +150,9 @@ human_gate の回答を人間から直接受け付ける対話コマンドです
 - 現在のステップが human_gate でない場合はエラーになる
 - TTY なしでの実行試行も `gate_events` テーブルに監査記録として残る
 - 各設問を `clack.select/autocomplete` → 条件付き `clack.text` で順次提示し、進捗 `Qn/M` と設問タイトル・説明を表示する。付帯入力 `input` がある選択肢を選んだ場合は追加入力を求め、必須・文字数バリデーションが即時に行われ未達なら再入力を求める。途中キャンセルは原子的に全破棄して `running` のまま再試行可能
-- 判定設問（`outcomeQuestionKey` で指名）の回答 `value` は文字列の完全一致で判定される。差し戻しとして解釈されるのは値が文字列 `revise` のときだけ、中断は値が文字列 `abort` のときだけである:
-  - 値が `revise`（完全一致）: `reviseTargetStep` 以降を pending + retryCount=0 に戻して巻き戻す。選択肢に `value: "revise"` があるゲートでは `reviseTargetStep` が必須（未指定なら EngineError。ロード時検証も選択肢の `value` が `revise` の場合にしか発火しない）。ループをまたぐ差し戻しはループの反復状態も初期化する
+- 判定設問（`outcomeQuestionKey` で指名）の回答 `value` は文字列の完全一致で判定される。human_gate は確認と回答保存のみを責務とし、巻き戻しは行わない:
   - 値が `abort`（完全一致）: セッションを中断する
-  - それ以外の値（`approve`、および `{ value: "rework", label: "差し戻し" }` のような同義語を含む）: すべて承認として扱われ、ゲートを通過する
+  - それ以外の値（`approve` や `{ value: "request_changes", label: "修正が必要" }` を含む）: すべて承認として扱われ、ゲートを通過する。巻き戻しが必要な場合は loop 本体の check が `gateAnswers` を読んで判定 `continue` を返し、遷移 `repeat` で本体先頭へ巻き戻す
 
 ### answers
 
@@ -163,7 +162,7 @@ tado answers --session <id> [--step <key>] [--json] [--all]
 
 記録済みのゲート回答を読み出す読み取り専用コマンドです。人間・エージェント・外部ツールが回答を確認・監査する公式窓口であり、`workflow.db` を直接読まずにこのコマンドを使ってください。
 
-- デフォルトはゲートごとの最新試行の回答（approve / revise を問わず）。回答がまだ記録されていないゲートは含めない
+- デフォルトはゲートごとの最新試行の回答。回答がまだ記録されていないゲートは含めない
 - `--all` を指定すると、最新試行に限らず全試行の回答履歴を返す。最新試行が未回答のゲートはデフォルト出力に過去の回答が含まれないため、履歴の確認には `--all` を使う
 - `--step <key>` を指定すると、単一ゲートステップの回答のみに絞り込む
 - `--json` を指定すると `{"sessionId": "...", "gateAnswers": {...}}` 形式の機械可読 JSON で出力する。回答が 0 件の場合も空の `gateAnswers` を返す。未指定時は人間向けテキストで出力する
@@ -242,7 +241,7 @@ const def: WorkflowDef = {
             choices: [
               { value: "approve", label: "承認" },
               {
-                value: "revise",
+                value: "request_changes",
                 label: "修正が必要",
                 input: {
                   required: true,
@@ -254,7 +253,6 @@ const def: WorkflowDef = {
             ],
           },
         ],
-        reviseTargetStep: "phase1_planner",
       },
       check: (_ctx: CheckCtx): CheckResult => ({ status: "pass", reasons: [] }),
     },
@@ -266,7 +264,7 @@ export default def;
 
 ### フック共通 ctx の `gateAnswers`
 
-全フック（`condition` / `check` / `buildPrompt` / `beforeStep` / `afterStep`）の ctx から `gateAnswers[stepKey][questionKey]` でゲート回答を参照できる。値はゲートごとの最新試行の回答（approve / revise を問わず）で、未回答のゲートは含まれない。
+全フック（`condition` / `check` / `buildPrompt` / `beforeStep` / `afterStep`）の ctx から `gateAnswers[stepKey][questionKey]` でゲート回答を参照できる。値はゲートごとの最新試行の回答で、未回答のゲートは含まれない。分岐判断は loop 本体の check がこの回答を読んで行う。
 
 ### ループ（`type: "loop"`）
 
@@ -301,7 +299,7 @@ export default def;
 - ネストした loop の `continue` は最内ループに帰属する。外側 loop の巻き戻しでは内側 loop の反復状態も初期化される
 - loop を `parallel` の子（`subtasks`）に置くことはできない（型とロード時検証で拒否）
 - ループ文脈は全フック ctx の `loop`（`{ key, iteration, maxIterations }`、ループ外は `null`）と `next` の `context.loop` から参照できる
-- `onFail` は `retry` / `abort` / `escalate` のみ。`onFail.goto` / `target` / `reset` は撤去済みで、前方ジャンプの代替はない（旧 goto の `reset: "downstream"` は loop の `continue` と human_gate の revise に置き換わった）
+- `onFail` は `retry` / `abort` / `escalate` のみ。`onFail.goto` / `target` / `reset` は撤去済みで、前方ジャンプの代替はない（旧 goto の `reset: "downstream"` は loop 本体の check が返す `continue` と遷移 `repeat` に置き換わった。human_gate の差し戻しは撤去済み）
 
 最小テンプレートはリポジトリの `examples/simple-workflow.ts` を参照。
 

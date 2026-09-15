@@ -503,12 +503,12 @@ describe("ストア", () => {
       );
     });
 
-    it("humanGate.reviseTargetStepがstepsに存在しない場合に拒否する", async () => {
+    it("humanGate.reviseTargetStepがある定義を拒否する", async () => {
       const filePath = writeWorkflowFile(
-        "human-gate-missing-revise-target",
+        "human-gate-revise-target-removed",
         `
         const def = {
-          id: 'human-gate-missing-revise-target',
+          id: 'human-gate-revise-target-removed',
           steps: [
             {
               key: 'gate',
@@ -541,11 +541,11 @@ describe("ストア", () => {
       );
 
       await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
-        /Invalid humanGate.reviseTargetStep "ghost" in step "gate".*step not found/,
+        /Invalid humanGate\.reviseTargetStep.*revise has been removed/,
       );
     });
 
-    it("humanGate.reviseTargetStepがゲートより後方のステップを指す場合に拒否する", async () => {
+    it("humanGate.reviseTargetStepが後方ステップを指しても撤去エラーで拒否する", async () => {
       const filePath = writeWorkflowFile(
         "human-gate-forward-revise-target",
         `
@@ -592,11 +592,11 @@ describe("ストア", () => {
       );
 
       await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
-        /Invalid humanGate.reviseTargetStep "later" in step "gate".*target must not be after the gate step/,
+        /Invalid humanGate\.reviseTargetStep.*revise has been removed/,
       );
     });
 
-    it("loop本体のステップをreviseTargetStepで参照できる", async () => {
+    it("loop本体のステップを指すreviseTargetStepも拒否する", async () => {
       const filePath = writeWorkflowFile(
         "revise-target-in-loop",
         `
@@ -651,11 +651,15 @@ describe("ストア", () => {
         `,
       );
 
-      const def = await importWorkflowDefFromPath(filePath);
-      expect(def.steps).toHaveLength(2);
+      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
+        /Invalid humanGate\.reviseTargetStep.*revise has been removed/,
+      );
     });
 
-    it("revise選択肢があるのにreviseTargetStepが無い定義を拒否する", async () => {
+    it("revise選択肢のみの定義は受理する", async () => {
+      // 旧値の素通し確認用: "revise" は現行語彙 request_changes の旧値。
+      // 配線（loop本体内配置＋gateAnswersを読むcheck）はワークフロー作者の責務であり、
+      // エンジンは値の受理のみを行う（配線強制は計画外）。ADR-0027 参照。
       const filePath = writeWorkflowFile(
         "revise-choice-without-target",
         `
@@ -691,9 +695,9 @@ describe("ストア", () => {
         `,
       );
 
-      await expect(importWorkflowDefFromPath(filePath)).rejects.toThrow(
-        /Invalid humanGate.reviseTargetStep in step "gate".*required because outcomeQuestion "decision" offers a "revise" choice/,
-      );
+      const def = await importWorkflowDefFromPath(filePath);
+      expect(def.id).toBe("revise-choice-without-target");
+      expect(def.steps).toHaveLength(1);
     });
 
     it("taskフィールド欠落のtaskステップを拒否する", async () => {
@@ -1634,9 +1638,12 @@ describe("ストア", () => {
         expect(() => resolveNextExecutableStep(db, sessionId, -1)).toThrow(
           /Cycle detected in steps\.parent_step_id chain/,
         );
-        expect(() => rewindSteps(db, sessionId, 0)).toThrow(
-          /Cycle detected in steps\.parent_step_id chain/,
-        );
+        // ADR-0027: rewindSteps は範囲指定必須の loop continue 専用となり parent鎖に依存しない設計のため循環検出は行わない。
+        // stepIndex 範囲指定の純粋な範囲更新であり、parent_step_id 鎖の循環（破損DB）は
+        // getLoopContext/getLoopBodyRange/resolveNextExecutableStep 側で検出する。
+        // 旧 must-throw 期待からの反転は意図的（削除判断のトレーサビリティ確保のための明示）。
+        // 範囲指定（from/to 両端含む）で呼び出せることを確認する。
+        expect(() => rewindSteps(db, sessionId, 0, 1)).not.toThrow();
       } finally {
         db.$client.close();
       }

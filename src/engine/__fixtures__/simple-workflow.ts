@@ -37,21 +37,10 @@ const def: WorkflowDef = {
             type: "choice_with_input",
             choices: [
               { value: "approve", label: "承認", desc: "次に進む" },
-              {
-                value: "revise",
-                label: "修正",
-                desc: "前のステップをやり直す",
-                input: {
-                  required: true,
-                  placeholder: "修正理由を入力してください",
-                  maxLength: 500,
-                },
-              },
               { value: "abort", label: "中断" },
             ],
           },
         ],
-        reviseTargetStep: "step1_task",
       },
       check: (_ctx) => ({ status: "pass", reasons: [] }),
     },

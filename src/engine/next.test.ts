@@ -163,7 +163,7 @@ describe("next", () => {
     db.close();
   });
 
-  it("human_gateのreviseで再実行されたステップでは pass 試行をリトライフィードバックに含めない", async () => {
+  it("human_gate承認後は前ステップへ戻らず次へ進む", async () => {
     setupSimpleWorkflow();
     const { sessionId } = await init("test-simple", { title: "test-title" });
 
@@ -175,16 +175,14 @@ describe("next", () => {
       subagentOutput: "success task done",
     });
 
-    // step2_human_gate で revise を選択 → step1_task に巻き戻る
+    // step2_human_gate で承認 → 後続ステップへ進む（巻き戻しは行わない）
     await next(sessionId);
-    await confirm(sessionId, mockConfirmDeps("revise"));
+    await confirm(sessionId, mockConfirmDeps("approve"));
 
-    // step1_task が再実行される。過去の pass 試行は「前回の試行」に混入させない
+    // 次は後続の step3_parallel で、前ステップは passed のまま
     const result = await next(sessionId);
-    expect(result.stepKey).toBe("step1_task");
-    expect(result.context.attemptNumber).toBe(2);
-    expect(result.prompt).not.toContain("## 前回の試行フィードバック");
-    expect(result.prompt).not.toContain("（pass）");
+    expect(result.stepKey).toBe("step3_parallel");
+    expect(result.context.attemptNumber).toBe(1);
   });
 
   it("human_gateのプロンプトを返す", async () => {
@@ -206,7 +204,6 @@ describe("next", () => {
     expect(result.action).toBe("human_gate");
     expect(result.constraints.reportAfterCompletion).toBe(false);
     expect(result.prompt).toContain("approve");
-    expect(result.prompt).toContain("revise");
     expect(result.prompt).toContain("abort");
     expect(result.prompt).toContain(`tado confirm --session ${sessionId}`);
     expect(result.prompt).toContain("設問一覧");
@@ -1005,12 +1002,11 @@ describe("next", () => {
                     type: 'choice_with_input',
                     choices: [
                       { value: 'approve', label: 'OK' },
-                      { value: 'revise', label: 'Revise', input: { required: true, placeholder: '理由', maxLength: 500 } },
+                      { value: 'request_changes', label: 'Revise', input: { required: true, placeholder: '理由', maxLength: 500 } },
                       { value: 'abort', label: 'Abort' },
                     ],
                   },
                 ],
-                reviseTargetStep: 'prepare',
               },
               check: (ctx) => ({ status: 'pass', reasons: [] }),
             },
@@ -1455,7 +1451,7 @@ describe("next", () => {
       }
     });
 
-    it("reviseの巻き戻し後もbuildPromptから最新のゲート回答を参照できる", async () => {
+    it("confirm後の後続ステップでもbuildPromptから最新のゲート回答を参照できる", async () => {
       const rewind_answers_test_workflow_content = `
         const def = {
           id: 'rewind-answers-test',
@@ -1482,7 +1478,6 @@ describe("next", () => {
               humanGate: {
                 presentArtifacts: [],
                 outcomeQuestionKey: 'decision',
-                reviseTargetStep: 'execute',
                 questions: [
                   {
                     key: 'decision',
@@ -1490,10 +1485,23 @@ describe("next", () => {
                     type: 'choice_with_input',
                     choices: [
                       { value: 'approve', label: 'OK' },
-                      { value: 'revise', label: 'Revise', input: { required: true, placeholder: '理由', maxLength: 500 } },
+                      { value: 'request_changes', label: 'Revise', input: { required: true, placeholder: '理由', maxLength: 500 } },
                     ],
                   },
                 ],
+              },
+              check: (ctx) => ({ status: 'pass', reasons: [] }),
+            },
+            {
+              key: 'followup',
+              phase: 'followup',
+              type: 'task',
+              maxRetries: 0,
+              onFail: { action: 'abort' },
+              task: {
+                action: 'run_subagent',
+                subagentType: 'test',
+                buildPrompt: (ctx) => 'session=' + ctx.sessionId + ' answers=' + JSON.stringify(ctx.gateAnswers),
               },
               check: (ctx) => ({ status: 'pass', reasons: [] }),
             },
@@ -1513,12 +1521,15 @@ describe("next", () => {
       const gate = await next(sessionId);
       expect(gate.stepKey).toBe("review_gate");
 
-      await confirm(sessionId, mockConfirmDeps("revise"));
+      await confirm(
+        sessionId,
+        mockConfirmDeps({ decision: { value: "request_changes", input: "要修正" } }),
+      );
 
-      // 巻き戻し中（ゲートは pending）でも revise の最新回答が参照できる
-      const rewound = await next(sessionId);
-      expect(rewound.stepKey).toBe("execute");
-      expect(rewound.prompt).toContain('"decision":{"value":"revise","input":"要修正"}');
+      // confirm は巻き戻さず後続へ進み、後続の buildPrompt から最新回答を参照できる
+      const followed = await next(sessionId);
+      expect(followed.stepKey).toBe("followup");
+      expect(followed.prompt).toContain('"decision":{"value":"request_changes","input":"要修正"}');
     });
   });
 });

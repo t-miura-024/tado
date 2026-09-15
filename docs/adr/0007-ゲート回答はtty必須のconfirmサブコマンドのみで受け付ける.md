@@ -10,7 +10,9 @@ human_gate の回答を report 経由（LLM が人間の回答を転記）で受
 
 ## Decision
 
-人間が自分の端末（TTY 付き）で実行する `tado confirm` を唯一のゲート回答経路にする。confirm は stdin が TTY であることを要求し、選択受付と状態遷移（approve / revise / abort）まで行う。report は human_gate ステップを受理せずエラーとする。承認の成立と、非 TTY からの拒否された試行の両方を監査記録する。
+人間が自分の端末（TTY 付き）で実行する `tado confirm` を唯一のゲート回答経路にする。confirm は stdin が TTY であることを要求し、選択受付と状態遷移まで行う。report は human_gate ステップを受理せずエラーとする。承認の成立と、非 TTY からの拒否された試行の両方を監査記録する。
+
+> **補完（ADR-0027）:** 本 ADR 策定時の状態遷移（approve / revise / abort）のうち差し戻し（revise）は ADR-0027 で撤去された。confirm は確認と回答保存のみを責務とし、値が `abort` のときだけ中断、それ以外は承認として通過する。巻き戻しは loop 本体 check の判定 `continue` に基づく遷移 `repeat` に一元化された。
 
 ## Consequences
 

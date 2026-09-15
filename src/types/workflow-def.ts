@@ -57,7 +57,7 @@ export interface TaskStepDef extends ExecutableStepDefBase {
   task: TaskConfig;
 }
 
-/** ヒューマンゲートステップの定義。人間による承認・選択を待つ。 */
+/** ヒューマンゲートステップの定義。人間による確認と回答保存を待つ。 */
 export interface HumanGateStepDef extends ExecutableStepDefBase {
   type: "human_gate";
   humanGate: HumanGateConfig;
@@ -97,12 +97,10 @@ export interface TaskConfig {
   buildPrompt: (ctx: PromptCtx) => string;
 }
 
-/** ヒューマンゲートの定義。人間による承認・選択を待つ。 */
+/** ヒューマンゲートの定義。確認と回答保存のみを責務とし、分岐判断は行わない。 */
 export interface HumanGateConfig {
   presentArtifacts: string[];
   outcomeQuestionKey: string;
-  /** 差し戻し（revise）時に再実行するステップの key。revise の選択には必須。 */
-  reviseTargetStep?: string;
   questions: GateQuestion[];
 }
 

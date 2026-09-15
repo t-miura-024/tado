@@ -17,6 +17,7 @@ import { mockConfirmDeps } from "./__fixtures__/confirm-helper.ts";
 const TEST_TADO_HOME = path.join(__dirname, "__test_sessions_report__");
 process.env.TADO_HOME = TEST_TADO_HOME;
 const FIXTURE_WORKFLOW = path.join(__dirname, "__fixtures__", "simple-workflow.ts");
+const LOOP_GATE_FIXTURE = path.join(__dirname, "__fixtures__", "loop-gate-rework.ts");
 
 function cleanup(tadoHome: string): void {
   if (fs.existsSync(tadoHome)) {
@@ -32,6 +33,12 @@ function setupSimpleWorkflow(): void {
   const dir = path.join(getWorkflowsDir(), "test-simple");
   fs.mkdirSync(dir, { recursive: true });
   fs.copyFileSync(FIXTURE_WORKFLOW, path.join(dir, "index.ts"));
+}
+
+function setupLoopGateWorkflow(): void {
+  const dir = path.join(getWorkflowsDir(), "test-loop-gate-rework");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.copyFileSync(LOOP_GATE_FIXTURE, path.join(dir, "index.ts"));
 }
 
 function setupWorkflowFromContent(id: string, content: string): void {
@@ -142,7 +149,7 @@ describe("レポート", () => {
     db.close();
   });
 
-  it("human_gateのreviseをconfirmで処理する", async () => {
+  it("human_gateのapprove回答は回答データとして保存して通常進行する", async () => {
     setupSimpleWorkflow();
     const { sessionId } = await init("test-simple", { title: "test-title" });
 
@@ -154,10 +161,15 @@ describe("レポート", () => {
     });
 
     await next(sessionId);
-    const result = await confirm(sessionId, mockConfirmDeps("revise"));
+    const result = await confirm(sessionId, mockConfirmDeps("approve"));
 
-    expect(result.nextAction).toBe("revise");
-    expect(result.targetStep).toBe("step1_task");
+    // human_gate は確認と回答保存のみを責務とし、巻き戻しは行わない
+    // （request_changes 経路の巻き戻しは loop-gate-rework の e2e がカバーする）。
+    expect(result.nextAction).toBe("continue");
+    expect(result).not.toHaveProperty("targetStep");
+
+    const r = await next(sessionId);
+    expect(r.stepKey).toBe("step3_parallel");
   });
 
   it("human_gateのabortをconfirmで処理する", async () => {
@@ -723,220 +735,6 @@ describe("レポート", () => {
     });
   });
 
-  describe("reviseによる後続ステップのリセット", () => {
-    it("revise時に対象ステップと後続すべてをpendingにリセットする", async () => {
-      const revise_reset_test_workflow_content = `
-        const def = {
-          id: 'revise-reset-test',
-          steps: [
-            {
-              key: 'grill',
-              phase: 'Grill',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'abort' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'grill prompt',
-              },
-              check: (ctx) => ({ status: 'pass', reasons: [] }),
-            },
-            {
-              key: 'prepare',
-              phase: 'Prepare',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'abort' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'prepare prompt',
-              },
-              check: (ctx) => ({ status: 'pass', reasons: [] }),
-            },
-            {
-              key: 'refined_gate',
-              phase: 'Gate',
-              type: 'human_gate',
-              maxRetries: 1,
-              onFail: { action: 'escalate' },
-              humanGate: {
-                presentArtifacts: [],
-                outcomeQuestionKey: 'decision',
-                questions: [
-                  {
-                    key: 'decision',
-                    title: '判定',
-                    type: 'choice_with_input',
-                    choices: [
-                      { value: 'approve', label: 'OK' },
-                      { value: 'revise', label: 'Revise', input: { required: true, placeholder: '理由', maxLength: 500 } },
-                      { value: 'abort', label: 'Abort' },
-                    ],
-                  },
-                ],
-                reviseTargetStep: 'grill',
-              },
-              check: (ctx) => ({ status: 'pass', reasons: [] }),
-            },
-            {
-              key: 'finalize',
-              phase: 'Finalize',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'abort' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'finalize prompt',
-              },
-              check: (ctx) => ({ status: 'pass', reasons: [] }),
-            },
-          ],
-        };
-        export default def;
-            `;
-      setupWorkflowFromContent("revise-reset-test", revise_reset_test_workflow_content);
-
-      const { sessionId } = await init("revise-reset-test", { title: "test-title" });
-
-      // Execute grill → prepare → gate
-      await next(sessionId);
-      await report(sessionId, { stepKey: "grill", status: "completed", subagentOutput: "done" });
-
-      await next(sessionId);
-      await report(sessionId, { stepKey: "prepare", status: "completed", subagentOutput: "done" });
-
-      await next(sessionId);
-      const gateResult = await confirm(sessionId, mockConfirmDeps("revise"));
-
-      expect(gateResult.nextAction).toBe("revise");
-      expect(gateResult.targetStep).toBe("grill");
-
-      // Verify all steps from grill onwards are reset to pending
-      const db = new Database(getWorkflowDbPath());
-      const steps = db
-        .query(
-          "SELECT step_key, status, retry_count FROM steps WHERE session_id = ? ORDER BY step_index",
-        )
-        .all(sessionId) as Record<string, unknown>[];
-
-      expect(steps[0].step_key).toBe("grill");
-      expect(steps[0].status).toBe("pending");
-      expect(steps[0].retry_count).toBe(0);
-
-      expect(steps[1].step_key).toBe("prepare");
-      expect(steps[1].status).toBe("pending");
-      expect(steps[1].retry_count).toBe(0);
-
-      expect(steps[2].step_key).toBe("refined_gate");
-      expect(steps[2].status).toBe("pending");
-      expect(steps[2].retry_count).toBe(0);
-
-      expect(steps[3].step_key).toBe("finalize");
-      expect(steps[3].status).toBe("pending");
-      expect(steps[3].retry_count).toBe(0);
-      db.close();
-
-      // Verify we can re-execute from grill
-      const r = await next(sessionId);
-      expect(r.stepKey).toBe("grill");
-    });
-
-    it("revise後の完全な再実行を許可する", async () => {
-      const revise_full_test_workflow_content = `
-        const def = {
-          id: 'revise-full-test',
-          steps: [
-            {
-              key: 'work',
-              phase: 'Work',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'abort' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'work',
-              },
-              check: (ctx) => ({ status: 'pass', reasons: [] }),
-            },
-            {
-              key: 'gate',
-              phase: 'Gate',
-              type: 'human_gate',
-              maxRetries: 1,
-              onFail: { action: 'escalate' },
-              humanGate: {
-                presentArtifacts: [],
-                outcomeQuestionKey: 'decision',
-                questions: [
-                  {
-                    key: 'decision',
-                    title: '判定',
-                    type: 'choice_with_input',
-                    choices: [
-                      { value: 'approve', label: 'OK' },
-                      { value: 'revise', label: 'Revise', input: { required: true, placeholder: '理由', maxLength: 500 } },
-                    ],
-                  },
-                ],
-                reviseTargetStep: 'work',
-              },
-              check: (ctx) => ({ status: 'pass', reasons: [] }),
-            },
-            {
-              key: 'done_step',
-              phase: 'Done',
-              type: 'task',
-              maxRetries: 0,
-              onFail: { action: 'abort' },
-              task: {
-                action: 'run_subagent',
-                subagentType: 'test',
-                buildPrompt: (ctx) => 'done',
-              },
-              check: (ctx) => ({ status: 'pass', reasons: [] }),
-            },
-          ],
-        };
-        export default def;
-            `;
-      setupWorkflowFromContent("revise-full-test", revise_full_test_workflow_content);
-
-      const { sessionId } = await init("revise-full-test", { title: "test-title" });
-
-      // First pass: work → gate (revise)
-      await next(sessionId);
-      await report(sessionId, { stepKey: "work", status: "completed", subagentOutput: "done" });
-      await next(sessionId);
-      await confirm(sessionId, mockConfirmDeps("revise"));
-
-      // Second pass: work → gate (approve) → done_step
-      await next(sessionId);
-      await report(sessionId, {
-        stepKey: "work",
-        status: "completed",
-        subagentOutput: "done again",
-      });
-      await next(sessionId);
-      await confirm(sessionId, mockConfirmDeps("approve"));
-
-      const r = await next(sessionId);
-      expect(r.stepKey).toBe("done_step");
-
-      await report(sessionId, {
-        stepKey: "done_step",
-        status: "completed",
-        subagentOutput: "finished",
-      });
-
-      const s = status(sessionId);
-      expect(s.sessionStatus).toBe("done");
-    });
-  });
-
   describe("ループ（type: loop）", () => {
     it("continueで本体先頭へ巻き戻り、次イテレーションのpassで脱出する", async () => {
       const loop_rewind_workflow_content = `
@@ -1078,6 +876,142 @@ describe("レポート", () => {
       await report(sessionId, { stepKey: "followup", status: "completed", subagentOutput: "done" });
       const s3 = status(sessionId);
       expect(s3.sessionStatus).toBe("done");
+    });
+
+    it("loop本体内gateのrequest_changes→repeat巻き戻り→approveでpass進行する", async () => {
+      // 置換経路のe2e証拠: loop 本体内 human_gate＋gateAnswersを読むcheck が
+      // request_changes 時に判定 continue→遷移 repeat で本体先頭へ巻き戻り、
+      // 再実行後の approve で pass 進行する。simple-workflow（loop外素ゲート）は触らない。
+      setupLoopGateWorkflow();
+      const { sessionId } = await init("test-loop-gate-rework", { title: "test-title" });
+
+      // 1周目: draft → review_gate（request_changes）→ judge が continue
+      await next(sessionId);
+      await report(sessionId, {
+        stepKey: "draft",
+        status: "completed",
+        subagentOutput: "draft v1",
+      });
+
+      await next(sessionId);
+      const gateResult = await confirm(sessionId, mockConfirmDeps("request_changes"));
+      // confirm 自体は巻き戻さず通常進行（回答は記録される）
+      expect(gateResult.nextAction).toBe("continue");
+      expect(gateResult).not.toHaveProperty("targetStep");
+
+      await next(sessionId);
+      const repeatResult = await report(sessionId, {
+        stepKey: "judge",
+        status: "completed",
+        subagentOutput: "judged v1",
+      });
+
+      expect(repeatResult.checkResult.status).toBe("continue");
+      expect(repeatResult.nextAction).toBe("repeat");
+      expect(repeatResult.message).toContain("iteration 2/3");
+
+      // 本体全体が pending + retryCount=0 に巻き戻り、currentStep は本体先頭になる
+      const s1 = status(sessionId);
+      expect(s1.currentStep).toBe("draft");
+      const byKey1 = new Map(s1.steps.map((step) => [step.key, step]));
+      expect(byKey1.get("draft")?.status).toBe("pending");
+      expect(byKey1.get("draft")?.retryCount).toBe(0);
+      expect(byKey1.get("review_gate")?.status).toBe("pending");
+      expect(byKey1.get("judge")?.status).toBe("pending");
+      expect(byKey1.get("fix_loop")?.status).toBe("pending");
+      expect(byKey1.get("followup")?.status).toBe("pending");
+
+      const db = new Database(getWorkflowDbPath());
+      const loopRow = db
+        .query(
+          "SELECT loop_iteration, max_iterations FROM steps WHERE session_id = ? AND step_key = ?",
+        )
+        .get(sessionId, "fix_loop") as Record<string, unknown>;
+      expect(loopRow.loop_iteration).toBe(2);
+      expect(loopRow.max_iterations).toBe(3);
+
+      const judgeAttempt = db
+        .query(
+          "SELECT check_status FROM step_attempts WHERE step_id = (SELECT id FROM steps WHERE session_id = ? AND step_key = ?) ORDER BY attempt_number DESC LIMIT 1",
+        )
+        .get(sessionId, "judge") as Record<string, unknown>;
+      expect(judgeAttempt.check_status).toBe("continue");
+
+      const gateAttempt = db
+        .query(
+          "SELECT result_json FROM step_attempts WHERE step_id = (SELECT id FROM steps WHERE session_id = ? AND step_key = ?) ORDER BY attempt_number DESC LIMIT 1",
+        )
+        .get(sessionId, "review_gate") as Record<string, unknown>;
+      expect(gateAttempt.result_json as string).toContain("request_changes");
+      db.close();
+
+      // 2周目: draft → review_gate（approve）→ judge が pass → loop 脱出
+      const rerun = await next(sessionId);
+      expect(rerun.stepKey).toBe("draft");
+      await report(sessionId, {
+        stepKey: "draft",
+        status: "completed",
+        subagentOutput: "draft v2",
+      });
+
+      await next(sessionId);
+      await confirm(sessionId, mockConfirmDeps("approve"));
+
+      await next(sessionId);
+      const passResult = await report(sessionId, {
+        stepKey: "judge",
+        status: "completed",
+        subagentOutput: "judged v2",
+      });
+      expect(passResult.checkResult.status).toBe("pass");
+      expect(passResult.nextAction).toBe("continue");
+      expect(passResult.message).toContain("followup");
+
+      const s2 = status(sessionId);
+      expect(s2.steps.find((step) => step.key === "fix_loop")?.status).toBe("passed");
+
+      const lastGate = await next(sessionId);
+      expect(lastGate.stepKey).toBe("followup");
+      await report(sessionId, {
+        stepKey: "followup",
+        status: "completed",
+        subagentOutput: "done",
+      });
+      const s3 = status(sessionId);
+      expect(s3.sessionStatus).toBe("done");
+    });
+
+    it("loop本体内gateの未知値はfailで止まる（passフォールバックしない）", async () => {
+      setupLoopGateWorkflow();
+      const { sessionId } = await init("test-loop-gate-rework", { title: "test-title" });
+
+      await next(sessionId);
+      await report(sessionId, {
+        stepKey: "draft",
+        status: "completed",
+        subagentOutput: "draft v1",
+      });
+
+      await next(sessionId);
+      await confirm(sessionId, mockConfirmDeps("approve"));
+
+      // confirm の選択肢検証を迂回して未知値を注入する（typo・未知語彙の再現）
+      const raw = new Database(getWorkflowDbPath());
+      raw.run(
+        "UPDATE step_attempts SET result_json = ? WHERE step_id = (SELECT id FROM steps WHERE session_id = ? AND step_key = ?)",
+        [JSON.stringify({ decision: { value: "rework" } }), sessionId, "review_gate"],
+      );
+      raw.close();
+
+      await next(sessionId);
+      const failed = await report(sessionId, {
+        stepKey: "judge",
+        status: "completed",
+        subagentOutput: "judged v1",
+      });
+
+      expect(failed.checkResult.status).toBe("fail");
+      expect(failed.nextAction).toBe("abort");
     });
 
     it("ループ本体のfailはmaxRetries内でリトライされる", async () => {
