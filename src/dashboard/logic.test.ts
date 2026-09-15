@@ -881,13 +881,12 @@ describe("dashboard logic", () => {
           humanGate: {
             presentArtifacts: ["plan"],
             outcomeQuestionKey: "decision",
-            reviseTargetStep: "plan",
             questions: [
               {
                 key: "decision",
                 title: "判定",
                 type: "single_choice",
-                choices: [{ value: "revise", label: "差し戻し" }],
+                choices: [{ value: "approve", label: "承認" }],
               },
             ],
           },
@@ -898,7 +897,7 @@ describe("dashboard logic", () => {
       expect(step).toMatchObject({ type: "human_gate", parentKey: null, maxRetries: 0 });
       if (step.type !== "human_gate") throw new Error("human_gate へ narrow できない");
       expect(step.humanGate.questions[0]?.type).toBe("single_choice");
-      expect(step.humanGate.reviseTargetStep).toBe("plan");
+      expect(step.humanGate.outcomeQuestionKey).toBe("decision");
     });
 
     it("parallel は subtasks を写し buildPrompt を落とす", () => {

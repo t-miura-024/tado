@@ -5,11 +5,11 @@
 ## Language
 
 **ヒューマンゲート（human_gate）**:
-ワークフロー中、人間だけが下せる判断を差し挟むステップ型。エンジンは人間の関与なしには通過できないことを保証する。
+ワークフロー中、人間だけが下せる判断を差し挟むステップ型。確認と回答保存のみを責務とし、分岐判断・巻き戻しは行わない。エンジンは人間の関与なしには通過できないことを保証する。
 _Avoid_: 承認ステップ, approval step, チェックポイント
 
 **ゲート回答**:
-ヒューマンゲートにおける人間の選択。設問（`GateQuestion`）ごとの回答を `Record<questionKey, GateAnswer>` として持ち、confirm を通じてのみエンジンに記録され、LLM が代答することはない。全フック ctx（condition / check / buildPrompt / beforeStep / afterStep）の `gateAnswers[stepKey][questionKey]` から、ゲートごとの最新試行の回答（approve / revise を問わず）を参照できる。
+ヒューマンゲートにおける人間の選択。設問（`GateQuestion`）ごとの回答を `Record<questionKey, GateAnswer>` として持ち、confirm を通じてのみエンジンに記録され、LLM が代答することはない。全フック ctx（condition / check / buildPrompt / beforeStep / afterStep）の `gateAnswers[stepKey][questionKey]` から、ゲートごとの最新試行の回答を参照できる。分岐判断は loop 本体の check がこの回答を読んで行う。
 _Avoid_: subagentOutput（ゲート文脈での転記値）, ユーザー入力
 
 **confirm（承認サブコマンド）**:
@@ -21,11 +21,11 @@ _Avoid_: approve コマンド, 承認 API
 _Avoid_: スキップ（単独で使う）
 
 **巻き戻し（rewind）**:
-対象範囲のステップを pending + retryCount=0 に戻す機構。loop の `continue` と human_gate の revise が共有し、goto は廃止された。
+対象範囲のステップを pending + retryCount=0 に戻す機構。loop 本体 check の `continue` 判定に基づく `repeat` 遷移のみで行い、goto は廃止済み、human_gate の revise は廃止された。
 _Avoid_: リセット（汎用）, 再実行（単独）
 
 **ループ（loop）**:
-`type: "loop"` のステップ。`body: StepDef[]` の本体を持ち、本体の check が `continue` を返すたびに本体先頭へ巻き戻して再実行する。`maxIterations` に達すると `onExhausted`（escalate / abort）が適用される。
+`type: "loop"` のステップ。`body: StepDef[]` の本体を持ち、本体の check が `gateAnswers` を読んだ分岐判断に基づき `continue` を返すたびに本体先頭へ巻き戻して再実行する。`maxIterations` に達すると `onExhausted`（escalate / abort）が適用される。
 _Avoid_: goto ループ, サイクル, リトライ
 
 **continue（継続ステータス）**:

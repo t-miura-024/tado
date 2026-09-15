@@ -1063,11 +1063,6 @@ export default function App() {
                         <div className="font-mono">
                           outcomeKey: {detailStepDef.humanGate.outcomeQuestionKey}
                         </div>
-                        {detailStepDef.humanGate.reviseTargetStep && (
-                          <div className="font-mono">
-                            reviseTarget: {detailStepDef.humanGate.reviseTargetStep}
-                          </div>
-                        )}
                         <div className="font-mono">
                           questions: {detailStepDef.humanGate.questions.length}
                         </div>

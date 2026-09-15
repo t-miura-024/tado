@@ -4,14 +4,12 @@ import { and, desc, eq, sql } from "drizzle-orm";
 import { gateEvents, sessions, stepAttempts, steps } from "./schema.ts";
 import {
   flattenStepDefs,
-  findLoopResumeStep,
   getArtifacts,
   importWorkflowDef,
   importWorkflowDefFromPath,
   isPathLike,
   openSessionDb,
   resolveNextExecutableStep,
-  rewindSteps,
   EngineError,
 } from "./store.ts";
 import type { StepRow, TadoDb } from "./store.ts";
@@ -264,6 +262,14 @@ function validateAnswers(hg: HumanGateConfig, answers: Record<string, GateAnswer
 /**
  * human_gate の回答を人間から直接受け付け、状態遷移まで行う。
  *
+ * human_gate は確認と回答保存のみを責務とし、巻き戻しは行わない。
+ * 分岐判断は loop 本体の check が `gateAnswers` を読んで行い、巻き戻しが
+ * 必要な場合は check が判定 `continue` を返して遷移 `repeat` を引き起こす。
+ *
+ * "abort" 回答のみ例外的に confirm がセッション中断の合図として扱う
+ * （回答値ではなく中断信号）。巻き戻し (repeat) は loop/check 側の責務であり
+ * confirm は行わない。
+ *
  * stdin が TTY でない場合は遷移させず rejected イベントを記録して拒否する。
  * エージェントの Bash ツールには TTY がないため、ゲート回答は構造的に
  * エージェント経由では成立しない（ADR-0007）。
@@ -359,23 +365,22 @@ export async function confirm(
     const outcomeValue = typeof outcomeAns === "string" ? outcomeAns : outcomeAns.value;
     const answersJson = JSON.stringify(answers);
 
-    // 差し戻しは reviseTargetStep を必須とする（onFail.target フォールバックは
-    // goto 撤去に伴い削除。ADR-0026）。ゲートイベントを記録する前に拒否する。
-    if (outcomeValue === "revise" && !hg.reviseTargetStep) {
-      throw new EngineError(
-        `Cannot revise: humanGate.reviseTargetStep is required to handle the revise outcome for step "${stepRow.stepKey}" in session ${sessionId}`,
+    // human_gate は確認＋回答保存専任であり (ADR-0027)、回答値の意味を解釈して
+    // 分岐・巻き戻ししない。abort のみセッション中断の合図として扱う。
+    // 将来の回答値追加で枝が増えないよう abort を先に確定し、それ以外は
+    // 確認＋保存としての pass に一箇所で畳む。
+    const isAbort = outcomeValue === "abort";
+    const checkStatus = isAbort ? "fail" : "pass";
+    const checkReasons = isAbort
+      ? ["User requested abort"]
+      : outcomeValue === "approve"
+        ? ["User approved"]
+        : [`User selected: ${outcomeValue}`];
+    if (!isAbort && outcomeValue !== "approve") {
+      console.warn(
+        `[tado] Non-approve gate answer "${outcomeValue}" recorded as pass: 修正系の回答値はエンジンでは巻き戻さない。巻き戻しが必要な場合は human_gate を loop 本体内に配置し本体 check で gateAnswers を読んで continue→repeat させること`,
       );
     }
-
-    const checkStatus = outcomeValue === "abort" || outcomeValue === "revise" ? "fail" : "pass";
-    const checkReasons =
-      outcomeValue === "approve"
-        ? ["User approved"]
-        : outcomeValue === "revise"
-          ? ["User requested revision"]
-          : outcomeValue === "abort"
-            ? ["User requested abort"]
-            : [`User selected: ${outcomeValue}`];
     try {
       db.$client.exec("BEGIN IMMEDIATE");
       recordGateEvent(
@@ -413,51 +418,6 @@ export async function confirm(
       }
 
       db.update(steps).set({ status: "passed" }).where(eq(steps.id, stepRow.id)).run();
-
-      if (outcomeValue === "revise") {
-        const targetStep = hg.reviseTargetStep!;
-        const targetStepRow = db
-          .select({ id: steps.id, stepIndex: steps.stepIndex, type: steps.type })
-          .from(steps)
-          .where(and(eq(steps.sessionId, sessionId), eq(steps.stepKey, targetStep)))
-          .get();
-        if (!targetStepRow) {
-          throw new EngineError(
-            `Cannot revise: target step "${targetStep}" was not found in session ${sessionId} (step "${stepRow.stepKey}")`,
-          );
-        }
-        // 差し戻し先〜ゲートまでを巻き戻す。範囲内の loop 行は loopIteration=1 に
-        // 戻り、差し戻し先が loop 本体の内部にある場合は祖先 loop 行の反復状態も
-        // 初期化される（ADR-0026）。
-        rewindSteps(db, sessionId, targetStepRow.stepIndex);
-
-        // 差し戻し先が loop 行の場合は本体先頭の実行ステップから再開する。
-        // loop 内再開位置の解決は store.findLoopResumeStep に集約されている。
-        let resumeStepKey = targetStep;
-        if (targetStepRow.type === "loop") {
-          const firstStep = findLoopResumeStep(db, sessionId, targetStepRow);
-          if (!firstStep) {
-            throw new EngineError(
-              `Cannot revise: loop "${targetStep}" has no executable step in session ${sessionId}`,
-            );
-          }
-          resumeStepKey = firstStep.stepKey;
-        }
-
-        db.update(sessions)
-          .set({ currentStep: resumeStepKey, updatedAt: sql`datetime('now')` })
-          .where(eq(sessions.id, sessionId))
-          .run();
-        db.$client.exec("COMMIT");
-        return {
-          sessionId,
-          stepKey: stepRow.stepKey,
-          answers,
-          nextAction: "revise",
-          targetStep,
-          message: `User requested revision. Rewinding to: ${targetStep}`,
-        };
-      }
 
       // このゲートの承認で本体が完了した loop 行の確定と次ステップの解決は
       // store.resolveNextExecutableStep に集約されている（loop 行は実行対象外）。

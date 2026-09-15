@@ -5,8 +5,9 @@ import type { GateAnswer } from "../../types/workflow-def.ts";
  * confirm のテスト用モック deps。answers を順に返し、枯渇すると null（キャンセル）を返す。
  * 文字列ショートハンドは outcome設問 decision への選択として解釈する。
  * - "approve"/"abort" -> { decision: { value } }
- * - "revise" -> { decision: { value: "revise", input: "要修正" } } （必須入力を満たす）
- * Record を渡した場合はそのまま返す。
+ * - "request_changes" -> { decision: { value: "request_changes", input: "要修正" } } （正系。必須入力を満たす回答データ。巻き戻しは行わない）
+ * Record を渡した場合はそのまま返す。旧値 "revise" の素通し確認は文字列ではなく Record 直渡し
+ * （例: { decision: { value: "revise", input: "要修正" } }）で行うこと。
  */
 export function mockConfirmDeps(
   ...answers: (string | Record<string, GateAnswer> | null)[]
@@ -20,7 +21,8 @@ export function mockConfirmDeps(
       if (next === undefined) return null;
       if (next === null) return null;
       if (typeof next === "string") {
-        if (next === "revise") return { decision: { value: "revise", input: "要修正" } };
+        if (next === "request_changes")
+          return { decision: { value: "request_changes", input: "要修正" } };
         if (next === "approve" || next === "abort") return { decision: { value: next } };
         // fallback: treat as single_choice string value for decision
         return { decision: next };

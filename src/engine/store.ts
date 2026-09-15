@@ -190,7 +190,7 @@ function validateOnFail(step: ExecutableStepDef, source: string): void {
     }
     if (field === "target" || field === "reset" || field === "requeueSource") {
       throw new EngineError(
-        `Invalid onFail.${field} in step "${step.key}" (${source}): onFail.goto has been removed; use type: "loop" for repetition and humanGate.reviseTargetStep for revise`,
+        `Invalid onFail.${field} in step "${step.key}" (${source}): onFail.goto has been removed; use type: "loop" for repetition`,
       );
     }
     throw new EngineError(`Unknown onFail field "${field}" in step "${step.key}" (${source})`);
@@ -265,16 +265,30 @@ function validateTask(step: Extract<StepDef, { type: "task" }>, source: string):
   }
 }
 
-/** human_gate ステップの定義を検証する。 */
-function validateHumanGate(
-  step: Extract<StepDef, { type: "human_gate" }>,
-  stepIndexByKey: Map<string, number>,
-  source: string,
-): void {
+/**
+ * human_gate ステップの定義を検証する。
+ *
+ * human_gate は確認と回答保存のみを責務とする。差し戻し機構
+ * （`reviseTargetStep`）は撤去済みのため、定義に残っていた場合は
+ * ロード時に EngineError で拒否する（無言の挙動変更を排除する）。
+ * 回答値 "revise" 自体は通常の回答データとして許容する。
+ * 分岐判断は loop 本体の check が `gateAnswers` を読んで行う。
+ */
+function validateHumanGate(step: Extract<StepDef, { type: "human_gate" }>, source: string): void {
   const hg = step.humanGate;
   if (!hg) {
     throw new EngineError(
       `Invalid humanGate in step "${step.key}" (${source}): human_gate step requires a "humanGate" object`,
+    );
+  }
+  if (typeof hg !== "object" || hg === null) {
+    throw new EngineError(
+      `Invalid humanGate in step "${step.key}" (${source}): humanGate must be an object`,
+    );
+  }
+  if (Object.hasOwn(hg, "reviseTargetStep")) {
+    throw new EngineError(
+      `Invalid humanGate.reviseTargetStep in step "${step.key}" (${source}): human_gate revise has been removed. Remove reviseTargetStep; to rewind instead, place the human_gate inside a loop body and have the body check read gateAnswers to return continue (applied as repeat)`,
     );
   }
   if (!Array.isArray(hg.presentArtifacts)) {
@@ -344,35 +358,6 @@ function validateHumanGate(
       `outcomeQuestion "${hg.outcomeQuestionKey}" in step "${step.key}" (${source}) must be single_choice or choice_with_input`,
     );
   }
-  // revise を選べるゲートは差し戻し先が必須（confirm 実行時ではなくロード時に
-  // fail-fast しないと、人間が全設問に回答した後に回答ごと破棄される）。
-  const offersRevise =
-    (outcomeQ.type === "single_choice" || outcomeQ.type === "choice_with_input") &&
-    (outcomeQ.choices?.some((c) => c.value === "revise") ?? false);
-  if (offersRevise && hg.reviseTargetStep === undefined) {
-    throw new EngineError(
-      `Invalid humanGate.reviseTargetStep in step "${step.key}" (${source}): required because outcomeQuestion "${hg.outcomeQuestionKey}" offers a "revise" choice`,
-    );
-  }
-  if (hg.reviseTargetStep !== undefined) {
-    if (typeof hg.reviseTargetStep !== "string" || hg.reviseTargetStep === "") {
-      throw new EngineError(
-        `Invalid humanGate.reviseTargetStep in step "${step.key}" (${source}): must be a non-empty string`,
-      );
-    }
-    const reviseTargetIndex = stepIndexByKey.get(hg.reviseTargetStep);
-    if (reviseTargetIndex === undefined) {
-      throw new EngineError(
-        `Invalid humanGate.reviseTargetStep "${hg.reviseTargetStep}" in step "${step.key}" (${source}): step not found`,
-      );
-    }
-    const gateStepIndex = stepIndexByKey.get(step.key);
-    if (gateStepIndex !== undefined && reviseTargetIndex > gateStepIndex) {
-      throw new EngineError(
-        `Invalid humanGate.reviseTargetStep "${hg.reviseTargetStep}" in step "${step.key}" (${source}): target must not be after the gate step`,
-      );
-    }
-  }
 }
 
 function validateWorkflowDef(def: WorkflowDef, source: string): void {
@@ -401,7 +386,7 @@ function validateWorkflowDef(def: WorkflowDef, source: string): void {
         break;
       case "human_gate":
         validateOnFail(step, source);
-        validateHumanGate(step, stepIndexByKey, source);
+        validateHumanGate(step, source);
         break;
       case "parallel":
         validateOnFail(step, source);
@@ -531,38 +516,39 @@ export function getPreviousAttempts(db: TadoDb, stepId: number): AttemptSummary[
 }
 
 /**
- * 指定範囲のステップを pending + retryCount=0 に巻き戻す（ADR-0026）。
+ * 指定範囲のステップを pending + retryCount=0 に巻き戻す。
  *
- * `fromStepIndex` から `toStepIndex`（両端を含む）までの範囲を対象とする。
- * `toStepIndex` を省略した場合は `fromStepIndex` 以降の全ステップを対象とする
- * （confirm の revise 巻き戻し）。範囲内の loop 行は `loopIteration=1` に戻り、
- * ネストしたループの反復状態も初期化される。
- *
- * `toStepIndex` を省略した巻き戻しでは、差し戻し先を本体に含む祖先 loop 行の
- * 反復状態も初期化する（差し戻し先が loop 本体の内部にある場合、祖先 loop 行は
- * stepIndex 範囲の外にあり、そのままでは反復予算だけが消費された状態で残る）。
+ * 巻き戻しは loop 本体 check の判定 `continue` に基づく遷移 `repeat` でのみ
+ * 行う（`fromStepIndex` から `toStepIndex` までの両端を含む範囲指定が必須）。
+ * 範囲内の loop 行は `loopIteration=1` に戻るため、ネストした内側 loop の
+ * 反復状態も初期化される。範囲外の祖先（外側）loop 行の反復状態は変更しない。
  */
 export function rewindSteps(
   db: TadoDb,
   sessionId: string,
   fromStepIndex: number,
-  toStepIndex?: number,
+  toStepIndex: number,
 ): void {
-  const conditions = [eq(steps.sessionId, sessionId), gte(steps.stepIndex, fromStepIndex)];
-  if (toStepIndex !== undefined) {
-    conditions.push(lte(steps.stepIndex, toStepIndex));
+  if (
+    !Number.isInteger(fromStepIndex) ||
+    !Number.isInteger(toStepIndex) ||
+    fromStepIndex < 0 ||
+    toStepIndex < fromStepIndex
+  ) {
+    throw new EngineError(
+      `Invalid rewind range: from=${String(fromStepIndex)} to=${String(toStepIndex)}: expected integers with 0 <= from <= to`,
+    );
   }
   db.update(steps)
     .set({ status: "pending", retryCount: 0, loopIteration: 1 })
-    .where(and(...conditions))
+    .where(
+      and(
+        eq(steps.sessionId, sessionId),
+        gte(steps.stepIndex, fromStepIndex),
+        lte(steps.stepIndex, toStepIndex),
+      ),
+    )
     .run();
-
-  // 範囲指定時（loop の continue による巻き戻し）は祖先を初期化しない。祖先には
-  // 外側ループが含まれ、外側ループの反復状態は内側ループの巻き戻しで変更しては
-  // ならないため。
-  if (toStepIndex === undefined) {
-    resetEnclosingLoops(db, sessionId, fromStepIndex);
-  }
 }
 
 /** セッションの全ステップ行を stepIndex 順に返す。 */
@@ -645,23 +631,6 @@ function findEnclosingLoopRow(rows: StepRow[], stepKey: string): StepRow | null 
     }
   });
   return enclosing;
-}
-
-/** 指定 stepIndex のステップを包む祖先 loop 行をすべて pending + loopIteration=1 に戻す。 */
-function resetEnclosingLoops(db: TadoDb, sessionId: string, stepIndex: number): void {
-  const rows = selectStepRows(db, sessionId);
-  const start = rows.find((row) => row.stepIndex === stepIndex);
-  if (!start) {
-    return;
-  }
-  visitAncestors(rows, start, (ancestor) => {
-    if (ancestor.type === "loop") {
-      db.update(steps)
-        .set({ status: "pending", retryCount: 0, loopIteration: 1 })
-        .where(and(eq(steps.sessionId, sessionId), eq(steps.id, ancestor.id)))
-        .run();
-    }
-  });
 }
 
 /** 指定ステップを包む最も内側の loop 行を返す（`continue` の帰属先解決）。 */
@@ -960,8 +929,8 @@ function parseGateAnswers(resultJson: string, stepKey: string): Record<string, G
  * ゲートごとの最新試行の回答を収集する（ADR-0024）。
  *
  * human_gate ステップの最新試行（attempt_number 最大）に記録された回答のみを
- * 返す。approve / revise を問わず、ステップの状態や試行の checkStatus には
- * 依存しないため、revise で巻き戻されたサイクルの再実行中でも回答を参照できる。
+ * 返す。ステップの状態や試行の checkStatus には依存しないため、loop の
+ * 次イテレーション再実行中でも回答を参照できる。
  * 回答がまだ記録されていないゲートは含めない。
  */
 export function getGateAnswers(db: TadoDb, sessionId: string): GateAnswers {

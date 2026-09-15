@@ -1,7 +1,8 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { init, next, report, confirm } from "../engine/index.ts";
+import { Database } from "bun:sqlite";
+import { init, next, report, confirm, getWorkflowDbPath } from "../engine/index.ts";
 import { mockConfirmDeps } from "../engine/__fixtures__/confirm-helper.ts";
 import type { InitResult } from "../types/result.ts";
 import type { GateAnswer } from "../types/workflow-def.ts";
@@ -92,7 +93,14 @@ async function reachTwoGates(): Promise<string> {
   return sessionId;
 }
 
-/** simple-workflow のゲートを revise で再訪させ、複数試行の回答を持つセッションを返す。 */
+/** simple-workflow のゲートに複数試行の回答を持たせたセッションを返す。
+ * 合成行である旨の明示: human_gate は巻き戻しを行わないため、通常のエンジン経路では
+ * 同一ゲートに2試行は生じない。2試行目は step_attempts への生SQL INSERT による合成行で、
+ * gate_events・attemptライフサイクル（confirmトランザクション）を迂回する。
+ * カバレッジ限界: raw SQL 依存のためスキーマ変更（step_attempts/gate_events列変更）で腐る可能性があり、
+ * getGateAnswers 実経路（loop本体checkのcontinue→repeat→再confirmによる正規2試行）の退行は検出しない。
+ * 不変条件を保つ小改善として、2試行目の ended_at/check_results_json と対応する gate_events 行を同時投入する。
+ */
 async function reachGateWithHistory(): Promise<string> {
   setupWorkflow();
   const { sessionId } = await init("test-simple", { title: "test-title" });
@@ -103,15 +111,23 @@ async function reachGateWithHistory(): Promise<string> {
     subagentOutput: "success task done",
   });
   await next(sessionId);
-  await confirm(sessionId, mockConfirmDeps("revise"));
-  await next(sessionId);
-  await report(sessionId, {
-    stepKey: "step1_task",
-    status: "completed",
-    subagentOutput: "success task done again",
-  });
-  await next(sessionId);
+  // human_gate は巻き戻しを行わないため、2試行目の履歴は同一ゲートへの
+  // 2つ目のアテンプト行として直接積む合成行（answers --all の読み出し対象）。
   await confirm(sessionId, mockConfirmDeps("approve"));
+  const db = new Database(getWorkflowDbPath());
+  const step = db
+    .query("SELECT id FROM steps WHERE session_id = ? AND step_key = ?")
+    .get(sessionId, "step2_human_gate") as Record<string, unknown>;
+  const secondAnswersJson = JSON.stringify({ decision: { value: "approve" } });
+  db.run(
+    "INSERT INTO step_attempts (step_id, attempt_number, ended_at, result_json, check_results_json, check_status) VALUES (?, ?, datetime('now'), ?, ?, ?)",
+    [step.id as number, 2, secondAnswersJson, JSON.stringify(["User approved"]), "pass"],
+  );
+  db.run(
+    "INSERT INTO gate_events (session_id, step_key, attempt_number, event, answers_json, tty_name) VALUES (?, ?, ?, ?, ?, ?)",
+    [sessionId, "step2_human_gate", 2, "confirmed", secondAnswersJson, "/dev/test-tty"],
+  );
+  db.close();
   return sessionId;
 }
 
@@ -633,7 +649,7 @@ describe("CLI統合", () => {
   });
 
   it("answersでゲート回答を人間向けテキストで出力する", async () => {
-    const sessionId = await reachGate({ decision: { value: "revise", input: "要修正" } });
+    const sessionId = await reachGate({ decision: { value: "approve" } });
 
     const proc = Bun.spawn(["bun", "run", CLI_PATH, "answers", "--session", sessionId], {
       stdout: "pipe",
@@ -647,7 +663,7 @@ describe("CLI統合", () => {
     expect(proc.exitCode).toBe(0);
     expect(out).toContain(`Session: ${sessionId}`);
     expect(out).toContain("Gate: step2_human_gate");
-    expect(out).toContain("decision: revise (input: 要修正)");
+    expect(out).toContain("decision: approve");
     expect(err).toBe("");
   });
 
@@ -670,7 +686,9 @@ describe("CLI統合", () => {
     });
   });
 
-  it("answers --allで全試行の回答履歴をテキストで出力する", async () => {
+  // 合成行テスト: reachGateWithHistory の2試行目は生SQLによる合成行であり、
+  // エンジン経由の正規2試行（loop continue→repeat→再confirm）の退行は検出しない（カバレッジ限界）。
+  it("answers --allで全試行の回答履歴をテキストで出力する（合成行・カバレッジ限界あり）", async () => {
     const sessionId = await reachGateWithHistory();
 
     const proc = Bun.spawn(["bun", "run", CLI_PATH, "answers", "--session", sessionId, "--all"], {
@@ -685,7 +703,6 @@ describe("CLI統合", () => {
     expect(proc.exitCode).toBe(0);
     expect(out).toContain(`Session: ${sessionId}`);
     expect(out).toContain("Step: step2_human_gate (attempt 1)");
-    expect(out).toContain("decision: revise (input: 要修正)");
     expect(out).toContain("Step: step2_human_gate (attempt 2)");
     expect(out).toContain("decision: approve");
     expect(out.indexOf("Step: step2_human_gate (attempt 1)")).toBeLessThan(
@@ -694,7 +711,9 @@ describe("CLI統合", () => {
     expect(err).toBe("");
   });
 
-  it("answers --all --jsonで全試行の回答履歴を機械可読JSONで出力する", async () => {
+  // 合成行テスト: reachGateWithHistory の2試行目は生SQLによる合成行であり、
+  // エンジン経由の正規2試行（loop continue→repeat→再confirm）の退行は検出しない（カバレッジ限界）。
+  it("answers --all --jsonで全試行の回答履歴を機械可読JSONで出力する（合成行・カバレッジ限界あり）", async () => {
     const sessionId = await reachGateWithHistory();
 
     const proc = Bun.spawn(
@@ -715,7 +734,7 @@ describe("CLI統合", () => {
         {
           stepKey: "step2_human_gate",
           attemptNumber: 1,
-          gateAnswers: { decision: { value: "revise", input: "要修正" } },
+          gateAnswers: { decision: { value: "approve" } },
         },
         {
           stepKey: "step2_human_gate",

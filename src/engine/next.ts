@@ -47,7 +47,7 @@ function parseCheckReasons(raw: string | null): string[] {
  *
  * pass 試行（成功済み）は混入させず、直近の失敗試行（fail / error）のみを
  * 対象にする。失敗試行がなければ空文字（フィードバック節は出力しない）。
- * 例: human_gate の revise で再実行されたステップでは、過去の pass 試行が
+ * 例: loop の次イテレーションで再実行されるステップでは、過去の pass 試行が
  * 「前回の試行」としてモデルに誤解を与えないようにする（difit 指摘対応）。
  */
 function buildRetryFeedback(attempts: AttemptSummary[]): string {

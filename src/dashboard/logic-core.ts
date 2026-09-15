@@ -524,7 +524,6 @@ export interface WorkflowDetailHumanGateStep extends WorkflowDetailExecutableSte
   humanGate: {
     presentArtifacts: string[];
     outcomeQuestionKey: string;
-    reviseTargetStep?: string;
     questions: GateQuestion[];
   };
 }
@@ -588,7 +587,6 @@ export function toWorkflowDetailStep(step: StepDef, parentKey: string | null): W
         humanGate: {
           presentArtifacts: step.humanGate.presentArtifacts,
           outcomeQuestionKey: step.humanGate.outcomeQuestionKey,
-          reviseTargetStep: step.humanGate.reviseTargetStep,
           questions: step.humanGate.questions,
         },
       };

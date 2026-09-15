@@ -129,7 +129,7 @@ export async function report(
 
   // 係属ステップ以外の report は受理しない。オーケストレーターが別ステップとして
   // 報告して正規化・判定ステップを迂回するのを構造的に排除する
-  //（human_gate 排除と同型のガード。goto・リトライは currentStep 自体を書き換える
+  //（リトライ・ループ巻き戻しは currentStep 自体を書き換える
   // ため、厳密一致チェックと両立する）。
   if (input.stepKey !== session.currentStep) {
     db.$client.close();

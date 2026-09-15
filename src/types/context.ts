@@ -19,7 +19,7 @@ export interface LoopContext {
 export interface HookCtxBase {
   sessionDir: string;
   sessionId: string;
-  /** ゲートごとの最新試行の回答（approve / revise を問わず）。未回答のゲートは含まれない。 */
+  /** ゲートごとの最新試行の回答。未回答のゲートは含まれない。 */
   gateAnswers: GateAnswers;
   /** 実行中ステップが属する最も内側のループの文脈。ループ外のステップでは null。 */
   loop: LoopContext | null;

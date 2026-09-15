@@ -1,6 +1,6 @@
 # onFail goto に巻き戻し意味論を追加する
 
-> **Superseded:** 本 ADR は ADR-0026「goto を廃止し loop ステップ型を導入する」で置換された。`onFail.goto` / `target` / `reset` は撤去され、繰り返しは `type: "loop"`、差し戻しは `humanGate.reviseTargetStep` に移行した。本 ADR は当時の設計判断の記録として保持する。
+> **Superseded:** 本 ADR は ADR-0026「goto を廃止し loop ステップ型を導入する」で置換された。`onFail.goto` / `target` / `reset` は撤去され、繰り返しは `type: "loop"` に一元化された。当時「差し戻しは `humanGate.reviseTargetStep` に移行した」と記したが、当該差し戻し機構も ADR-0027「human_gate 差し戻し撤去・巻き戻し一元化」で撤去され、巻き戻しは loop 本体 check の判定 `continue` に基づく遷移 `repeat` のみとなった。本 ADR は当時の設計判断の記録として保持する。
 
 `onFail goto` は失敗元のステップのみを再キューし、分岐先から失敗元までの間のステップを巻き戻さなかった。このため「実行 → レビュー → 判定」のようなサイクルを再実行できず、ワークフローが `steps` テーブルを直接 UPDATE して巻き戻す事例が発生した。`onFail` に `reset: "downstream"` を追加し、分岐先 `target` から失敗元ステップまでのステップ（両端を含む）を pending + retryCount=0 に戻す意味論を宣言的に指定できるようにする。失敗元より後ろのステップは変更しない。既存の `confirm` の revise 巻き戻しと同一機構を共通化して実装し、`requeueSource` は `reset` に置き換えて廃止する。
 
