@@ -22,6 +22,14 @@ import {
   EngineError,
 } from "./store.ts";
 import type { SessionRow, StepRow, TadoDb } from "./store.ts";
+import {
+  appendNextSection,
+  buildHumanGateNextSection,
+  buildParallelNextSection,
+  buildTaskNextSection,
+  confirmCommand,
+  reportCommand,
+} from "./guidance.ts";
 
 /** buildPrompt 結果の末尾に付与するボイラープレート生成に必要な試行情報。 */
 interface AttemptInfo {
@@ -146,7 +154,7 @@ function buildNextResult(
         return lines.join("\n");
       })
       .join("\n\n");
-    const prompt = [
+    const basePrompt = [
       `## Human Gate: ${stepDef.phase}`,
       "",
       "### 確認する成果物",
@@ -156,18 +164,8 @@ function buildNextResult(
       `- 判定設問: \`${hg.outcomeQuestionKey}\``,
       "",
       questionsText,
-      "",
-      "### 人間の確認が必要です",
-      "このステップはあなた自身では完了できません。report でゲートに回答することもできません。",
-      "次のコマンドをユーザーに伝え、ユーザー自身の端末（TTY 付き）での実行を促してください",
-      "（コマンド全文をそのまま表示し、上記の成果物パスも案内に含めてください）:",
-      "",
-      `    tado confirm --session ${sessionId}`,
-      "",
-      "- confirm は TTY 付き端末専用で、エージェントからは実行できません",
-      "- ユーザーが実行すると、成果物と設問一覧がその端末に表示され、回答が記録されます",
-      "- 承認が済むまでワークフローは停止します。next を再実行するとこのプロンプトが再表示されます",
     ].join("\n");
+    const prompt = appendNextSection(basePrompt, buildHumanGateNextSection(sessionId));
 
     return {
       sessionId,
@@ -177,6 +175,7 @@ function buildNextResult(
       action: "human_gate",
       prompt,
       parallel: null,
+      nextCommand: confirmCommand(sessionId),
       constraints: {
         mustCallTaskTool: false,
         readonly: true,
@@ -217,8 +216,13 @@ function buildNextResult(
       stepType: "parallel",
       phase: stepDef.phase,
       action: taskStep?.action ?? "run_subagent",
-      prompt: "",
+      prompt: buildParallelNextSection(
+        currentStep.stepKey,
+        sessionId,
+        pd.subtasks.map((st) => st.key),
+      ),
       parallel: { subtasks } as ParallelNextResult,
+      nextCommand: reportCommand(sessionId),
       constraints: {
         mustCallTaskTool: true,
         readonly: false,
@@ -237,7 +241,10 @@ function buildNextResult(
 
   const taskStep = stepDef.task;
   const boilerplate = buildBoilerplate(session.sessionDir, attempt);
-  const prompt = appendBoilerplate(taskStep.buildPrompt(promptCtx), boilerplate);
+  const prompt = appendNextSection(
+    appendBoilerplate(taskStep.buildPrompt(promptCtx), boilerplate),
+    buildTaskNextSection(currentStep.stepKey, sessionId),
+  );
 
   return {
     sessionId,
@@ -248,6 +255,7 @@ function buildNextResult(
     subagentType: taskStep.subagentType,
     prompt,
     parallel: null,
+    nextCommand: reportCommand(sessionId),
     constraints: {
       mustCallTaskTool: taskStep.action === "run_subagent",
       readonly: taskStep.readonly ?? false,

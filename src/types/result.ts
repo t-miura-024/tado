@@ -62,6 +62,11 @@ export interface InitResult {
   sessionId: string;
   sessionDir: string;
   workflowId: string;
+  /**
+   * LLM が次に実行するコマンド。終端・待機では null。
+   * `init` 直後は常に `tado next --session <id>`。
+   */
+  nextCommand: string | null;
 }
 
 /** `next` コマンドの返却値。次に実行すべきステップの指示を含む。 */
@@ -74,6 +79,13 @@ export interface NextResult {
   subagentType?: string;
   prompt: string;
   parallel?: ParallelNextResult | null;
+  /**
+   * LLM が次に実行するコマンド（機械可読）。終端・待機では null。
+   * task/parallel → `tado report --session <id>`、human_gate → `tado confirm --session <id>`
+   * （human_gate は人間が実行し、LLM は実行しない）。詳細雛形は prompt 末尾の
+   * `## 次の操作` に従うこと。
+   */
+  nextCommand: string | null;
   constraints: {
     mustCallTaskTool: boolean;
     readonly: boolean;
@@ -118,6 +130,11 @@ export interface ReportResult {
    */
   nextAction: "continue" | "repeat" | "retry" | "abort" | "escalate" | "done";
   message: string;
+  /**
+   * LLM が次に実行するコマンド（機械可読）。continue/retry/repeat → `tado next`、
+   * done/abort/escalate → null。詳細は message 末尾の `## 次の操作` に従うこと。
+   */
+  nextCommand: string | null;
 }
 
 /**
@@ -135,6 +152,11 @@ export interface ConfirmResult {
   /** 次のアクション（`continue`: 通常進行、`abort`: 中断、`done`: 完了）。 */
   nextAction: "continue" | "abort" | "done";
   message: string;
+  /**
+   * LLM が次に実行するコマンド（機械可読）。continue → `tado next`、
+   * abort/done → null。詳細は message 末尾の `## 次の操作` に従うこと。
+   */
+  nextCommand: string | null;
 }
 
 /** `status` コマンドの返却値。セッションと各ステップの進捗を含む。 */

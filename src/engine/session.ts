@@ -12,6 +12,7 @@ import {
   resolveWorkflowPath,
 } from "./store.ts";
 import { artifacts, sessions, steps } from "./schema.ts";
+import { initNextCommand } from "./guidance.ts";
 
 function generateSessionId(): string {
   const now = new Date();
@@ -152,5 +153,5 @@ export async function init(
 
   db.$client.close();
 
-  return { sessionId: sid, sessionDir, workflowId: def.id };
+  return { sessionId: sid, sessionDir, workflowId: def.id, nextCommand: initNextCommand(sid) };
 }
