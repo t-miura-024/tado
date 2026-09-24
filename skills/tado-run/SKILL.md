@@ -54,6 +54,7 @@ tado next --session <id>
 ```
 
 `next` は現在のステップの**完全なプロンプト**を stdout に JSON で返す。返却された `prompt` と `action` に従ってステップを実行する。プロンプトは完全であり、LLM が手順を再構築・補完する余地はない。ワークフロー固有の指示もすべてこのプロンプトに含まれる。
+次操作は各返却の `nextCommand` と `## 次の操作` が正本であり、推測で補わないこと。`report` 前に `next` を呼ばないこと。
 
 ステップ完了後、結果を stdin の JSON で `report` に渡す:
 
@@ -61,7 +62,7 @@ tado next --session <id>
 echo '{"stepKey":"...","status":"completed","subagentOutput":"..."}' | tado report --session <id>
 ```
 
-`report` は完了検証・状態遷移・リトライ判定を行い、次の状態を返す。`next` → 実行 → `report` を、ワークフローが完了するまで繰り返す。
+`report` は完了検証・状態遷移・リトライ判定を行い、次の状態を返す。返却の `nextCommand` と `## 次の操作` に従うこと。`next` → 実行 → `report` を、ワークフローが完了するまで繰り返す。
 
 **例外（human_gate）**: 現在のステップが human_gate の場合、`report` では完了できない。ゲートプロンプトの指示に従い、ユーザー自身の端末で `tado confirm --session <id>` を実行してもらうこと（コマンド全文をそのまま提示する）。confirm は TTY 必須のためエージェントからは実行できず、人間が実行するまでワークフローは停止する。停止は正常な挙動であり、回答を捏造してはならない。
 

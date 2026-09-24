@@ -23,6 +23,12 @@ import {
   EngineError,
 } from "./store.ts";
 import type { StepRow, TadoDb } from "./store.ts";
+import {
+  appendNextSection,
+  buildProceedNextSection,
+  buildTerminalSection,
+  nextStepCommand,
+} from "./guidance.ts";
 
 /**
  * リトライ予算を使い切ったステップの失敗を処理する（onFail: abort / escalate）。
@@ -56,7 +62,11 @@ function handleStepFailure(
       stepKey: input.stepKey,
       checkResult: { status: checkStatus, reasons: checkReasons },
       nextAction: "retry",
-      message: `Check failed. Retry ${newRetryCount}/${maxRetries}`,
+      message: appendNextSection(
+        `Check failed. Retry ${newRetryCount}/${maxRetries}`,
+        buildProceedNextSection(sessionId),
+      ),
+      nextCommand: nextStepCommand(sessionId),
     };
   }
 
@@ -84,7 +94,11 @@ function handleStepFailure(
       stepKey: input.stepKey,
       checkResult: { status: checkStatus, reasons: checkReasons },
       nextAction: "abort",
-      message: "Step failed and onFail=abort. Session aborted.",
+      message: appendNextSection(
+        "Step failed and onFail=abort. Session aborted.",
+        buildTerminalSection("abort"),
+      ),
+      nextCommand: null,
     };
   }
 
@@ -99,7 +113,11 @@ function handleStepFailure(
       stepKey: input.stepKey,
       checkResult: { status: checkStatus, reasons: checkReasons },
       nextAction: "escalate",
-      message: "Step failed and onFail=escalate. Human intervention required.",
+      message: appendNextSection(
+        "Step failed and onFail=escalate. Human intervention required.",
+        buildTerminalSection("escalate"),
+      ),
+      nextCommand: null,
     };
   }
 
@@ -109,7 +127,11 @@ function handleStepFailure(
     stepKey: input.stepKey,
     checkResult: { status: checkStatus, reasons: checkReasons },
     nextAction: "abort",
-    message: `Step failed after ${maxRetries} retries. Session stopped.`,
+    message: appendNextSection(
+      `Step failed after ${maxRetries} retries. Session stopped.`,
+      buildTerminalSection("abort"),
+    ),
+    nextCommand: null,
   };
 }
 
@@ -292,7 +314,11 @@ export async function report(
         stepKey: input.stepKey,
         checkResult: { status: checkStatus, reasons: checkReasons },
         nextAction: "continue",
-        message: `Step passed. Next step: ${nextStep.stepKey}`,
+        message: appendNextSection(
+          `Step passed. Next step: ${nextStep.stepKey}`,
+          buildProceedNextSection(sessionId),
+        ),
+        nextCommand: nextStepCommand(sessionId),
       };
     } else {
       db.update(sessions)
@@ -305,7 +331,11 @@ export async function report(
         stepKey: input.stepKey,
         checkResult: { status: checkStatus, reasons: checkReasons },
         nextAction: "done",
-        message: "All steps completed. Session done.",
+        message: appendNextSection(
+          "All steps completed. Session done.",
+          buildTerminalSection("done"),
+        ),
+        nextCommand: null,
       };
     }
   }
@@ -370,7 +400,11 @@ function handleLoopContinue(
         stepKey: input.stepKey,
         checkResult: { status: checkStatus, reasons: checkReasons },
         nextAction: "escalate",
-        message: `Loop "${loopRow.stepKey}" reached maxIterations ${maxIterations}. Step "${step.stepKey}" failed. Human intervention required.`,
+        message: appendNextSection(
+          `Loop "${loopRow.stepKey}" reached maxIterations ${maxIterations}. Step "${step.stepKey}" failed. Human intervention required.`,
+          buildTerminalSection("escalate"),
+        ),
+        nextCommand: null,
       };
     }
     db.update(sessions)
@@ -382,7 +416,11 @@ function handleLoopContinue(
       stepKey: input.stepKey,
       checkResult: { status: checkStatus, reasons: checkReasons },
       nextAction: "abort",
-      message: `Loop "${loopRow.stepKey}" reached maxIterations ${maxIterations}. Session aborted.`,
+      message: appendNextSection(
+        `Loop "${loopRow.stepKey}" reached maxIterations ${maxIterations}. Session aborted.`,
+        buildTerminalSection("abort"),
+      ),
+      nextCommand: null,
     };
   }
 
@@ -420,7 +458,11 @@ function handleLoopContinue(
       stepKey: input.stepKey,
       checkResult: { status: checkStatus, reasons: checkReasons },
       nextAction: "repeat",
-      message: `Check returned continue. Loop "${loopRow.stepKey}" iteration ${nextIteration}/${maxIterations}. Rewinding to loop start: ${firstStep.stepKey}`,
+      message: appendNextSection(
+        `Check returned continue. Loop "${loopRow.stepKey}" iteration ${nextIteration}/${maxIterations}. Rewinding to loop start: ${firstStep.stepKey}`,
+        buildProceedNextSection(sessionId),
+      ),
+      nextCommand: nextStepCommand(sessionId),
     };
   } catch (error) {
     try {

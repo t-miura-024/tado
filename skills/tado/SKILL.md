@@ -36,6 +36,7 @@ tado init --workflow <id> --title "<title>" [--session <id>]
 - `sessions.cwd` に `process.cwd()` の絶対パス、`sessions.title` に指定タイトルを保存
 - フック（beforeInit/afterInit）を実行
 - セッションIDを stdout に JSON で出力
+- 返却JSONの `nextCommand` が次操作の正本。`init` 直後は `tado next --session <id>`。
 
 ### next
 
@@ -44,7 +45,8 @@ tado next --session <id>
 ```
 
 現在のステップのプロンプトを生成し、stdout に構造化 JSON で出力する。
-返却形式は Step タイプにより異なる：
+返却形式は Step タイプにより異なる。
+次操作の正本は返却JSONの `nextCommand` と prompt 末尾の `## 次の操作` であり、本書の例は概要に留まる。実行時は返却物の雛形に従うこと。
 
 **task:**
 
@@ -55,7 +57,8 @@ tado next --session <id>
   "stepType": "task",
   "action": "run_subagent",
   "subagentType": "spec-writer",
-  "prompt": "## 目的\n...",
+  "prompt": "## 目的\n...\n\n## 次の操作\n...",
+  "nextCommand": "tado report --session <id>",
   "constraints": { "mustCallTaskTool": true, "readonly": false, "reportAfterCompletion": true },
   "context": {
     "sessionDir": "...",
@@ -76,7 +79,8 @@ tado next --session <id>
   "stepKey": "approve",
   "stepType": "human_gate",
   "action": "human_gate",
-  "prompt": "## Human Gate: 仕様確認\n\n### 確認する成果物\n...\n\n### 設問一覧 (1件 判定設問: `decision`)\n- 判定設問: `decision`\n\n#### Q1/1: decision - 判定 (type: choice_with_input, 必須)\n- key: `decision`\n- title: \"判定\"\n- type: `choice_with_input`\n- choices:\n  - `approve`: 承認\n  - `request_changes`: 修正が必要 [input: required: true, placeholder: \"修正理由...\", maxLength: 500]\n  - `abort`: 中断\n\n### 人間の確認が必要です\n...",
+  "prompt": "## Human Gate: 仕様確認\n\n### 確認する成果物\n...\n\n### 設問一覧 (1件 判定設問: `decision`)\n- 判定設問: `decision`\n\n#### Q1/1: decision - 判定 (type: choice_with_input, 必須)\n- key: `decision`\n- title: \"判定\"\n- type: `choice_with_input`\n- choices:\n  - `approve`: 承認\n  - `request_changes`: 修正が必要 [input: required: true, placeholder: \"修正理由...\", maxLength: 500]\n  - `abort`: 中断\n\n## 次の操作\n...",
+  "nextCommand": "tado confirm --session <id>",
   "constraints": { "mustCallTaskTool": false, "readonly": true, "reportAfterCompletion": false }
 }
 ```
@@ -88,6 +92,8 @@ human_gate ステップは LLM 自身では完了できません。プロンプ�
 ```json
 {
   "stepType": "parallel",
+  "prompt": "## 次の操作\n...",
+  "nextCommand": "tado report --session <id>",
   "parallel": {
     "subtasks": [
       { "key": "researcher_q1", "subagentType": "...", "prompt": "...", "constraints": {} },
@@ -104,8 +110,11 @@ echo '{...}' | tado report --session <id>
 ```
 
 stdin から JSON でステップ実行結果を受け取り、完了検証を走らせて状態遷移・リトライ判定を行う。
+返却JSONの `nextCommand` と message 末尾の `## 次の操作` が次操作の正本。
 
-**入力形式:**
+入力形式の正本は直前の `next` 返却の `## 次の操作` である。以下は概要であり、実行時は返却物の雛形に従うこと。
+
+**入力形式（概要）:**
 
 ```json
 {
@@ -116,7 +125,7 @@ stdin から JSON でステップ実行結果を受け取り、完了検証を�
 }
 ```
 
-**並列実行時の入力形式:**
+**並列実行時の入力形式（概要）:**
 
 ```json
 {
@@ -145,6 +154,7 @@ tado confirm --session <id>
 ```
 
 human_gate の回答を人間から直接受け付ける対話コマンドです。1ゲートで複数設問を一括回答します。
+返却JSONの `nextCommand` と message 末尾の `## 次の操作` が次操作の正本。
 
 - stdin が TTY の場合のみ実行できるため、エージェントの Bash ツールからは構造的に実行できない
 - 現在のステップが human_gate でない場合はエラーになる

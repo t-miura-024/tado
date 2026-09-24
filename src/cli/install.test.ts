@@ -2,7 +2,13 @@ import { describe, it, expect, afterEach, beforeEach } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { cleanInstallArtifacts, copySkills, ensureBun, ensurePackageJson } from "./install.ts";
+import {
+  cleanInstallArtifacts,
+  copySkills,
+  ensureBun,
+  ensurePackageJson,
+  ensureTsconfig,
+} from "./install.ts";
 
 const TEST_DIR = path.join(os.tmpdir(), `tado-install-test-${Date.now()}`);
 const TEST_TADO_HOME = path.join(TEST_DIR, "tado-home");
@@ -161,6 +167,31 @@ describe("cleanInstallArtifacts", () => {
     expect(fs.existsSync(otherSkill)).toBe(true);
     expect(fs.existsSync(path.join(TEST_DIR, "package.json"))).toBe(true);
     expect(fs.existsSync(path.join(TEST_DIR, "node_modules"))).toBe(true);
+  });
+});
+
+describe("ensureTsconfig", () => {
+  it("tsconfig.json が存在しない場合は雛形を生成する", () => {
+    fs.mkdirSync(TEST_TADO_HOME, { recursive: true });
+
+    ensureTsconfig(TEST_TADO_HOME);
+
+    const tsconfigPath = path.join(TEST_TADO_HOME, "tsconfig.json");
+    expect(fs.existsSync(tsconfigPath)).toBe(true);
+    const parsed = JSON.parse(fs.readFileSync(tsconfigPath, "utf-8"));
+    expect(parsed.extends).toBe("tado/tsconfig.base");
+    expect(parsed.include).toEqual(["workflows/**/*.ts"]);
+    expect(parsed.exclude).toEqual(["node_modules"]);
+  });
+
+  it("tsconfig.json が既に存在する場合は不干渉", () => {
+    fs.mkdirSync(TEST_TADO_HOME, { recursive: true });
+    const tsconfigPath = path.join(TEST_TADO_HOME, "tsconfig.json");
+    fs.writeFileSync(tsconfigPath, '{"extends":"custom"}\n');
+
+    ensureTsconfig(TEST_TADO_HOME);
+
+    expect(fs.readFileSync(tsconfigPath, "utf-8")).toBe('{"extends":"custom"}\n');
   });
 });
 

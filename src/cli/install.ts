@@ -45,6 +45,25 @@ export function ensurePackageJson(dir: string): void {
   }
 }
 
+/** Scaffold tsconfig.json template for workflow type-checking. Owned by the user after creation. */
+export const TSCONFIG_TEMPLATE = `{
+  "extends": "tado/tsconfig.base",
+  "include": ["workflows/**/*.ts"],
+  "exclude": ["node_modules"]
+}
+`;
+
+/**
+ * Write the tsconfig.json scaffold if one does not already exist.
+ * Never touches an existing file: ownership belongs to the user after creation.
+ */
+export function ensureTsconfig(dir: string): void {
+  const tsconfigPath = path.join(dir, "tsconfig.json");
+  if (!fs.existsSync(tsconfigPath)) {
+    fs.writeFileSync(tsconfigPath, TSCONFIG_TEMPLATE);
+  }
+}
+
 /**
  * Install or update the tado package into TADO_HOME.
  * Creates TADO_HOME if needed, ensures package.json, cleans stale artifacts,
@@ -55,6 +74,7 @@ export async function installTadoPackage(): Promise<void> {
   fs.mkdirSync(tadoHome, { recursive: true });
   cleanInstallArtifacts(tadoHome);
   ensurePackageJson(tadoHome);
+  ensureTsconfig(tadoHome);
 
   const addProc = Bun.spawn(["bun", "add", PACKAGE_SPEC], {
     cwd: tadoHome,

@@ -14,6 +14,12 @@ import {
 } from "./store.ts";
 import type { StepRow, TadoDb } from "./store.ts";
 import type { ConfirmResult } from "../types/result.ts";
+import {
+  appendNextSection,
+  buildProceedNextSection,
+  buildTerminalSection,
+  nextStepCommand,
+} from "./guidance.ts";
 import type { GateAnswer, GateQuestion, HumanGateConfig } from "../types/workflow-def.ts";
 
 /** 人間に提示するゲート内容。 */
@@ -413,7 +419,8 @@ export async function confirm(
           stepKey: stepRow.stepKey,
           answers,
           nextAction: "abort",
-          message: "Session aborted by user.",
+          message: appendNextSection("Session aborted by user.", buildTerminalSection("abort")),
+          nextCommand: null,
         };
       }
 
@@ -434,7 +441,11 @@ export async function confirm(
           stepKey: stepRow.stepKey,
           answers,
           nextAction: "continue",
-          message: `User approved. Next step: ${nextStep.stepKey}`,
+          message: appendNextSection(
+            `User approved. Next step: ${nextStep.stepKey}`,
+            buildProceedNextSection(sessionId),
+          ),
+          nextCommand: nextStepCommand(sessionId),
         };
       }
 
@@ -448,7 +459,11 @@ export async function confirm(
         stepKey: stepRow.stepKey,
         answers,
         nextAction: "done",
-        message: "User approved. All steps completed. Session done.",
+        message: appendNextSection(
+          "User approved. All steps completed. Session done.",
+          buildTerminalSection("done"),
+        ),
+        nextCommand: null,
       };
     } catch (e) {
       try {
